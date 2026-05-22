@@ -6,7 +6,7 @@ pub use super::spin::SpinParker;
 #[cfg(feature = "std")]
 pub use super::std::StdParker;
 
-pub trait Parker {
+pub trait Parker: Send + Sync {
     const NEVER_BLOCKS: bool = false;
     const INIT: Self;
     #[doc(hidden)]

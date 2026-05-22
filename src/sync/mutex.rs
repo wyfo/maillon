@@ -10,7 +10,7 @@ pub use super::std::StdMutex;
 /// exclusive: a lock can't be acquired while the mutex is already locked.
 ///
 /// Calls to [`unlock`](Self::unlock) must *synchronize-with* calls to [`lock`](Self::lock).
-pub unsafe trait Mutex {
+pub unsafe trait Mutex: Send + Sync {
     const INIT: Self;
     #[doc(hidden)]
     fn new() -> Self
@@ -44,7 +44,7 @@ cfg_if::cfg_if! {
 }
 
 #[cfg(feature = "lock_api")]
-unsafe impl<M: lock_api::RawMutex> Mutex for M {
+unsafe impl<M: lock_api::RawMutex + Send + Sync> Mutex for M {
     const INIT: Self = <Self as lock_api::RawMutex>::INIT;
     type Guard<'a>
         = ()
