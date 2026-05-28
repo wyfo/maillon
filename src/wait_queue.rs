@@ -193,6 +193,7 @@ pub struct Wait<Q: Deref<Target = WaitQueue<SP>>, SP: SyncPrimitives = DefaultSy
 }
 
 impl<Q: Deref<Target = WaitQueue<SP>>, SP: SyncPrimitives> Wait<Q, SP> {
+    #[cold]
     fn poll_wait(self: Pin<&mut Self>, cx: &mut Context<'_>, requeue: bool) -> Poll<()> {
         let mut waiter = match unsafe { self.map_unchecked_mut(|this| &mut this.node) }.state() {
             NodeState::Unqueued(waiter) => waiter,
@@ -220,7 +221,6 @@ impl<Q: Deref<Target = WaitQueue<SP>>, SP: SyncPrimitives> Wait<Q, SP> {
 impl<Q: Deref<Target = WaitQueue<SP>>, SP: SyncPrimitives> Future for Wait<Q, SP> {
     type Output = ();
 
-    #[cold]
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         self.poll_wait(cx, false)
     }
@@ -240,7 +240,7 @@ impl<Q: Deref<Target = WaitQueue<SP>>, P: FnOnce() -> bool, SP: SyncPrimitives> 
 {
     type Output = ();
 
-    #[cold]
+    #[inline]
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = unsafe { self.get_unchecked_mut() };
         match unsafe { Pin::new_unchecked(&mut this.wait) }.poll_wait(cx, false) {
@@ -281,6 +281,7 @@ impl<Q: Deref<Target = WaitQueue<SP>>, P: FnMut() -> Option<T>, T, SP: SyncPrimi
 {
     type Output = T;
 
+    #[inline]
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = unsafe { self.get_unchecked_mut() };
         match (this.predicate)() {
