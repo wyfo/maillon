@@ -168,6 +168,13 @@ impl<Q: QueueRef> Drop for Node<Q> {
         if self.raw_state() == RawNodeState::Queued {
             self.dequeue();
         }
+        let data = unsafe { &mut (*self.node.get().cast::<NodeInner<Q::NodeData>>()).data };
+        #[cfg(not(loom))]
+        Q::drop_node(&self.queue, data);
+        #[cfg(loom)]
+        unsafe {
+            data.with_mut(|data| Q::drop_node(&self.queue, &mut *data));
+        }
     }
 }
 

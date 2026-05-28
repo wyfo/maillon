@@ -194,7 +194,7 @@ pub struct Wait<Q: Deref<Target = WaitQueue<SP>>, SP: SyncPrimitives = DefaultSy
 
 impl<Q: Deref<Target = WaitQueue<SP>>, SP: SyncPrimitives> Wait<Q, SP> {
     #[cold]
-    fn poll_wait(self: Pin<&mut Self>, cx: &mut Context<'_>, requeue: bool) -> Poll<()> {
+    fn poll_wait<const REQUEUE: bool>(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
         let mut waiter = match unsafe { self.map_unchecked_mut(|this| &mut this.node) }.state() {
             NodeState::Unqueued(waiter) => waiter,
             NodeState::Queued(mut waiter) => {
@@ -205,8 +205,12 @@ impl<Q: Deref<Target = WaitQueue<SP>>, SP: SyncPrimitives> Wait<Q, SP> {
                 });
                 return Poll::Pending;
             }
-            NodeState::Dequeued(waiter) if requeue => waiter.reset(),
-            NodeState::Dequeued(_) => return Poll::Ready(()),
+            NodeState::Dequeued(waiter) if REQUEUE => waiter.reset(),
+            NodeState::Dequeued(mut waiter) => {
+                // remove the notification, so destructor don't trigger a new notification
+                waiter.with_data_mut(|mut waiter| waiter.notification.take());
+                return Poll::Ready(());
+            }
         };
         waiter.with_data_mut(|mut waiter| {
             waiter.waker = Some(cx.waker().clone());
@@ -222,7 +226,7 @@ impl<Q: Deref<Target = WaitQueue<SP>>, SP: SyncPrimitives> Future for Wait<Q, SP
     type Output = ();
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        self.poll_wait(cx, false)
+        self.poll_wait::<false>(cx)
     }
 }
 
@@ -243,7 +247,7 @@ impl<Q: Deref<Target = WaitQueue<SP>>, P: FnOnce() -> bool, SP: SyncPrimitives> 
     #[inline]
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = unsafe { self.get_unchecked_mut() };
-        match unsafe { Pin::new_unchecked(&mut this.wait) }.poll_wait(cx, false) {
+        match unsafe { Pin::new_unchecked(&mut this.wait) }.poll_wait::<false>(cx) {
             Poll::Pending if this.predicate.take().is_some_and(|p| !p()) => Poll::Ready(()),
             poll => poll,
         }
@@ -266,7 +270,7 @@ impl<Q: Deref<Target = WaitQueue<SP>>, P: FnMut() -> Option<T>, T, SP: SyncPrimi
     #[cold]
     unsafe fn poll_cold(&mut self, cx: &mut Context<'_>) -> Poll<T> {
         let is_closed = unsafe { Pin::new_unchecked(&mut self.wait) }
-            .poll_wait(cx, true)
+            .poll_wait::<true>(cx)
             .is_ready();
         match (self.predicate)() {
             Some(res) => Poll::Ready(res),
