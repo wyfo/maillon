@@ -65,6 +65,11 @@ impl<SP: SyncPrimitives> WaitQueue<SP> {
     }
 
     #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.queue.is_empty()
+    }
+
+    #[inline]
     pub fn notify_one(&self) {
         self.queue.is_empty_or_locked(|mut locked| {
             let mut waiter = unsafe { locked.dequeue().unwrap_unchecked() };
