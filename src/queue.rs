@@ -98,8 +98,6 @@ const HEAD_MARKER: *mut NodeLink = RawNodeState::Queued.into_ptr();
 pub struct Queue<T, S: QueueState = (), SP: SyncPrimitives = DefaultSyncPrimitives> {
     tail: AtomicPtr<Tail<S>>,
     head: AtomicPtr<NodeLink>,
-    #[cfg(not(target_arch = "x86_64"))]
-    parked_next: AtomicPtr<AtomicPtr<NodeLink>>,
     mutex: SP::Mutex,
     parker: SP::Parker,
     _node_data: PhantomData<T>,
@@ -124,8 +122,6 @@ impl<T, S: QueueState, SP: SyncPrimitives> Queue<T, S, SP> {
         Self {
             tail: AtomicPtr::new(tail),
             head: AtomicPtr::new(ptr::null_mut()),
-            #[cfg(not(target_arch = "x86_64",))]
-            parked_next: AtomicPtr::new(ptr::null_mut()),
             #[cfg(not(loom))]
             mutex: SP::Mutex::INIT,
             #[cfg(loom)]
@@ -287,17 +283,8 @@ impl<T, S: QueueState, SP: SyncPrimitives> Queue<T, S, SP> {
         let prev_next = NonNull::from(prev.map_or(&self.head, |p| unsafe { &p.as_ref().next }));
         if SP::Parker::NEVER_BLOCKS {
             unsafe { prev_next.as_ref() }.store(node.as_ptr(), Release);
-        } else {
-            #[cfg(not(target_arch = "x86_64"))]
-            unsafe { prev_next.as_ref() }.store(node.as_ptr(), SeqCst);
-            #[cfg(not(target_arch = "x86_64"))]
-            if self.parked_next.load(SeqCst) == prev_next.as_ptr() {
-                self.unpark();
-            }
-            #[cfg(target_arch = "x86_64")]
-            if unsafe { !(prev_next.as_ref().swap(node.as_ptr().cast(), Release)).is_null() } {
-                self.unpark();
-            }
+        } else if unsafe { !(prev_next.as_ref().swap(node.as_ptr().cast(), Release)).is_null() } {
+            self.unpark();
         }
         true
     }
@@ -360,24 +347,13 @@ impl<'a, T, S: QueueState, SP: SyncPrimitives> LockedQueue<'a, T, S, SP> {
                 return next;
             }
         }
-        #[cfg(not(target_arch = "x86_64"))]
-        (self.parked_next).store(ptr::from_ref(next).cast_mut(), SeqCst);
-        #[cfg(target_arch = "x86_64")]
         const PARKED: *mut NodeLink = ptr::without_provenance_mut(1);
-        #[cfg(target_arch = "x86_64")]
         if let Err(next) = next.compare_exchange(ptr::null_mut(), PARKED, Relaxed, Acquire) {
             return unsafe { NonNull::new_unchecked(next) };
         }
         loop {
-            #[cfg(not(target_arch = "x86_64",))]
-            if let Some(next) = NonNull::new(next.load(SeqCst)) {
-                self.parked_next.store(ptr::null_mut(), SeqCst);
-                return next;
-            }
             unsafe { self.parker.park() };
-            #[cfg(target_arch = "x86_64")]
             let next = next.load(Acquire);
-            #[cfg(target_arch = "x86_64")]
             if next != PARKED {
                 return unsafe { NonNull::new_unchecked(next) };
             }

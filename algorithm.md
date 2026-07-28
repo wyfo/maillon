@@ -29,8 +29,6 @@ The algorithm uses the following structs:
 pub struct Queue<T, S: QueueState, SP: SyncPrimitives = DefaultSyncPrimitives> {
     tail: AtomicPtr<Tail<S>>,
     head: AtomicPtr<NodeLink>,
-    #[cfg(not(target_arch = "x86_64"))]
-    parked_next: AtomicPtr<AtomicPtr<NodeLink>>,
     mutex: SP::Mutex,
     parker: SP::Parker,
     _node_data: PhantomData<T>,
@@ -85,13 +83,6 @@ impl<T, S: QueueState, SP: SyncPrimitives> Queue<T, S, SP> {
         }
         let prev_next = if tail.is_null() { &self.head } else { &(*tail).next };
         // Set previous tail's next, unparking the thread removing the node if needed
-        #[cfg(not(target_arch = "x86_64"))]
-        prev_next.store(node, SeqCst);
-        #[cfg(not(target_arch = "x86_64"))]
-        if self.parked_next.load(SeqCst) == prev_next.as_ptr() {
-            self.parker.unpark();
-        }
-        #[cfg(target_arch = "x86_64")]
         if unsafe { !(prev_next.as_ref().swap(node.as_ptr().cast(), Release)).is_null() } {
             self.parker.unpark();
         }
@@ -105,7 +96,7 @@ Once a node is enqueued (i.e. the tail pointer has been updated), every subseque
 
 ## Parking algorithm
 
-Node insertion is two-phased: the queue's tail pointer is first updated atomically (phase 1), then the predecessor node's `next` (or the queue's head) pointer is written (phase 2). This means the predecessor node must remain valid until phase 2 completes. As a consequence, removing a non-tail node requires waiting for phase 2 to finish, i.e. waiting for the node's `next` pointer to be written. This is enforced using the queue's parker with a platform-dependent algorithm:
+Node insertion is two-phased: the queue's tail pointer is first updated atomically (phase 1), then the predecessor node's `next` (or the queue's head) pointer is written (phase 2). This means the predecessor node must remain valid until phase 2 completes. As a consequence, removing a non-tail node requires waiting for phase 2 to finish, i.e. waiting for the node's `next` pointer to be written. This is enforced using the queue's parker:
 
 ```rust
 impl<T, S: QueueState, SP: SyncPrimitives> LockedQueue<T, S, SP> {
@@ -119,24 +110,13 @@ impl<T, S: QueueState, SP: SyncPrimitives> LockedQueue<T, S, SP> {
             }
             hint::spin_loop();
         }
-        #[cfg(not(target_arch = "x86_64"))]
-        self.parked_next.store(ptr::from_ref(next).cast_mut(), SeqCst);
-        #[cfg(target_arch = "x86_64")]
         const PARKED: *mut NodeLink = ptr::without_provenance_mut(1);
-        #[cfg(target_arch = "x86_64")]
         if let Err(next) = next.compare_exchange(ptr::null_mut(), PARKED, Relaxed, Acquire) {
             return unsafe { NonNull::new_unchecked(next) };
         }
         loop {
-            #[cfg(not(target_arch = "x86_64"))]
-            if let Some(next) = NonNull::new(next.load(SeqCst)) {
-                self.parked_next.store(ptr::null_mut(), SeqCst);
-                return next;
-            }
             unsafe { self.parker.park() };
-            #[cfg(target_arch = "x86_64")]
             let next = next.load(Acquire);
-            #[cfg(target_arch = "x86_64")]
             if next != PARKED {
                 return unsafe { NonNull::new_unchecked(next) };
             }
@@ -147,17 +127,9 @@ impl<T, S: QueueState, SP: SyncPrimitives> LockedQueue<T, S, SP> {
 
 Notice `get_next` is a method of `LockedQueue`, meaning the queue's lock must be held. This guarantees that only one thread at a time can be waiting in `park`, so there is no data race on the queue's parker.
 
-### x86_64
-
 On the removal side, the next pointer is replaced with a `PARKED` sentinel via a CAS. If the CAS succeeds, the removal thread parks. On the insertion side, the next pointer is overwritten via an atomic swap. If the swap returns the `PARKED` sentinel — meaning the removal thread had set it — the insertion thread calls `unpark`.
 
-### Other platforms
-
-On other platforms, `SeqCst` stores are less expensive than a CAS[^1]. The algorithm is optimized for this and becomes:
-- insertion: `SeqCst` store to the predecessor's `next` pointer, then `SeqCst` load of `parked_next` → unpark if `parked_next` equals the predecessor's `next` pointer
-- removal: `SeqCst` store to `parked_next`, then `SeqCst` load of the node's `next` pointer → park if not yet set
-
-This is a variation of the classical "store X; load Y || store Y; load X" pattern, which guarantees that at least one side sees the other's write. It relies on the `Parker` implementation delivering an `unpark` that was issued before `park` as an immediate return, so the order of park vs. unpark does not matter.
+Both sides synchronize through the modification order of a single atomic, so no `SeqCst` ordering is involved. Because the `unpark` may be issued between the removal thread's CAS and its call to `park`, this relies on the `Parker` implementation delivering an already-issued `unpark` as an immediate return, so the order of park vs. unpark does not matter.
 
 ## Node removal
 
@@ -290,7 +262,7 @@ Circular chaining is not done at `Drain` creation, because the sentinel node can
 
 ## Node data and aliasing
 
-Concurrent intrusive queues break[^2] the Rust aliasing model, as a thread can hold a mutable reference to its node while another thread dequeues the node and accesses its data.
+Concurrent intrusive queues break[^1] the Rust aliasing model, as a thread can hold a mutable reference to its node while another thread dequeues the node and accesses its data.
 
 [RFC 3467](https://rust-lang.github.io/rfcs/3467-unsafe-pinned.html) introduces a new `UnsafePinned` wrapper for this purpose, with a polyfill on stable toolchain. The full node definition is then:
 
@@ -341,9 +313,7 @@ In a semaphore, the counter reaches zero when waiters start to enqueue, so the q
 
 [`loom`](http://crates.io/crates/loom) support is enabled through `#[cfg(loom)]`.
 
-`loom`'s biggest limitation is its lack of support for `SeqCst` ordering. However, `SeqCst` is used both for tail pointer manipulation and for the parking algorithm. Supporting `loom` therefore requires some adaptations:
- - the x86_64 parking algorithm is always used (it relies on modification order rather than `SeqCst` cross-object ordering)
- - `SeqCst` loads of the tail pointer are replaced with a CAS, so correctness relies on the modification order of the tail atomic rather than the `SeqCst` total order.
+`loom`'s biggest limitation is its lack of support for `SeqCst` ordering. The parking algorithm is unaffected, as it relies on modification order rather than `SeqCst` cross-object ordering, but tail pointer manipulation does use `SeqCst`. Supporting `loom` therefore requires an adaptation: `SeqCst` loads of the tail pointer are replaced with a CAS, so correctness relies on the modification order of the tail atomic rather than the `SeqCst` total order.
 
 Moreover, `loom` doesn't support `UnsafePinned` or pointer-based workflows, requiring the use of `loom::sync::UnsafeCell` to check access correctness. So `NodeInner` becomes:
 ```rust
@@ -358,5 +328,4 @@ pub(crate) struct NodeInner<T> {
 ```
 As a result, node data accesses by reference are disabled and methods `with_data`/`with_data_mut` must be used. These methods are also available without `#[cfg(loom)]` (but hidden), making it possible to write loom-compatible code directly. This is for example used in `aiq` examples.
 
-[^1]: On x86_64, `SeqCst` atomic stores are compiled into `xchg`, the same assembly instruction as atomic swap.
-[^2]: there is literally a temporary hack in the compiler to handle it.
+[^1]: there is literally a temporary hack in the compiler to handle it.
