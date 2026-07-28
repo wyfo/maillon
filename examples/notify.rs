@@ -11,7 +11,7 @@ use std::{
 use aiq::{Node, NodeState, Queue, queue::LockedQueue, queue_ref};
 use arrayvec::ArrayVec;
 #[cfg(loom)]
-use loom::sync::atomic::{AtomicU64, Ordering::Acquire, Ordering::SeqCst, fence};
+use loom::sync::atomic::{AtomicU64, Ordering::SeqCst, fence};
 use pin_project_lite::pin_project;
 
 const STATE_UNNOTIFIED: usize = 0;

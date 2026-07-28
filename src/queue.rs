@@ -283,7 +283,7 @@ impl<T, S: QueueState, SP: SyncPrimitives> Queue<T, S, SP> {
         let prev_next = NonNull::from(prev.map_or(&self.head, |p| unsafe { &p.as_ref().next }));
         if SP::Parker::NEVER_BLOCKS {
             unsafe { prev_next.as_ref() }.store(node.as_ptr(), Release);
-        } else if unsafe { !(prev_next.as_ref().swap(node.as_ptr().cast(), Release)).is_null() } {
+        } else if unsafe { !(prev_next.as_ref().swap(node.as_ptr(), Release)).is_null() } {
             self.unpark();
         }
         true
