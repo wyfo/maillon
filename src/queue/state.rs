@@ -41,9 +41,7 @@ impl<State: QueueState> StateOrPtr<State> {
 unsafe impl QueueStatePrivate for () {
     #[inline(always)]
     fn tail_to_enum(tail: *mut Tail<Self>) -> StateOrPtr<Self> {
-        NonNull::new(tail)
-            .map(NonNull::cast)
-            .map_or(StateOrPtr::State(()), StateOrPtr::Ptr)
+        NonNull::new(tail.cast()).map_or(StateOrPtr::State(()), StateOrPtr::Ptr)
     }
     #[inline(always)]
     fn enum_to_tail(state_or_ptr: StateOrPtr<Self>) -> *mut Tail<Self> {
