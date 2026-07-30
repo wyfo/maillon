@@ -9,7 +9,7 @@ use crate::sync::{
 mod atomic_wait;
 pub mod mutex;
 pub mod parker;
-#[cfg(feature = "pthread")]
+#[cfg(all(feature = "pthread", unix))]
 mod pthread;
 mod spin;
 #[cfg(feature = "std")]
