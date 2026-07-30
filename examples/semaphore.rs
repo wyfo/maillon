@@ -3,11 +3,16 @@ use std::{
     cmp::min,
     mem,
     pin::Pin,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::Ordering::{Acquire, Relaxed, Release},
+    },
     task::{Context, Poll, Waker},
 };
 
-use aiq::{Node, NodeState, Queue, queue::LockedQueue, queue_ref};
+use aiq::{
+    List, Node, NodeState, as_list, list::LockedList, node::NodeData, sync::DefaultSyncPrimitives,
+};
 use arrayvec::ArrayVec;
 use pin_project_lite::pin_project;
 
@@ -15,13 +20,7 @@ const CLOSED: usize = 1;
 const PERMIT_SHIFT: usize = 1;
 
 #[derive(Default)]
-struct Waiter {
-    waker: Option<Waker>,
-    permits_remaining: u32,
-}
-
-#[derive(Default)]
-pub struct Semaphore(Queue<Waiter, usize>);
+pub struct Semaphore(List<Waiter, usize>);
 
 impl Semaphore {
     pub const MAX_PERMITS: usize = usize::MAX >> 3;
@@ -44,12 +43,12 @@ impl Semaphore {
     #[cfg_attr(loom, const_fn::const_fn(cfg(false)))]
     #[inline]
     pub const fn new(permits: usize) -> Self {
-        Self(Queue::with_state_const(Self::check_add_permits(0, permits)))
+        Self(List::with_state(Self::check_add_permits(0, permits)))
     }
 
     #[inline]
     pub fn available_permits(&self) -> usize {
-        self.0.state().unwrap_or(0) >> PERMIT_SHIFT
+        self.0.load_state(Relaxed).unwrap_or(0) >> PERMIT_SHIFT
     }
 
     #[inline]
@@ -57,7 +56,9 @@ impl Semaphore {
         if permits == 0 {
             return;
         }
-        self.0.fetch_update_state_or_locked(
+        self.0.update_state_or_lock_with(
+            Release,
+            Relaxed,
             |state| Self::check_add_permits(state, permits),
             |locked| self.add_permits_locked(permits, locked),
         );
@@ -66,39 +67,38 @@ impl Semaphore {
     fn add_permits_locked<'a>(
         &'a self,
         mut permits: usize,
-        mut locked: LockedQueue<'a, Waiter, usize>,
+        mut locked: LockedList<'a, Waiter, usize>,
     ) {
         assert!(!self.is_closed());
         let mut wakers = ArrayVec::<Waker, 32>::new();
-        'outer: loop {
-            loop {
-                let mut waiter = locked.dequeue().unwrap();
-                let requeue = waiter.with_data_mut(|mut waiter| {
-                    if waiter.permits_remaining as usize > permits {
-                        waiter.permits_remaining -= permits as u32;
-                        return true;
-                    }
-                    permits -= waiter.permits_remaining as usize;
-                    waiter.permits_remaining = 0;
-                    wakers.push(waiter.waker.take().unwrap());
-                    false
-                });
-                if requeue {
-                    waiter.requeue();
-                    break 'outer;
-                } else if waiter.try_set_queue_state(permits << PERMIT_SHIFT) || permits == 0 {
-                    break 'outer;
-                } else if wakers.is_full() {
-                    break;
-                }
+        let mut front = locked.front();
+        while let Some(mut waiter) = front {
+            let unlink = if permits >= waiter.permits_remaining as _ {
+                permits -= waiter.permits_remaining as usize;
+                waiter.permits_remaining = 0;
+                wakers.push(waiter.waker.take().unwrap());
+                true
+            } else {
+                waiter.permits_remaining -= permits as u32;
+                permits = 0;
+                false
+            };
+            if !unlink {
+                break;
             }
-            drop(locked);
-            wakers.drain(..).for_each(Waker::wake);
-            match (self.0)
-                .fetch_update_state_or_lock(|state| Self::check_add_permits(state, permits))
-            {
-                Some(l) => locked = l,
-                None => return,
+            front = waiter.unlink(|| permits << PERMIT_SHIFT);
+            if permits == 0 {
+                break;
+            } else if wakers.is_full() {
+                drop(locked);
+                wakers.drain(..).for_each(Waker::wake);
+                match self.0.update_state_or_lock(Release, Relaxed, |state| {
+                    Self::check_add_permits(state, permits)
+                }) {
+                    Ok(_) => return,
+                    Err(l) => locked = l,
+                }
+                front = locked.front();
             }
         }
         drop(locked);
@@ -111,7 +111,9 @@ impl Semaphore {
             return 0;
         }
         let state = (self.0)
-            .fetch_update_state(|state| Some(state.wrapping_sub(permits << PERMIT_SHIFT)))
+            .try_update_state(Relaxed, Relaxed, |state| {
+                Some(state.wrapping_sub(permits << PERMIT_SHIFT))
+            })
             .unwrap_or(0);
         min(permits, state >> PERMIT_SHIFT)
     }
@@ -123,10 +125,10 @@ impl Semaphore {
 
     #[inline]
     pub async fn acquire_many(&self, permits: u32) -> Result<SemaphorePermit<'_>, AcquireError> {
-        let acquire = |state| Self::check_acquire_permits(state, permits);
-        if self.0.fetch_update_state(acquire).is_err() {
-            let node = Node::new(SemaphoreRef(self));
-            Acquire { node, permits }.await?;
+        let acquire = |state| Self::check_acquire_permits(state, permits as _);
+        if self.0.try_update_state(Acquire, Relaxed, acquire).is_err() {
+            let node = Node::with_data(SemaphoreRef(self), Waiter::new(permits));
+            AcquireFuture { node }.await?;
         }
         Ok(SemaphorePermit { sem: self, permits })
     }
@@ -139,7 +141,7 @@ impl Semaphore {
     #[inline]
     pub fn try_acquire_many(&self, permits: u32) -> Result<SemaphorePermit<'_>, TryAcquireError> {
         let acquire = |state| Self::check_acquire_permits(state, permits);
-        match self.0.fetch_update_state(acquire) {
+        match self.0.try_update_state(Acquire, Relaxed, acquire) {
             Ok(_) => Ok(SemaphorePermit { sem: self, permits }),
             Err(Some(state)) if state & CLOSED != 0 => Err(TryAcquireError::Closed),
             Err(_) => Err(TryAcquireError::NoPermits),
@@ -175,9 +177,10 @@ impl Semaphore {
     }
 
     pub fn close(&self) {
-        if let Some(locked) = self.0.fetch_update_state_or_lock(|state| state | CLOSED) {
+        if let Err(locked) = (self.0).update_state_or_lock(Release, Relaxed, |state| state | CLOSED)
+        {
             let mut wakers = ArrayVec::<Waker, 32>::new();
-            locked.drain_try_set_state(CLOSED).for_each(
+            locked.drain(|| CLOSED).for_each(
                 &mut wakers,
                 |wakers, mut waiter| {
                     wakers.push(waiter.waker.take().unwrap());
@@ -190,17 +193,58 @@ impl Semaphore {
 
     #[inline]
     pub fn is_closed(&self) -> bool {
-        self.0.state().is_some_and(|state| state & CLOSED != 0)
+        self.0
+            .load_state(Acquire)
+            .is_some_and(|state| state & CLOSED != 0)
+    }
+}
+
+struct Waiter {
+    permits_total: u32,
+    permits_remaining: u32,
+    waker: Option<Waker>,
+}
+
+impl Waiter {
+    fn new(permits: u32) -> Self {
+        Self {
+            permits_total: permits,
+            permits_remaining: permits,
+            waker: None,
+        }
     }
 }
 
 struct SemaphoreRef<'a>(&'a Semaphore);
-queue_ref!(
-    SemaphoreRef<'a>,
-    NodeData = Waiter,
-    State = usize,
-    &self.0.0
-);
+as_list!(SemaphoreRef<'a>, List<Waiter, usize>, &self.0.0);
+
+impl<'a> NodeData<SemaphoreRef<'a>, usize> for Waiter {
+    fn new_state_if_last_node_on_drop(self: Pin<&mut Self>, _list: &SemaphoreRef<'a>) -> usize {
+        (self.permits_total - self.permits_remaining) as _
+    }
+
+    #[inline]
+    fn on_drop<'list>(
+        self: Pin<&mut Self>,
+        list: &'list SemaphoreRef<'a>,
+        locked: Option<LockedList<'list, Self, usize, DefaultSyncPrimitives>>,
+        state_updated_on_unlink: bool,
+    ) {
+        if state_updated_on_unlink || self.permits_remaining == 0 {
+            return;
+        }
+        let acquired = self.permits_total - self.permits_remaining;
+        if let Some(locked) = locked {
+            list.0.add_permits_locked(acquired as _, locked);
+        } else {
+            #[cold]
+            fn add_permits_cold(semaphore: &Semaphore, permits: usize) {
+                semaphore.add_permits(permits);
+            }
+            add_permits_cold(list.0, acquired as _);
+        }
+    }
+}
 
 #[derive(Debug)]
 pub struct AcquireError(());
@@ -211,97 +255,50 @@ pub enum TryAcquireError {
 }
 
 pin_project! {
-    struct Acquire<'a> {
+    struct AcquireFuture<'a> {
         #[pin]
-        node: Node<SemaphoreRef<'a>>,
-        permits: u32,
-    }
-
-    impl PinnedDrop for Acquire<'_> {
-        #[inline(always)]
-        fn drop(this: Pin<&mut Self>) {
-            if this.permits > 0 {
-                this.cancel();
-            }
-        }
+        node: Node<SemaphoreRef<'a>, Waiter, usize>
     }
 }
 
-impl<'a> Acquire<'a> {
-    fn poll_acquire(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), AcquireError>> {
-        let this = self.project();
-        match this.node.state() {
-            NodeState::Unqueued(mut waiter) => loop {
-                let Err(state) = waiter.queue().0.0.fetch_update_state(|state| {
-                    Semaphore::check_acquire_permits(state, *this.permits)
-                }) else {
-                    break Poll::Ready(Ok(()));
-                };
-                if state.is_some_and(|s| s & CLOSED != 0) {
-                    break Poll::Ready(Err(AcquireError(())));
-                }
-                waiter.with_data_mut(|mut waiter| {
-                    waiter.permits_remaining =
-                        *this.permits - (state.unwrap_or(0) as u32 >> PERMIT_SHIFT);
-                    waiter.waker.get_or_insert_with(|| cx.waker().clone());
-                });
-                match waiter.try_enqueue_with_queue_state(|s| s == state) {
-                    Ok(_) => break Poll::Pending,
-                    Err(w) => waiter = w,
-                }
-            },
-            NodeState::Queued(waiter) if waiter.queue().0.is_closed() => {
-                Poll::Ready(Err(AcquireError(())))
-            }
-            NodeState::Queued(mut waiter) => {
-                waiter.with_data_mut(|mut waiter| {
-                    if !waiter.waker.as_ref().unwrap().will_wake(cx.waker()) {
-                        waiter.waker = Some(cx.waker().clone());
-                    }
-                });
-                Poll::Pending
-            }
-            NodeState::Dequeued(waiter) if waiter.queue().0.is_closed() => {
-                Poll::Ready(Err(AcquireError(())))
-            }
-            NodeState::Dequeued(_) => Poll::Ready(Ok(())),
-        }
-    }
-
-    #[cold]
-    fn cancel(self: Pin<&mut Self>) {
-        let this = self.project();
-        match this.node.state() {
-            NodeState::Unqueued(_) => {}
-            NodeState::Queued(waiter) => {
-                let acquired = (*this.permits - waiter.with_data(|w| w.permits_remaining)) as _;
-                if let Err((sem, locked)) = waiter.dequeue_try_set_queue_state(acquired) {
-                    if sem.0.is_closed() {
-                        drop(locked);
-                        sem.0.add_permits(acquired);
-                    } else if acquired > 0 {
-                        sem.0.add_permits_locked(acquired, locked);
-                    }
-                }
-            }
-            NodeState::Dequeued(waiter) => {
-                let acquired = (*this.permits - waiter.with_data(|w| w.permits_remaining)) as _;
-                waiter.queue().0.add_permits(acquired);
-            }
-        }
-    }
-}
-
-impl<'a> Future for Acquire<'a> {
+impl<'a> Future for AcquireFuture<'a> {
     type Output = Result<(), AcquireError>;
 
     #[cold]
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let res = self.as_mut().poll_acquire(cx);
-        if matches!(res, Poll::Ready(Ok(()))) {
-            *self.project().permits = 0;
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        match self.project().node.state() {
+            NodeState::Unlinked(node) => {
+                if node.permits_remaining == 0 {
+                    return Poll::Ready(Ok(()));
+                }
+                match node.try_update_state_or_push_back_with(
+                    Acquire, // TODO Acquire for close
+                    Acquire,
+                    |waiter, state| Semaphore::check_acquire_permits(state, waiter.permits_total),
+                    |mut waiter, _| waiter.permits_remaining = 0,
+                    |mut waiter, state| {
+                        if state.is_some_and(|s| s & CLOSED != 0) {
+                            return false;
+                        }
+                        waiter.permits_remaining =
+                            waiter.permits_total - (state.unwrap_or(0) as u32 >> PERMIT_SHIFT);
+                        waiter.waker.get_or_insert_with(|| cx.waker().clone());
+                        true
+                    },
+                ) {
+                    Ok(_) => Poll::Ready(Ok(())),
+                    Err(true) => Poll::Pending,
+                    Err(false) => Poll::Ready(Err(AcquireError(()))),
+                }
+            }
+            NodeState::Linked(mut node) => {
+                debug_assert_ne!(node.permits_remaining, 0);
+                if !node.waker.as_ref().unwrap().will_wake(cx.waker()) {
+                    node.waker = Some(cx.waker().clone());
+                }
+                Poll::Pending
+            }
         }
-        res
     }
 }
 

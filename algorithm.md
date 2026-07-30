@@ -71,10 +71,10 @@ impl<T, S: QueueState, SP: SyncPrimitives> Queue<T, S, SP> {
             // the node.
             let prev = if tail.is_null() { HEAD_MARKER } else { tail };
             (*node).prev.store(prev, Relaxed);
-            // Updating queue's tail pointer with `SeqCst` ordering is required to be 
+            // Updating list's tail pointer with `SeqCst` ordering is required to be 
             // able to load the tail with `SeqCst` and not miss any enqueued node. 
             // Contrary to mutex-protected queues which rely on the total modification order 
-            // of the mutex's atomic state, this queue relies on the `SeqCst` total order, 
+            // of the mutex's atomic state, this list relies on the `SeqCst` total order, 
             // as a `SeqCst` load is a lot less expensive than an atomic RMW operation.
             match self.tail.compare_exchange_weak(tail, node, SeqCst, Relaxed) {
                 Ok(_) => break,
@@ -100,8 +100,8 @@ Node insertion is two-phased: the queue's tail pointer is first updated atomical
 
 ```rust
 impl<T, S: QueueState, SP: SyncPrimitives> LockedQueue<T, S, SP> {
-    // This function must be called with queue's mutex acquired.
-    // It must not be called if the node is at the queue's tail.
+    // This function must be called with list's mutex acquired.
+    // It must not be called if the node is at the list's tail.
     fn get_next(&self, next: &AtomicPtr<NodeLink>) -> NonNull<NodeLink> {
         // Spin a bit before parking in case next is already set.
         for _ in 0..1 + S::SPIN_BEFORE_PARK {
@@ -129,7 +129,8 @@ Notice `get_next` is a method of `LockedQueue`, meaning the queue's lock must be
 
 On the removal side, the next pointer is replaced with a `PARKED` sentinel via a CAS. If the CAS succeeds, the removal thread parks. On the insertion side, the next pointer is overwritten via an atomic swap. If the swap returns the `PARKED` sentinel — meaning the removal thread had set it — the insertion thread calls `unpark`.
 
-Both sides synchronize through the modification order of a single atomic, so no `SeqCst` ordering is involved. Because the `unpark` may be issued between the removal thread's CAS and its call to `park`, this relies on the `Parker` implementation delivering an already-issued `unpark` as an immediate return, so the order of park vs. unpark does not matter.
+Because the `unpark` may be issued between the removal thread's CAS and its call to `park`, this relies on the `Parker` implementation delivering an already-issued `unpark` as an immediate return, so the order of park vs. unpark does not matter.
+
 
 ## Node removal
 
@@ -151,15 +152,15 @@ impl<T, S: QueueState, SP: SyncPrimitives> LockedQueue<T, S, SP> {
         }
         let mut next = node.next();
         // If next pointer is not set, node is assumed to be the tail;
-        // reset prev_next (the predecessor's next pointer, or queue's head) and
+        // reset prev_next (the predecessor's next pointer, or list's head) and
         // update the tail to point to the predecessor (or null).
-        // prev_next must be cleared before the tail CAS: otherwise a concurrent
-        // enqueuer whose phase 1 CAS succeeds between the tail CAS and the clear
-        // could have its phase 2 write overwritten.
+        // prev_next must be reset before the tail CAS, hence the Release ordering
+        // on the CAS. Otherwise, a concurrent enqueuer whose phase 1 CAS succeeds
+        // between the tail CAS and the clear could have its phase 2 write overwritten.
         if next.is_none() {
             prev_next.store(ptr::null_mut(), Relaxed);
             let new_tail = if is_head { ptr::null_mut() } else { prev };
-            if ((self.tail).compare_exchange(node, new_tail, SeqCst, Relaxed)).is_err() {
+            if ((self.tail).compare_exchange(node, new_tail, Release, Relaxed)).is_err() {
                 // The tail CAS failed, meaning a concurrent insertion (phase 1) appended
                 // a new node after this one since we read next. Wait for that insertion's
                 // phase 2 to write the next pointer.
@@ -189,7 +190,7 @@ This is especially done in node's [destructor](#node-data-and-aliasing). The nod
 ```rust
 impl<'a, T, S: QueueState, SP: SyncPrimitives> LockedQueue<'a, T, S, SP> {
     pub fn dequeue(&mut self) -> Option<Dequeue<'a, '_, T, S, SP>> {
-        // Check the queue is not empty, relying on `SeqCst` ordering as in insertion
+        // Check the list is not empty, relying on `SeqCst` ordering as in insertion
         NonNull::new(self.queue.tail.load(SeqCst))?;
         // Wait for the head to be written so the node insertion is complete
         let node = self.get_next(&self.queue.head);
@@ -229,15 +230,18 @@ impl<'a, T, S: QueueState, SP: SyncPrimitives> Drain<'a, T, S, SP> {
     fn new(locked: LockedQueue<'a, T, S, SP>) -> Self {
         let mut head = ptr::null_mut();
         let mut tail = ptr::null_mut();
-        // Check if the queue is not empty.
+        // Check if the list is not empty.
         if !locked.queue.tail.load(SeqCst).is_null() {
-            // In this case, wait for the head (the queue is locked 
+            // In this case, wait for the head (the list is locked 
             // so the head cannot be removed in the meantime)
             head = locked.get_next(&locked.queue.head).as_ptr();
             // Reset the head
             locked.head.store(ptr::null_mut(), Relaxed);
             // Swap the tail to reset it and keep the current enqueued nodes
-            let tail = locked.tail.swap(ptr::null_mut(), SeqCst);
+            // `Release` for the same reason as the removal CAS, `Acquire` 
+            // because new nodes may be inserted between this swap and the
+            // previous tail load.
+            let tail = locked.tail.swap(ptr::null_mut(), AcqRel);
         }
         Self {
             sentinel_node: NodeLink {
@@ -267,9 +271,9 @@ Concurrent intrusive queues break[^1] the Rust aliasing model, as a thread can h
 [RFC 3467](https://rust-lang.github.io/rfcs/3467-unsafe-pinned.html) introduces a new `UnsafePinned` wrapper for this purpose, with a polyfill on stable toolchain. The full node definition is then:
 
 ```rust
-pub struct Node<Q: QueueRef> {
-    queue: Q,
-    node: UnsafePinned<NodeInner<Q::NodeData>>,
+pub struct Node<L: QueueRef> {
+    queue: L,
+    node: UnsafePinned<NodeInner<L::NodeData>>,
 }
 
 #[repr(C)]
@@ -289,14 +293,14 @@ The `Node` struct also embeds a queue reference to enforce node removal before t
 A node has three states stored in its `prev` pointer: unqueued, queued, and dequeued. This is exposed through the following API:
 
 ```rust
-impl<Q: QueueRef> Node<Q> {
-    pub fn state(self: Pin<&mut Self>) -> NodeState<'_, Q> { /* ... */ }
+impl<L: QueueRef> Node<L> {
+    pub fn state(self: Pin<&mut Self>) -> NodeState<'_, L> { /* ... */ }
 }
 
-pub enum NodeState<'a, Q: QueueRef> {
-    Unqueued(NodeUnqueued<'a, Q>),
-    Queued(NodeQueued<'a, Q>),
-    Dequeued(NodeDequeued<'a, Q>),
+pub enum NodeState<'a, L: QueueRef> {
+    Unqueued(NodeUnqueued<'a, L>),
+    Queued(NodeQueued<'a, L>),
+    Dequeued(NodeDequeued<'a, L>),
 }
 ``` 
 Each state wrapper has appropriate methods: `enqueue` for `NodeUnqueued`, `dequeue` for `NodeQueued`, etc. All of them have a data accessor, but since accessing the data of a queued node requires the queue's mutex to be held, a mutex guard is embedded in `NodeQueued`.
@@ -313,7 +317,7 @@ In a semaphore, the counter reaches zero when waiters start to enqueue, so the q
 
 [`loom`](http://crates.io/crates/loom) support is enabled through `#[cfg(loom)]`.
 
-`loom`'s biggest limitation is its lack of support for `SeqCst` ordering. The parking algorithm is unaffected, as it relies on modification order rather than `SeqCst` cross-object ordering, but tail pointer manipulation does use `SeqCst`. Supporting `loom` therefore requires an adaptation: `SeqCst` loads of the tail pointer are replaced with a CAS, so correctness relies on the modification order of the tail atomic rather than the `SeqCst` total order.
+`loom`'s biggest limitation is its lack of support for `SeqCst` atomic operations, which prevents some workflows to be tested.
 
 Moreover, `loom` doesn't support `UnsafePinned` or pointer-based workflows, requiring the use of `loom::sync::UnsafeCell` to check access correctness. So `NodeInner` becomes:
 ```rust

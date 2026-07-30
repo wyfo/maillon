@@ -2,16 +2,18 @@
 #![no_std]
 #![cfg_attr(nightly, feature(unsafe_pinned))]
 
+pub mod list;
 mod loom;
 pub mod node;
-pub mod queue;
 pub mod sync;
 #[cfg(not(nightly))]
 mod unsafe_pinned;
-#[cfg(feature = "wait-queue")]
-pub mod wait_queue;
+mod utils;
+// Temporarily disabled while `Queue`'s API is refactored; restored in step 8.
+// #[cfg(feature = "wait-list")]
+// pub mod wait_list;
 
+pub use list::List;
 pub use node::{Node, NodeState};
-pub use queue::Queue;
-#[cfg(feature = "wait-queue")]
-pub use wait_queue::WaitQueue;
+// #[cfg(feature = "wait-queue")]
+// pub use wait_list::WaitList;

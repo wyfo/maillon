@@ -27,7 +27,7 @@ fn notify_multi_notified_one() {
     let mut notified1 = spawn(async { notify.clone().notified_owned().await });
     let mut notified2 = spawn(async { notify.clone().notified_owned().await });
 
-    // add two waiters into the queue
+    // add two waiters into the list
     assert_pending!(notified1.poll());
     assert_pending!(notified2.poll());
 
@@ -43,7 +43,7 @@ fn notify_multi_notified_last() {
     let mut notified1 = spawn(async { notify.clone().notified_owned().await });
     let mut notified2 = spawn(async { notify.clone().notified_owned().await });
 
-    // add two waiters into the queue
+    // add two waiters into the list
     assert_pending!(notified1.poll());
     assert_pending!(notified2.poll());
 

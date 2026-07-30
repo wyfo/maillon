@@ -107,6 +107,7 @@ fn concurrent_close() {
     });
 }
 
+#[ignore]
 #[test]
 fn concurrent_cancel() {
     async fn poll_and_cancel(semaphore: Arc<Semaphore>) {

@@ -255,7 +255,7 @@ fn notify_waiters_is_atomic() {
     }
 
     // We test different scenarios in which the tested future is at the beginning
-    // or at the end of the waiters queue used by `Notify`.
+    // or at the end of the waiters list used by `Notify`.
     notify_waiters_is_atomic_variant(0);
     notify_waiters_is_atomic_variant(32);
 }
@@ -280,7 +280,7 @@ fn notify_waiters_sequential_notified_await() {
         move || {
             block_on(async {
                 // Poll the first `Notified` to put it as the first waiter
-                // in the queue.
+                // in the list.
                 let mut first_notified = tokio_test::task::spawn(notify.notified());
                 assert_pending!(first_notified.poll());
 
@@ -300,7 +300,7 @@ fn notify_waiters_sequential_notified_await() {
                 first_notified.await;
 
                 // Poll the second `Notified` future to try to insert
-                // it to the waiters queue.
+                // it to the waiters list.
                 let mut second_notified = tokio_test::task::spawn(notify.notified());
                 assert_pending!(second_notified.poll());
 

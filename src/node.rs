@@ -1,16 +1,32 @@
 #[cfg(nightly)]
 use core::pin::UnsafePinned;
-use core::{hint::unreachable_unchecked, pin::Pin, ptr, ptr::NonNull};
+use core::{marker::PhantomData, pin::Pin, ptr, ptr::NonNull};
 
 #[cfg(not(nightly))]
 use crate::unsafe_pinned::UnsafePinned;
 use crate::{
+    List,
+    list::{AsList, ListState, LockedList},
     loom::{
-        AtomicPtrExt,
-        sync::atomic::{AtomicPtr, Ordering::*},
+        cell::Cell,
+        sync::atomic::{AtomicPtr, Ordering, Ordering::*},
     },
-    queue::{QueueRef, StateOrPtr},
+    sync::{DefaultSyncPrimitives, SyncPrimitives},
 };
+
+pub(crate) const NULL: *mut NodeLink = ptr::null_mut();
+
+pub trait NodeData<L, S: ListState = (), SP: SyncPrimitives = DefaultSyncPrimitives>:
+    Sized
+{
+    fn new_state_if_last_node_on_drop(self: Pin<&mut Self>, list: &L) -> S;
+    fn on_drop<'list>(
+        self: Pin<&mut Self>,
+        list: &'list L,
+        locked: Option<LockedList<'list, Self, S, SP>>,
+        state_updated_on_unlink: bool,
+    );
+}
 
 #[repr(align(4))]
 pub(crate) struct NodeLink {
@@ -22,338 +38,417 @@ impl NodeLink {
     #[cfg_attr(loom, const_fn::const_fn(cfg(false)))]
     pub(crate) const fn new() -> Self {
         Self {
-            prev: AtomicPtr::new(ptr::null_mut()),
-            next: AtomicPtr::new(ptr::null_mut()),
+            prev: AtomicPtr::new(NULL),
+            next: AtomicPtr::new(NULL),
         }
-    }
-
-    #[inline(always)]
-    pub(crate) fn prev(&self) -> &NodeLink {
-        unsafe { self.prev.load(Relaxed).as_ref().unwrap_unchecked() }
     }
 
     #[inline(always)]
     pub(crate) fn next(&self) -> Option<NonNull<NodeLink>> {
-        NonNull::new(self.next.load(SeqCst))
+        NonNull::new(self.next.load(Acquire))
     }
 
     #[inline(always)]
-    pub(crate) fn state(&self) -> RawNodeState {
-        match self.prev.load(Acquire).addr().min(2) {
-            0 => RawNodeState::Unqueued,
-            1 => RawNodeState::Dequeued,
-            2 => RawNodeState::Queued,
-            _ => unreachable!(),
-        }
+    pub(crate) fn is_linked(&self) -> bool {
+        !self.prev.load(Acquire).is_null()
     }
 }
 
 #[repr(C)]
 pub(crate) struct NodeInner<T> {
     pub(crate) link: NodeLink,
-    #[cfg(not(loom))]
     pub(crate) data: T,
+    // TODO
+    /// Dummy cell, whose only purpose is to report data accesses to loom: the real accesses go
+    /// through raw pointers, which loom cannot see. `data_ptr`/`data_ptr_mut` register a shared
+    /// resp. exclusive access on it, so a missing happens-before edge is still detected.
     #[cfg(loom)]
-    pub(crate) data: loom::cell::UnsafeCell<T>,
+    pub(crate) access: Cell<()>,
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub enum RawNodeState {
-    Unqueued = 0,
-    Queued = 2,
-    Dequeued = 1,
+pub enum NodeState<
+    'a,
+    L: AsList<List<T, S, SP>>,
+    T: NodeData<L, S, SP>,
+    S: ListState,
+    SP: SyncPrimitives,
+> {
+    Unlinked(NodeUnlinked<'a, L, T, S, SP>),
+    Linked(NodeLinked<'a, L, T, S, SP>),
 }
 
-impl RawNodeState {
-    pub(crate) const fn into_ptr(self) -> *mut NodeLink {
-        ptr::without_provenance_mut(self as _)
-    }
+pub struct Node<
+    L: AsList<List<T, S, SP>>,
+    T: NodeData<L, S, SP>,
+    S: ListState = (),
+    SP: SyncPrimitives = DefaultSyncPrimitives,
+> {
+    list: L,
+    node: UnsafePinned<NodeInner<T>>,
+    linked: Cell<bool>,
+    _state: PhantomData<S>,
+    _sync: PhantomData<SP>,
 }
 
-pub enum NodeState<'a, Q: QueueRef> {
-    Unqueued(NodeUnqueued<'a, Q>),
-    Queued(NodeQueued<'a, Q>),
-    Dequeued(NodeDequeued<'a, Q>),
+unsafe impl<
+    L: AsList<List<T, S, SP>> + Send,
+    T: NodeData<L, S, SP> + Send,
+    S: ListState,
+    SP: SyncPrimitives + Send,
+> Send for Node<L, T, S, SP>
+{
+}
+unsafe impl<
+    L: AsList<List<T, S, SP>> + Sync,
+    T: NodeData<L, S, SP>,
+    S: ListState,
+    SP: SyncPrimitives + Sync,
+> Sync for Node<L, T, S, SP>
+{
 }
 
-pub struct Node<Q: QueueRef> {
-    queue: Q,
-    node: UnsafePinned<NodeInner<Q::NodeData>>,
-}
-
-unsafe impl<Q: QueueRef<NodeData: Send> + Send> Send for Node<Q> {}
-unsafe impl<Q: QueueRef + Sync> Sync for Node<Q> {}
-
-impl<Q: QueueRef> Node<Q> {
-    pub fn new(queue: Q) -> Self
+impl<L: AsList<List<T, S, SP>>, T: NodeData<L, S, SP>, S: ListState, SP: SyncPrimitives>
+    Node<L, T, S, SP>
+{
+    pub fn new(list: L) -> Self
     where
-        Q::NodeData: Default,
+        T: Default,
     {
-        Self::with_data(queue, Default::default())
+        Self::with_data(list, Default::default())
     }
 
     #[cfg_attr(loom, const_fn::const_fn(cfg(false)))]
-    pub const fn with_data(queue: Q, data: Q::NodeData) -> Self {
+    pub const fn with_data(list: L, data: T) -> Self {
         Self {
-            queue,
+            list,
             node: UnsafePinned::new(NodeInner {
                 link: NodeLink::new(),
-                #[cfg(not(loom))]
                 data,
                 #[cfg(loom)]
-                data: loom::cell::UnsafeCell::new(data),
+                access: loom::cell::Cell::new(()),
             }),
+            linked: Cell::new(false),
+            _state: PhantomData,
+            _sync: PhantomData,
         }
     }
 
     #[inline(always)]
-    pub const fn queue(&self) -> &Q {
-        &self.queue
+    pub const fn list(&self) -> &L {
+        &self.list
+    }
+
+    fn link(&self) -> NonNull<NodeLink> {
+        NonNull::new(self.node.get()).unwrap().cast()
     }
 
     #[inline(always)]
-    pub fn raw_state(&self) -> RawNodeState {
-        unsafe { (*self.node.get()).link.state() }
+    pub fn is_linked(&self) -> bool {
+        unsafe { (*self.node.get()).link.is_linked() }
     }
 
     #[inline(always)]
-    pub fn state(self: Pin<&mut Self>) -> NodeState<'_, Q> {
-        let raw_state = self.raw_state();
-        unsafe { self.state_from_raw(raw_state) }
-    }
-
-    /// # Safety
-    ///
-    /// Raw state must have been obtained from [`raw_state`](Self::raw_state),
-    /// (or been [`Unqueued`](RawNodeState::Unqueued) if the node has never been queued).
-    /// Node state must not be changed through [`state`](Self::state) in between.
-    pub unsafe fn state_from_raw(
-        self: Pin<&mut Self>,
-        raw_state: RawNodeState,
-    ) -> NodeState<'_, Q> {
-        let this = unsafe { self.get_unchecked_mut() };
-        let node = NonNull::new(this.node.get()).unwrap();
-        let queue = &this.queue;
-        match raw_state {
-            RawNodeState::Unqueued => NodeState::Unqueued(NodeUnqueued { node, queue }),
-            RawNodeState::Queued => {
-                let locked = this.queue.queue().lock();
-                match this.raw_state() {
-                    RawNodeState::Unqueued => unsafe { unreachable_unchecked() },
-                    RawNodeState::Queued => NodeState::Queued(NodeQueued {
-                        node,
-                        queue,
-                        locked,
-                    }),
-                    RawNodeState::Dequeued => NodeState::Dequeued(NodeDequeued { node, queue }),
+    pub fn state(self: Pin<&mut Self>) -> NodeState<'_, L, T, S, SP> {
+        let this = self.into_ref().get_ref();
+        if this.linked.get() {
+            if this.is_linked() {
+                let locked = this.list.as_list().lock();
+                if this.is_linked() {
+                    return NodeState::Linked(NodeLinked { node: this, locked });
                 }
             }
-            RawNodeState::Dequeued => NodeState::Dequeued(NodeDequeued { node, queue }),
+            this.linked.set(false);
         }
+        NodeState::Unlinked(NodeUnlinked(this))
     }
 
     #[cold]
     #[inline(never)]
-    fn dequeue(&mut self) {
-        let mut locked = self.queue.queue().lock();
-        if self.raw_state() == RawNodeState::Queued {
-            unsafe { locked.remove(&(*self.node.get()).link, ptr::null_mut(), false) };
+    fn drop_linked(&mut self) {
+        let mut locked = self.list.as_list().lock();
+        let mut node = NodeDropped(self);
+        let mut state_updated = false;
+        if self.is_linked() {
+            let new_state = || node.data_mut().new_state_if_last_node_on_drop(&self.list);
+            let (next, tail) = unsafe { locked.remove(self.link(), new_state, false, false) };
+            state_updated = next.is_none() && tail.is_none();
         }
+        (node.data_mut()).on_drop(&self.list, Some(locked), state_updated);
     }
 }
 
-impl<Q: QueueRef> Drop for Node<Q> {
-    #[inline(always)]
+impl<L: AsList<List<T, S, SP>>, T: NodeData<L, S, SP>, S: ListState, SP: SyncPrimitives> Drop
+    for Node<L, T, S, SP>
+{
+    #[inline]
     fn drop(&mut self) {
-        if self.raw_state() == RawNodeState::Queued {
-            self.dequeue();
-        }
-        let data = unsafe { &mut (*self.node.get().cast::<NodeInner<Q::NodeData>>()).data };
-        #[cfg(not(loom))]
-        Q::drop_node(&self.queue, data);
-        #[cfg(loom)]
-        unsafe {
-            data.with_mut(|data| Q::drop_node(&self.queue, &mut *data));
-        }
-    }
-}
-
-pub struct NodeUnqueued<'a, Q: QueueRef> {
-    node: NonNull<NodeInner<Q::NodeData>>,
-    queue: &'a Q,
-}
-
-unsafe impl<Q: QueueRef<NodeData: Send> + Sync> Send for NodeUnqueued<'_, Q> {}
-unsafe impl<Q: QueueRef<NodeData: Sync> + Sync> Sync for NodeUnqueued<'_, Q> {}
-
-node_getters!(NodeUnqueued<'a, Q: QueueRef>, Q::NodeData);
-
-impl<'a, Q: QueueRef> NodeUnqueued<'a, Q> {
-    #[inline]
-    pub fn queue(&self) -> &'a Q {
-        self.queue
-    }
-
-    #[inline]
-    pub fn enqueue(self) {
-        unsafe { self.queue.queue().enqueue(self.node.cast(), |_| true) };
-    }
-
-    #[inline]
-    pub fn try_enqueue_with_queue_state<S: FnMut(Option<Q::State>) -> bool>(
-        self,
-        mut match_state: S,
-    ) -> Result<(), Self> {
-        let check_tail = |tail| match_state(StateOrPtr::from(tail).state());
-        if unsafe { self.queue.queue().enqueue(self.node.cast(), check_tail) } {
-            Ok(())
+        if self.linked.get() && self.is_linked() {
+            self.drop_linked();
         } else {
-            Err(self)
+            (NodeDropped(self).data_mut()).on_drop(&self.list, None, false);
         }
     }
 }
 
-#[expect(type_alias_bounds)]
-type LockedQueue<'a, Q: QueueRef> =
-    crate::queue::LockedQueue<'a, Q::NodeData, Q::State, Q::SyncPrimitives>;
+pub struct NodeUnlinked<
+    'a,
+    L: AsList<List<T, S, SP>>,
+    T: NodeData<L, S, SP>,
+    S: ListState = (),
+    SP: SyncPrimitives = DefaultSyncPrimitives,
+>(&'a Node<L, T, S, SP>);
 
-pub struct NodeQueued<'a, Q: QueueRef> {
-    node: NonNull<NodeInner<Q::NodeData>>,
-    queue: &'a Q,
-    locked: LockedQueue<'a, Q>,
-}
-
-unsafe impl<'a, Q: QueueRef<NodeData: Send> + Sync> Send for NodeQueued<'a, Q> where
-    LockedQueue<'a, Q>: Send
+unsafe impl<
+    L: AsList<List<T, S, SP>> + Sync,
+    T: NodeData<L, S, SP> + Send,
+    S: ListState,
+    SP: SyncPrimitives,
+> Send for NodeUnlinked<'_, L, T, S, SP>
 {
 }
-unsafe impl<'a, Q: QueueRef<NodeData: Sync> + Sync> Sync for NodeQueued<'a, Q> where
-    LockedQueue<'a, Q>: Sync
+unsafe impl<
+    L: AsList<List<T, S, SP>> + Sync,
+    T: NodeData<L, S, SP> + Sync,
+    S: ListState,
+    SP: SyncPrimitives,
+> Sync for NodeUnlinked<'_, L, T, S, SP>
 {
 }
 
-node_getters!(NodeQueued<'a, Q: QueueRef>, Q::NodeData);
+node_ref!(
+    NodeUnlinked<
+        'a,
+        L: AsList<List<T, S, SP>>,
+        T: NodeData<L, S, SP>,
+        S: ListState,
+        SP: SyncPrimitives,
+    >,
+    T,
+    self.0.link()
+);
 
-impl<'a, Q: QueueRef> NodeQueued<'a, Q> {
+impl<'a, L: AsList<List<T, S, SP>>, T: NodeData<L, S, SP>, S: ListState, SP: SyncPrimitives>
+    NodeUnlinked<'a, L, T, S, SP>
+{
     #[inline]
-    pub fn queue(&self) -> &'a Q {
-        self.queue
+    pub fn list(&self) -> &'a L {
+        self.0.list()
     }
+}
 
+impl<'a, L: AsList<List<T, (), SP>>, T: NodeData<L, (), SP>, SP: SyncPrimitives>
+    NodeUnlinked<'a, L, T, (), SP>
+{
     #[inline]
-    pub fn dequeue(mut self) -> (&'a Q, LockedQueue<'a, Q>) {
-        let node = unsafe { self.node.cast().as_ref() };
-        unsafe { self.locked.remove(node, ptr::null_mut(), false) };
-        (self.queue, self.locked)
+    pub fn push_back(self, order: Ordering) {
+        let list = self.list().as_list();
+        let on_pushed = || self.0.linked.set(true);
+        let link = self.0.link();
+        let _ = unsafe { list.push_back(link, order, Relaxed, |_| None, |_| true, on_pushed) };
     }
+}
 
+impl<'a, L: AsList<List<T, usize, SP>>, T: NodeData<L, usize, SP>, SP: SyncPrimitives>
+    NodeUnlinked<'a, L, T, usize, SP>
+{
+    pub fn try_update_state_or_push_back_with<
+        F: FnMut(Pin<&mut T>, usize) -> Option<usize>,
+        P: FnMut(Pin<&mut T>, Option<usize>) -> bool,
+        U: FnOnce(Pin<&mut T>, usize),
+    >(
+        mut self,
+        set_order: Ordering,
+        fetch_order: Ordering,
+        mut f: F,
+        on_state_updated: U,
+        mut on_push_back: P,
+    ) -> Result<usize, bool> {
+        let list = self.list().as_list();
+        let link = self.0.link();
+        let f = |state| f(Self(self.0).data_mut(), state);
+        let on_push_back = |state| on_push_back(Self(self.0).data_mut(), state);
+        let on_pushed = || self.0.linked.set(true);
+        unsafe { list.push_back(link, set_order, fetch_order, f, on_push_back, on_pushed) }
+            .inspect(|&state| on_state_updated(self.data_mut(), state))
+    }
+}
+
+pub struct NodeLinked<
+    'a,
+    L: AsList<List<T, S, SP>>,
+    T: NodeData<L, S, SP>,
+    S: ListState = (),
+    SP: SyncPrimitives = DefaultSyncPrimitives,
+> {
+    node: &'a Node<L, T, S, SP>,
+    locked: LockedList<'a, T, S, SP>,
+}
+
+unsafe impl<
+    'a,
+    L: AsList<List<T, S, SP>> + Sync,
+    T: NodeData<L, S, SP> + Send,
+    S: ListState,
+    SP: SyncPrimitives,
+> Send for NodeLinked<'a, L, T, S, SP>
+where
+    LockedList<'a, T, S, SP>: Send,
+{
+}
+unsafe impl<
+    'a,
+    L: AsList<List<T, S, SP>> + Sync,
+    T: NodeData<L, S, SP> + Sync,
+    S: ListState,
+    SP: SyncPrimitives + Sync,
+> Sync for NodeLinked<'a, L, T, S, SP>
+where
+    LockedList<'a, T, S, SP>: Sync,
+{
+}
+
+node_ref!(
+    NodeLinked<
+        'a,
+        L: AsList<List<T, S, SP>>,
+        T: NodeData<L, S, SP>,
+        S: ListState,
+        SP: SyncPrimitives,
+    >,
+    T,
+    self.node.link()
+);
+
+impl<'a, L: AsList<List<T, S, SP>>, T: NodeData<L, S, SP>, S: ListState, SP: SyncPrimitives>
+    NodeLinked<'a, L, T, S, SP>
+{
+    #[inline]
+    pub fn list(&self) -> &'a L {
+        self.node.list()
+    }
+}
+
+impl<'a, L: AsList<List<T, (), SP>>, T: NodeData<L, (), SP>, SP: SyncPrimitives>
+    NodeLinked<'a, L, T, (), SP>
+{
     #[inline]
     #[allow(clippy::type_complexity)]
-    pub fn dequeue_try_set_queue_state(
+    pub fn unlink(mut self) -> (NodeUnlinked<'a, L, T, (), SP>, LockedList<'a, T, (), SP>) {
+        unsafe { self.locked.remove(self.node.link(), || (), false, false) };
+        self.node.linked.set(false);
+        (NodeUnlinked(self.node), self.locked)
+    }
+}
+
+impl<'a, L: AsList<List<T, usize, SP>>, T: NodeData<L, usize, SP>, SP: SyncPrimitives>
+    NodeLinked<'a, L, T, usize, SP>
+{
+    #[inline]
+    #[allow(clippy::type_complexity)]
+    pub fn unlink<F: FnOnce() -> usize>(
         mut self,
-        state: Q::State,
-    ) -> Result<(&'a Q, LockedQueue<'a, Q>), (&'a Q, LockedQueue<'a, Q>)> {
-        let node = unsafe { self.node.cast().as_ref() };
-        if unsafe { (self.locked).remove(node, StateOrPtr::State(state).into(), false) } {
-            Ok((self.queue, self.locked))
-        } else {
-            Err((self.queue, self.locked))
-        }
+        new_state_if_last_node: F,
+    ) -> (
+        NodeUnlinked<'a, L, T, usize, SP>,
+        LockedList<'a, T, usize, SP>,
+        bool,
+    ) {
+        let (next, tail) = unsafe {
+            self.locked
+                .remove(self.node.link(), new_state_if_last_node, false, false)
+        };
+        let state_updated = next.is_none() && tail.is_none();
+        self.node.linked.set(false);
+        (NodeUnlinked(self.node), self.locked, state_updated)
     }
 }
 
-pub struct NodeDequeued<'a, Q: QueueRef> {
-    node: NonNull<NodeInner<Q::NodeData>>,
-    queue: &'a Q,
-}
+struct NodeDropped<
+    'a,
+    L: AsList<List<T, S, SP>>,
+    T: NodeData<L, S, SP>,
+    S: ListState,
+    SP: SyncPrimitives,
+>(&'a Node<L, T, S, SP>);
 
-unsafe impl<Q: QueueRef<NodeData: Send> + Sync> Send for NodeDequeued<'_, Q> {}
-unsafe impl<Q: QueueRef<NodeData: Sync> + Sync> Sync for NodeDequeued<'_, Q> {}
+node_ref!(
+    NodeDropped<
+        'a,
+        L: AsList<List<T, S, SP>>,
+        T: NodeData<L, S, SP>,
+        S: ListState,
+        SP: SyncPrimitives,
+    >,
+    T,
+    self.0.link()
+);
 
-node_getters!(NodeDequeued<'a, Q: QueueRef>, Q::NodeData);
+pub(crate) mod private {
+    use core::ptr::NonNull;
 
-impl<'a, Q: QueueRef> NodeDequeued<'a, Q> {
-    #[inline]
-    pub fn queue(&self) -> &'a Q {
-        self.queue
-    }
+    use crate::node::{NodeInner, NodeLink};
 
-    #[inline]
-    pub fn reset(self) -> NodeUnqueued<'a, Q> {
-        let node = unsafe { self.node.cast::<NodeLink>().as_mut() };
-        node.prev.store_mut(ptr::null_mut());
-        node.next.store_mut(ptr::null_mut());
-        NodeUnqueued {
-            queue: self.queue,
-            node: self.node,
-        }
-    }
-}
+    pub(crate) trait NodeRef {
+        fn node(&self) -> NonNull<NodeLink>;
 
-macro_rules! node_getters {
-    ($node:ident<$($lf:lifetime,)* $($arg:ident $(:$bound:path)?),*>, $data:ty) => {
-        impl<$($lf,)* $($arg $(:$bound)?),*> $node<$($lf,)* $($arg),*> {
-            #[cfg(not(loom))]
-            fn data_ptr(&self) -> *mut $data {
-                unsafe { &raw mut (*self.node.as_ptr().cast::<crate::node::NodeInner<$data>>()).data }
-            }
-
+        #[inline(always)]
+        fn data_ptr<T>(&self) -> *mut T {
+            let inner = self.node().as_ptr().cast::<NodeInner<T>>();
             #[cfg(loom)]
-            fn data_ptr(&self) -> *mut loom::cell::UnsafeCell<$data> {
-                unsafe { &raw mut (*self.node.as_ptr().cast::<crate::node::NodeInner<$data>>()).data }
+            unsafe {
+                (*inner).access.set(());
             }
+            unsafe { &raw mut (*inner).data }
+        }
+    }
+}
 
-            #[cfg(not(loom))]
-            #[inline]
-            pub fn data(&self) -> &$data {
-                unsafe { &*self.data_ptr() }
-            }
+#[expect(private_bounds)]
+pub trait NodeRef<T>: private::NodeRef {
+    #[inline]
+    fn data(&self) -> &T {
+        unsafe { &*self.data_ptr::<T>() }
+    }
 
-            #[cfg(not(loom))]
-            #[inline]
-            pub fn data_mut(&mut self) -> core::pin::Pin<&mut $data> {
-                unsafe { core::pin::Pin::new_unchecked(&mut *self.data_ptr()) }
-            }
+    #[inline]
+    fn data_mut(&mut self) -> Pin<&mut T> {
+        unsafe { Pin::new_unchecked(&mut *self.data_ptr::<T>()) }
+    }
+}
 
-            #[inline]
-            #[doc(hidden)]
-            pub fn with_data<F: FnOnce(&$data) -> R, R>(&self, f: F) -> R {
-                #[cfg(not(loom))]
-                return f(self.data());
-                #[cfg(loom)]
-                return unsafe { (*self.data_ptr()).with(|data| f(&*data)) }
-            }
-
-            #[inline]
-            #[doc(hidden)]
-            pub fn with_data_mut<F: FnOnce(core::pin::Pin<&mut $data>) -> R, R>(&mut self, f: F) -> R {
-                #[cfg(not(loom))]
-                return f(self.data_mut());
-                #[cfg(loom)]
-                return unsafe { (*self.data_ptr()).with_mut(|data| f(core::pin::Pin::new_unchecked(&mut *data))) }
+macro_rules! node_ref {
+    ($ty:ident<$($lf:lifetime,)* $($arg:ident $(:$bound:path)?),* $(,)?>, $data:ty, self.$($node_path:tt)*) => {
+        impl<$($lf,)* $($arg $(:$bound)?),*> crate::node::private::NodeRef
+            for $ty<$($lf,)* $($arg),*>
+        {
+            #[inline(always)]
+            fn node(&self) -> core::ptr::NonNull<crate::node::NodeLink> {
+                self.$($node_path)*
             }
         }
 
+        impl<$($lf,)* $($arg $(:$bound)?),*> crate::node::NodeRef<$data>
+            for $ty<$($lf,)* $($arg),*>
+        {
+        }
 
-        #[cfg(not(loom))]
-        impl<$($lf,)* $($arg $(:$bound)?),*> core::ops::Deref for $node<$($lf,)* $($arg),*> {
+        impl<$($lf,)* $($arg $(:$bound)?),*> core::ops::Deref for $ty<$($lf,)* $($arg),*> {
             type Target = $data;
             #[inline]
             fn deref(&self) -> &Self::Target {
-                self.data()
+                crate::node::NodeRef::data(self)
             }
         }
 
-        #[cfg(not(loom))]
-        impl<$($lf,)* $($arg $(:$bound)?),*> core::ops::DerefMut for $node<$($lf,)* $($arg),*>
+        impl<$($lf,)* $($arg $(:$bound)?),*> core::ops::DerefMut for $ty<$($lf,)* $($arg),*>
         where
             Self::Target: Unpin
         {
             #[inline]
             fn deref_mut(&mut self) -> &mut Self::Target {
-                self.data_mut().get_mut()
+                crate::node::NodeRef::data_mut(self).get_mut()
             }
         }
     };
 }
-pub(crate) use node_getters;
+pub(crate) use node_ref;

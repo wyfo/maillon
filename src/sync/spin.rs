@@ -16,7 +16,7 @@ unsafe impl Mutex for SpinMutex {
     #[inline]
     fn lock(&self) -> Self::Guard<'_> {
         while self.0.swap(true, Acquire) {
-            while !self.0.load(Relaxed) {
+            while self.0.load(Relaxed) {
                 hint::spin_loop();
             }
         }
