@@ -1,6 +1,6 @@
 #[cfg(feature = "atomic-wait")]
 pub use super::atomic_wait::AtomicParker;
-#[cfg(feature = "pthread")]
+#[cfg(all(feature = "pthread", unix))]
 pub use super::pthread::PthreadParker;
 pub use super::spin::SpinParker;
 #[cfg(feature = "std")]
@@ -30,7 +30,7 @@ cfg_if::cfg_if! {
         pub type DefaultParker = AtomicParker;
     } else if #[cfg(feature = "std")] {
         pub type DefaultParker = StdParker;
-    } else if #[cfg(feature = "pthread")] {
+    } else if #[cfg(all(feature = "pthread", unix))] {
         pub type DefaultParker = PthreadParker;
     } else {
         pub type DefaultParker = SpinParker;

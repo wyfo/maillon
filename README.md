@@ -46,7 +46,7 @@ See [examples](examples) for full implementations of `tokio::sync::Notify` and `
 | `atomic-wait` | Futex-based parker via the `atomic-wait` crate |
 | `lock_api` | `lock_api::RawMutex` trait implementation |
 | `parking_lot` | `parking_lot` mutex; implies `lock_api` |
-| `pthread` | Raw pthread mutex and condition variable; implies `alloc` |
+| `pthread` | Raw pthread mutex and condition variable, on Unix targets only; implies `alloc` |
 
 Without any features enabled, the library falls back to spin-based mutex and parker.
 

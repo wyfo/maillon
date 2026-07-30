@@ -1,4 +1,4 @@
-#[cfg(feature = "pthread")]
+#[cfg(all(feature = "pthread", unix))]
 pub use super::pthread::PthreadMutex;
 pub use super::spin::SpinMutex;
 #[cfg(feature = "std")]
@@ -36,7 +36,7 @@ cfg_if::cfg_if! {
         pub type DefaultMutex = parking_lot::RawMutex;
     } else if #[cfg(feature = "std")] {
         pub type DefaultMutex = StdMutex;
-    } else if #[cfg(feature = "pthread")] {
+    } else if #[cfg(all(feature = "pthread", unix))] {
         pub type DefaultMutex = PthreadMutex;
     } else {
         pub type DefaultMutex = SpinMutex;
