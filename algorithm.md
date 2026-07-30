@@ -53,8 +53,6 @@ where `NodeLink` is the [linking part](https://www.youtube.com/watch?v=eVTXPUF4O
 
 Because the queue stores raw pointers to nodes, those pointers must remain valid as long as the nodes are queued. This is achieved by requiring nodes to be pinned before insertion. It also means that nodes must be removed from the queue before being dropped, which is done in the node's [destructor](#node-data-and-aliasing).
 
-Synchronization of node insertion and removal using parker is done differently depending on the platform, as detailed in the dedicated [section](#parking-algorithm).
-
 ## Node insertion
 
 Here is the insertion simplified code:
@@ -82,8 +80,8 @@ impl<T, S: QueueState, SP: SyncPrimitives> Queue<T, S, SP> {
             }
         }
         let prev_next = if tail.is_null() { &self.head } else { &(*tail).next };
-        // Set previous tail's next, unparking the thread removing the node if needed
-        if unsafe { !(prev_next.as_ref().swap(node.as_ptr().cast(), Release)).is_null() } {
+        // Set previous tail's next, unparking the thread removing the node if needed.
+        if unsafe { !(prev_next.as_ref().swap(node.as_ptr().cast(), Relaxed)).is_null() } {
             self.parker.unpark();
         }
     }
@@ -105,18 +103,18 @@ impl<T, S: QueueState, SP: SyncPrimitives> LockedQueue<T, S, SP> {
     fn get_next(&self, next: &AtomicPtr<NodeLink>) -> NonNull<NodeLink> {
         // Spin a bit before parking in case next is already set.
         for _ in 0..1 + S::SPIN_BEFORE_PARK {
-            if let Some(next) = NonNull::new(next.load(Acquire)) {
+            if let Some(next) = NonNull::new(next.load(Relaxed)) {
                 return next;
             }
             hint::spin_loop();
         }
         const PARKED: *mut NodeLink = ptr::without_provenance_mut(1);
-        if let Err(next) = next.compare_exchange(ptr::null_mut(), PARKED, Relaxed, Acquire) {
+        if let Err(next) = next.compare_exchange(ptr::null_mut(), PARKED, Relaxed, Relaxed) {
             return unsafe { NonNull::new_unchecked(next) };
         }
         loop {
             unsafe { self.parker.park() };
-            let next = next.load(Acquire);
+            let next = next.load(Relaxed);
             if next != PARKED {
                 return unsafe { NonNull::new_unchecked(next) };
             }
@@ -129,7 +127,17 @@ Notice `get_next` is a method of `LockedQueue`, meaning the queue's lock must be
 
 On the removal side, the next pointer is replaced with a `PARKED` sentinel via a CAS. If the CAS succeeds, the removal thread parks. On the insertion side, the next pointer is overwritten via an atomic swap. If the swap returns the `PARKED` sentinel — meaning the removal thread had set it — the insertion thread calls `unpark`.
 
-Both sides synchronize through the modification order of a single atomic, so no `SeqCst` ordering is involved. Because the `unpark` may be issued between the removal thread's CAS and its call to `park`, this relies on the `Parker` implementation delivering an already-issued `unpark` as an immediate return, so the order of park vs. unpark does not matter.
+Because the `unpark` may be issued between the removal thread's CAS and its call to `park`, this relies on the `Parker` implementation delivering an already-issued `unpark` as an immediate return, so the order of park vs. unpark does not matter.
+
+## Node access
+
+Node are accessed in the locked queue using the `head`/`next` pointer chaining with `get_next`, but the synchronization is done through the tail pointer:
+- insertion is done with a `SeqCst` CAS on the tail, heading a `Release` edge
+- to know if `head`/`next` can be loaded to retrieve a node, the tail must be loaded first with at least `Acquire` ordering.
+
+As the queue is locked, there can't be a concurrent node removal. It means that loading a node on the tail means the queue is not empty and that the `head` pointer will be set, the same way as loading another node than the current one means its `next` will be set. 
+
+Because tail updates are all RMW, they form a release sequence, so an `Acquire` load of a node on the tail ensures a happens-before relation with all the inserted nodes before it in the queue. As a consequence, `head`/`next` accesses doesn't need to carry any synchronization and be `Relaxed`.
 
 ## Node removal
 
@@ -142,32 +150,35 @@ impl<T, S: QueueState, SP: SyncPrimitives> LockedQueue<T, S, SP> {
     unsafe fn remove(&self, node: *mut NodeLink, wait_enqueued: bool) {
         let prev = (*node).prev.load(Relaxed);
         let is_head = prev == HEAD_MARKER;
-        let prev_next_ptr = if is_head { &self.head } else { &(*prev).next };
+        let prev_next = if is_head { &self.head } else { &(*prev).next };
         // In some case, node is removed concurrently to its enqueuing,
         // so it is needed to wait for the enqueuing to end.
         if wait_enqueued {
             let prev_next = self.get_next(prev_next);
             debug_assert_eq!(prev_next.as_ptr(), node);
         }
-        let mut next = node.next();
-        // If next pointer is not set, node is assumed to be the tail;
-        // reset prev_next (the predecessor's next pointer, or queue's head) and
-        // update the tail to point to the predecessor (or null).
-        // prev_next must be cleared before the tail CAS: otherwise a concurrent
-        // enqueuer whose phase 1 CAS succeeds between the tail CAS and the clear
-        // could have its phase 2 write overwritten.
-        if next.is_none() {
+        // If the node is the tail, then its predecessor's next pointer (or the head) must
+        // be reset, and then tail must be updated to point on the predecessor (or NULL). 
+        // prev_next must be reset before the tail CAS, hence the Release ordering on the CAS.
+        // Otherwise, a concurrent enqueuer whose phase 1 CAS succeeds between the tail CAS
+        // and the clear could have its phase 2 write overwritten.
+        let mut is_tail = false;
+        if self.tail.load(Acquire) == node {
             prev_next.store(ptr::null_mut(), Relaxed);
             let new_tail = if is_head { ptr::null_mut() } else { prev };
-            if ((self.tail).compare_exchange(node, new_tail, SeqCst, Relaxed)).is_err() {
+            match (self.tail).compare_exchange(node, new_tail, Release, Relaxed) {
+                Ok(_) => is_tail = true,
                 // The tail CAS failed, meaning a concurrent insertion (phase 1) appended
-                // a new node after this one since we read next. Wait for that insertion's
-                // phase 2 to write the next pointer.
-                next = Some(self.get_next(&node.next));
+                // a new node after this one since we loaded the tail, which was then stale.
+                // The read half of this failed RMW is what covers the successor dereferenced
+                // below, so it must be fenced with `Acquire` before `get_next` is called.
+                Err(_) => fence(Acquire),
             }
         }
-        // Unlink the node if it has a next pointer
-        if let Some(next) = next {
+        // Unlink the node if it has a successor, waiting for that insertion's phase 2
+        // to write the next pointer.
+        if !is_tail {
+            let next = self.get_next(&(*node).next);
             unsafe { next.as_ref().prev.store(prev, Relaxed) };
             prev_next.store(next.as_ptr(), Relaxed);
         }
@@ -236,8 +247,11 @@ impl<'a, T, S: QueueState, SP: SyncPrimitives> Drain<'a, T, S, SP> {
             head = locked.get_next(&locked.queue.head).as_ptr();
             // Reset the head
             locked.head.store(ptr::null_mut(), Relaxed);
-            // Swap the tail to reset it and keep the current enqueued nodes
-            let tail = locked.tail.swap(ptr::null_mut(), SeqCst);
+            // Swap the tail to reset it and keep the current enqueued nodes.
+            // `Release` for the same reason as the removal CAS, `Acquire` 
+            // because new nodes may be inserted between this swap and the
+            // previous tail load.
+            let tail = locked.tail.swap(ptr::null_mut(), AcqRel);
         }
         Self {
             sentinel_node: NodeLink {
@@ -313,7 +327,7 @@ In a semaphore, the counter reaches zero when waiters start to enqueue, so the q
 
 [`loom`](http://crates.io/crates/loom) support is enabled through `#[cfg(loom)]`.
 
-`loom`'s biggest limitation is its lack of support for `SeqCst` ordering. The parking algorithm is unaffected, as it relies on modification order rather than `SeqCst` cross-object ordering, but tail pointer manipulation does use `SeqCst`. Supporting `loom` therefore requires an adaptation: `SeqCst` loads of the tail pointer are replaced with a CAS, so correctness relies on the modification order of the tail atomic rather than the `SeqCst` total order.
+`loom`'s biggest limitation is its lack of support for `SeqCst` atomic operations, which prevents some workflows to be tested.
 
 Moreover, `loom` doesn't support `UnsafePinned` or pointer-based workflows, requiring the use of `loom::sync::UnsafeCell` to check access correctness. So `NodeInner` becomes:
 ```rust

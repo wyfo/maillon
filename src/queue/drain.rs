@@ -27,7 +27,9 @@ impl<'a, T, S: QueueState, SP: SyncPrimitives> Drain<'a, T, S, SP> {
         if locked.tail().is_some() {
             head = locked.get_next(&locked.queue.head).as_ptr();
             locked.head.store(ptr::null_mut(), Relaxed);
-            match locked.tail.swap(new_tail, SeqCst).into() {
+            // TODO Release because head store above
+            // TODO Acquire because new nodes can have been added since tail() call above
+            match locked.tail.swap(new_tail, AcqRel).into() {
                 StateOrPtr::Ptr(ptr) => tail = ptr.as_ptr(),
                 _ => unsafe { unreachable_unchecked() },
             }
