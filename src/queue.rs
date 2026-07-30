@@ -6,10 +6,8 @@ use core::{hint, marker::PhantomData, mem, mem::ManuallyDrop, ops::Deref, ptr, p
 use crate::{
     loom::{
         AtomicPtrExt,
-        sync::atomic::fence,
         sync::{
-            atomic,
-            atomic::{AtomicPtr, Ordering::*},
+            atomic::{AtomicPtr, Ordering::*, fence},
         },
     },
     node::{NodeLink, RawNodeState, node_getters},
