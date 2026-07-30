@@ -33,11 +33,6 @@ impl NodeLink {
     }
 
     #[inline(always)]
-    pub(crate) fn next(&self) -> Option<NonNull<NodeLink>> {
-        NonNull::new(self.next.load(SeqCst))
-    }
-
-    #[inline(always)]
     pub(crate) fn state(&self) -> RawNodeState {
         match self.prev.load(Acquire).addr().min(2) {
             0 => RawNodeState::Unqueued,

@@ -6,6 +6,7 @@ use core::{hint, marker::PhantomData, mem, mem::ManuallyDrop, ops::Deref, ptr, p
 use crate::{
     loom::{
         AtomicPtrExt,
+        sync::atomic::fence,
         sync::{
             atomic,
             atomic::{AtomicPtr, Ordering::*},
@@ -267,7 +268,7 @@ impl<T, S: QueueState, SP: SyncPrimitives> Queue<T, S, SP> {
         let mut tail = self.tail.load(Relaxed);
         let prev = loop {
             if !check_tail(tail) {
-                atomic::fence(Acquire);
+                fence(Acquire);
                 unsafe { node.as_mut().prev.store_mut(ptr::null_mut()) };
                 return false;
             }
@@ -282,8 +283,8 @@ impl<T, S: QueueState, SP: SyncPrimitives> Queue<T, S, SP> {
         };
         let prev_next = NonNull::from(prev.map_or(&self.head, |p| unsafe { &p.as_ref().next }));
         if SP::Parker::NEVER_BLOCKS {
-            unsafe { prev_next.as_ref() }.store(node.as_ptr(), Release);
-        } else if unsafe { !(prev_next.as_ref().swap(node.as_ptr(), Release)).is_null() } {
+            unsafe { prev_next.as_ref() }.store(node.as_ptr(), Relaxed);
+        } else if unsafe { !(prev_next.as_ref().swap(node.as_ptr(), Relaxed)).is_null() } {
             self.unpark();
         }
         true
@@ -322,12 +323,10 @@ pub struct LockedQueue<'a, T, S: QueueState = (), SP: SyncPrimitives = DefaultSy
 }
 
 impl<'a, T, S: QueueState, SP: SyncPrimitives> LockedQueue<'a, T, S, SP> {
+    // TODO requires an Acquire load on the tail before calling it (maybe make it unsafe?)
     #[inline(always)]
     fn get_next(&self, next: &AtomicPtr<NodeLink>) -> NonNull<NodeLink> {
-        if let Some(next) = NonNull::new(next.load(Acquire)) {
-            return next;
-        }
-        self.wait_for_next(next)
+        NonNull::new(next.load(Relaxed)).unwrap_or_else(|| self.wait_for_next(next))
     }
 
     #[cold]
@@ -336,24 +335,24 @@ impl<'a, T, S: QueueState, SP: SyncPrimitives> LockedQueue<'a, T, S, SP> {
         if SP::Parker::NEVER_BLOCKS {
             loop {
                 unsafe { self.parker.park() };
-                if let Some(next) = NonNull::new(next.load(Acquire)) {
+                if let Some(next) = NonNull::new(next.load(Relaxed)) {
                     return next;
                 }
             }
         }
         for _ in 0..SP::SPIN_BEFORE_PARK {
             hint::spin_loop();
-            if let Some(next) = NonNull::new(next.load(Acquire)) {
+            if let Some(next) = NonNull::new(next.load(Relaxed)) {
                 return next;
             }
         }
         const PARKED: *mut NodeLink = ptr::without_provenance_mut(1);
-        if let Err(next) = next.compare_exchange(ptr::null_mut(), PARKED, Relaxed, Acquire) {
+        if let Err(next) = next.compare_exchange(ptr::null_mut(), PARKED, Relaxed, Relaxed) {
             return unsafe { NonNull::new_unchecked(next) };
         }
         loop {
             unsafe { self.parker.park() };
-            let next = next.load(Acquire);
+            let next = next.load(Relaxed);
             if next != PARKED {
                 return unsafe { NonNull::new_unchecked(next) };
             }
@@ -402,7 +401,6 @@ impl<'a, T, S: QueueState, SP: SyncPrimitives> LockedQueue<'a, T, S, SP> {
         wait_enqueued: bool,
         prev: *mut NodeLink,
     ) -> bool {
-        let mut is_empty = false;
         let is_head = prev == HEAD_MARKER;
         let prev_next = if is_head {
             &self.head
@@ -413,24 +411,27 @@ impl<'a, T, S: QueueState, SP: SyncPrimitives> LockedQueue<'a, T, S, SP> {
             let prev_next = self.get_next(prev_next);
             debug_assert_eq!(prev_next, node.into());
         }
-        let mut next = node.next();
-        if next.is_none() {
+        let node_ptr = StateOrPtr::Ptr(NonNull::from(node)).into();
+        let mut is_tail = false;
+        if self.tail.load(Acquire) == node_ptr {
             prev_next.store(ptr::null_mut(), Relaxed);
             if !is_head {
                 new_tail = StateOrPtr::Ptr(unsafe { NonNull::new_unchecked(prev) }).into();
             }
-            let node_ptr = StateOrPtr::Ptr(NonNull::from(node)).into();
-            match (self.tail).compare_exchange(node_ptr, new_tail, SeqCst, Relaxed) {
-                Ok(_) => is_empty = true,
-                Err(_) => next = Some(self.get_next(&node.next)),
+            // TODO Release because of prev_next store above
+            match (self.tail).compare_exchange(node_ptr, new_tail, Release, Relaxed) {
+                Ok(_) => is_tail = true,
+                // TODO fence to call get_next after
+                Err(_) => fence(Acquire),
             }
         }
-        if let Some(next) = next {
+        if !is_tail {
+            let next = self.get_next(&node.next);
             unsafe { next.as_ref().prev.store(prev, Relaxed) };
             prev_next.store(next.as_ptr(), Relaxed);
         }
         node.prev.store(RawNodeState::Dequeued.into_ptr(), Release);
-        is_empty
+        is_tail
     }
 }
 
