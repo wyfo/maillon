@@ -29,23 +29,10 @@ pub unsafe trait Mutex: Send + Sync {
     unsafe fn unlock<'a>(&'a self, guard: Self::Guard<'a>);
 }
 
-cfg_if::cfg_if! {
-    if #[cfg(loom)] {
-        pub type DefaultMutex = StdMutex;
-    } else if #[cfg(feature = "parking_lot")] {
-        pub type DefaultMutex = parking_lot::RawMutex;
-    } else if #[cfg(feature = "std")] {
-        pub type DefaultMutex = StdMutex;
-    } else if #[cfg(all(feature = "pthread", unix))] {
-        pub type DefaultMutex = PthreadMutex;
-    } else {
-        pub type DefaultMutex = SpinMutex;
-    }
-}
-
 #[cfg(feature = "lock_api")]
-unsafe impl<M: lock_api::RawMutex + Send + Sync> Mutex for M {
-    const INIT: Self = <Self as lock_api::RawMutex>::INIT;
+unsafe impl<R: lock_api::RawMutex + Send + Sync> Mutex for lock_api::Mutex<R, ()> {
+    #[allow(clippy::declare_interior_mutable_const)]
+    const INIT: Self = lock_api::Mutex::new(());
     type Guard<'a>
         = ()
     where
@@ -53,11 +40,25 @@ unsafe impl<M: lock_api::RawMutex + Send + Sync> Mutex for M {
 
     #[inline]
     fn lock(&self) -> Self::Guard<'_> {
-        lock_api::RawMutex::lock(self);
+        core::mem::forget(lock_api::Mutex::lock(self));
     }
     #[inline]
     unsafe fn unlock<'a>(&'a self, _guard: Self::Guard<'a>) {
-        // SAFETY: same contract
-        unsafe { self.unlock() }
+        // SAFETY: `lock` forgot the guard it acquired, so this thread logically owns it.
+        unsafe { lock_api::Mutex::force_unlock(self) };
+    }
+}
+
+cfg_if::cfg_if! {
+    if #[cfg(loom)] {
+        pub type DefaultMutex = StdMutex;
+    } else if #[cfg(feature = "parking_lot")] {
+        pub type DefaultMutex = parking_lot::Mutex<()>;
+    } else if #[cfg(feature = "std")] {
+        pub type DefaultMutex = StdMutex;
+    } else if #[cfg(all(feature = "pthread", unix))] {
+        pub type DefaultMutex = PthreadMutex;
+    } else {
+        pub type DefaultMutex = SpinMutex;
     }
 }

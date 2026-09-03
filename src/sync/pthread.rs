@@ -6,10 +6,10 @@ use core::{
     mem::MaybeUninit,
     ptr,
     ptr::NonNull,
-    sync::atomic::{AtomicPtr, AtomicUsize, Ordering::*},
+    sync::atomic::{AtomicPtr, Ordering::*},
 };
 
-use crate::sync::{mutex::Mutex, parker::Parker};
+use crate::sync::{condvar::CondVar, mutex::Mutex};
 
 fn unwrap(err_code: i32) {
     if err_code != 0 {
@@ -132,8 +132,12 @@ impl Drop for RawCondvar {
 }
 
 #[derive(Debug)]
-struct PthreadCondvar(LazyBox<RawCondvar>);
-impl PthreadCondvar {
+pub struct PthreadCondVar(LazyBox<RawCondvar>);
+
+unsafe impl Send for PthreadCondVar {}
+unsafe impl Sync for PthreadCondVar {}
+
+impl PthreadCondVar {
     fn raw(&self) -> *mut libc::pthread_cond_t {
         unsafe {
             UnsafeCell::raw_get(&raw const (*self.0.get_or_init(RawCondvar::init).as_ptr()).0)
@@ -141,49 +145,28 @@ impl PthreadCondvar {
     }
 }
 
-#[derive(Debug)]
-pub struct PthreadParker {
-    state: AtomicUsize,
-    mutex: PthreadMutex,
-    condvar: PthreadCondvar,
-}
+// SAFETY: `pthread_cond_wait` reacquires the mutex before returning, and
+// `pthread_cond_broadcast` synchronizes-with the woken `pthread_cond_wait` calls through the
+// mutex.
+unsafe impl CondVar<PthreadMutex> for PthreadCondVar {
+    const INIT: Self = Self(LazyBox::new());
 
-impl PthreadParker {
-    const EMPTY: usize = 0;
-    const NOTIFIED: usize = 1;
-    const PARKED: usize = usize::MAX;
-}
-
-// implementation inspired for std Parker futex/pthread implementation
-impl Parker for PthreadParker {
-    #[allow(clippy::declare_interior_mutable_const)]
-    const INIT: Self = Self {
-        state: AtomicUsize::new(Self::EMPTY),
-        mutex: PthreadMutex::INIT,
-        condvar: PthreadCondvar(LazyBox::new()),
-    };
-
+    // the guard is returned as required by the trait, even though it is `()` here
+    #[allow(clippy::semicolon_if_nothing_returned)]
     #[inline]
-    unsafe fn park(&self) {
-        if self.state.fetch_sub(1, Acquire) == Self::NOTIFIED {
-            return;
-        }
-        self.mutex.lock();
-        while (self.state)
-            .compare_exchange(Self::NOTIFIED, Self::EMPTY, Acquire, Relaxed)
-            .is_err()
-        {
-            unsafe { libc::pthread_cond_wait(self.condvar.raw(), self.mutex.raw()) };
-        }
-        unsafe { self.mutex.unlock(()) };
+    unsafe fn wait<'a>(
+        &self,
+        mutex: &'a PthreadMutex,
+        guard: <PthreadMutex as Mutex>::Guard<'a>,
+    ) -> <PthreadMutex as Mutex>::Guard<'a> {
+        unwrap(unsafe { libc::pthread_cond_wait(self.raw(), mutex.raw()) });
+        guard
     }
 
     #[inline]
-    fn unpark(&self) {
-        if self.state.swap(Self::NOTIFIED, Release) == Self::PARKED {
-            self.mutex.lock();
-            unsafe { self.mutex.unlock(()) };
-            unsafe { libc::pthread_cond_signal(self.condvar.raw()) };
-        }
+    fn notify_all(&self) {
+        unwrap(unsafe { libc::pthread_cond_broadcast(self.raw()) });
     }
 }
+
+pub type PthreadParker = super::parker::CondVarParker<PthreadMutex, PthreadCondVar>;
