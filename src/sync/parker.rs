@@ -23,6 +23,7 @@ pub trait Parker: Send + Sync {
     /// # Safety
     ///
     /// `park_until` can only be called by a single thread at a time.
+    /// `notified` must not panic.
     unsafe fn park_until<T>(&self, notified: impl FnMut() -> Option<T>) -> T;
     fn unpark(&self);
 }
