@@ -62,7 +62,7 @@ unsafe impl CondVar<StdMutex> for StdCondVar {
     }
 
     #[inline]
-    fn notify_all(&self) {
-        self.0.notify_all();
+    fn notify_one(&self) {
+        self.0.notify_one();
     }
 }

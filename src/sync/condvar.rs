@@ -17,7 +17,7 @@ use crate::sync::mutex::Mutex;
 /// valid guard for `mutex`; if the mutex is released while waiting, it must be reacquired
 /// before returning.
 ///
-/// Calls to [`notify_all`](Self::notify_all) must *synchronize-with* the
+/// Calls to [`notify_one`](Self::notify_one) must *synchronize-with* the
 /// [`wait`](Self::wait) calls they wake up.
 pub unsafe trait CondVar<M: Mutex>: Send + Sync {
     const INIT: Self;
@@ -33,5 +33,5 @@ pub unsafe trait CondVar<M: Mutex>: Send + Sync {
     /// The guard must have been returned from [`Mutex::lock`] called on `mutex`, and `mutex`
     /// must be the only mutex ever paired with this condition variable.
     unsafe fn wait<'a>(&self, mutex: &'a M, guard: M::Guard<'a>) -> M::Guard<'a>;
-    fn notify_all(&self);
+    fn notify_one(&self);
 }

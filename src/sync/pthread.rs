@@ -164,8 +164,8 @@ unsafe impl CondVar<PthreadMutex> for PthreadCondVar {
     }
 
     #[inline]
-    fn notify_all(&self) {
-        unwrap(unsafe { libc::pthread_cond_broadcast(self.raw()) });
+    fn notify_one(&self) {
+        unwrap(unsafe { libc::pthread_cond_signal(self.raw()) });
     }
 }
 

@@ -282,12 +282,7 @@ impl<'a, T, S: ListState, SP: SyncPrimitives> LockedList<'a, T, S, SP> {
     #[inline(never)]
     fn wait_for_next(&self, next: &AtomicPtr<NodeLink>) -> NonNull<NodeLink> {
         if SP::Parker::NEVER_BLOCKS {
-            loop {
-                unsafe { self.parker.park() };
-                if let Some(next) = NonNull::new(next.load(Acquire)) {
-                    return next;
-                }
-            }
+            return unsafe { self.parker.park_until(|| NonNull::new(next.load(Acquire))) };
         }
         for _ in 0..SP::SPIN_BEFORE_PARK {
             hint::spin_loop();
@@ -299,13 +294,11 @@ impl<'a, T, S: ListState, SP: SyncPrimitives> LockedList<'a, T, S, SP> {
         if let Err(next) = next.compare_exchange(ptr::null_mut(), PARKED, Relaxed, Acquire) {
             return unsafe { NonNull::new_unchecked(next) };
         }
-        loop {
-            unsafe { self.parker.park() };
+        let load_next = || {
             let next = next.load(Acquire);
-            if next != PARKED {
-                return unsafe { NonNull::new_unchecked(next) };
-            }
-        }
+            (next != PARKED).then(|| unsafe { NonNull::new_unchecked(next) })
+        };
+        unsafe { self.parker.park_until(load_next) }
     }
 
     #[inline]

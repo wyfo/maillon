@@ -9,6 +9,18 @@ impl AtomicParker {
     const EMPTY: u32 = 0;
     const NOTIFIED: u32 = 1;
     const PARKED: u32 = u32::MAX;
+
+    fn park(&self) {
+        if self.0.fetch_sub(1, Acquire) == Self::NOTIFIED {
+            return;
+        }
+        loop {
+            atomic_wait::wait(&self.0, Self::PARKED);
+            if ((self.0).compare_exchange(Self::NOTIFIED, Self::EMPTY, Acquire, Relaxed)).is_ok() {
+                return;
+            }
+        }
+    }
 }
 
 // implementation taken for std Parker futex implementation
@@ -17,14 +29,11 @@ impl Parker for AtomicParker {
     const INIT: Self = Self(AtomicU32::new(0));
 
     #[inline]
-    unsafe fn park(&self) {
-        if self.0.fetch_sub(1, Acquire) == Self::NOTIFIED {
-            return;
-        }
+    unsafe fn park_until<T>(&self, mut notified: impl FnMut() -> Option<T>) -> T {
         loop {
-            atomic_wait::wait(&self.0, Self::PARKED);
-            if ((self.0).compare_exchange(Self::NOTIFIED, Self::EMPTY, Acquire, Relaxed)).is_ok() {
-                return;
+            self.park();
+            if let Some(res) = notified() {
+                return res;
             }
         }
     }

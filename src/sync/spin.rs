@@ -33,8 +33,13 @@ impl Parker for SpinParker {
     const NEVER_BLOCKS: bool = true;
     const INIT: Self = Self;
     #[inline]
-    unsafe fn park(&self) {
-        hint::spin_loop();
+    unsafe fn park_until<T>(&self, mut notified: impl FnMut() -> Option<T>) -> T {
+        loop {
+            hint::spin_loop();
+            if let Some(res) = notified() {
+                return res;
+            }
+        }
     }
     #[inline]
     fn unpark(&self) {}

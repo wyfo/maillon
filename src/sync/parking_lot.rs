@@ -22,7 +22,7 @@ unsafe impl CondVar<parking_lot::Mutex<()>> for parking_lot::Condvar {
     }
 
     #[inline]
-    fn notify_all(&self) {
-        parking_lot::Condvar::notify_all(self);
+    fn notify_one(&self) {
+        parking_lot::Condvar::notify_one(self);
     }
 }
