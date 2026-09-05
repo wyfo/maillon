@@ -2,6 +2,8 @@
 #[path = "../examples/semaphore.rs"]
 mod semaphore;
 
+mod linking;
+
 use std::{
     future::poll_fn,
     sync::{
@@ -12,19 +14,22 @@ use std::{
     thread,
 };
 
+use aiq::list::Linking;
 use futures::executor::block_on;
+use linking::{EAGER, LAZY, LinkingMode};
+use rstest::rstest;
 use semaphore::Semaphore;
 
-#[test]
-fn basic_usage() {
+#[rstest]
+fn basic_usage<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
     const NUM: usize = 2;
 
-    struct Shared {
-        semaphore: Semaphore,
+    struct Shared<L: Linking> {
+        semaphore: Semaphore<L>,
         active: AtomicUsize,
     }
 
-    async fn actor(shared: Arc<Shared>) {
+    async fn actor<L: Linking>(shared: Arc<Shared<L>>) {
         let _permit = shared.semaphore.acquire().await.unwrap();
         let actual = shared.active.fetch_add(1, SeqCst);
         assert!(actual < NUM);
@@ -34,7 +39,7 @@ fn basic_usage() {
     }
 
     let shared = Arc::new(Shared {
-        semaphore: Semaphore::new(NUM),
+        semaphore: Semaphore::<L>::new(NUM),
         active: AtomicUsize::new(0),
     });
 
@@ -49,9 +54,9 @@ fn basic_usage() {
     block_on(actor(shared));
 }
 
-#[test]
-fn release() {
-    let semaphore = Arc::new(Semaphore::new(1));
+#[rstest]
+fn release<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+    let semaphore = Arc::new(Semaphore::<L>::new(1));
 
     {
         let semaphore = semaphore.clone();
@@ -63,11 +68,11 @@ fn release() {
     block_on(semaphore.acquire()).unwrap();
 }
 
-#[test]
-fn basic_closing() {
+#[rstest]
+fn basic_closing<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
     const NUM: usize = 2;
 
-    let semaphore = Arc::new(Semaphore::new(1));
+    let semaphore = Arc::new(Semaphore::<L>::new(1));
 
     for _ in 0..NUM {
         let semaphore = semaphore.clone();
@@ -84,11 +89,11 @@ fn basic_closing() {
     semaphore.close();
 }
 
-#[test]
-fn concurrent_close() {
+#[rstest]
+fn concurrent_close<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
     const NUM: usize = 3;
 
-    let semaphore = Arc::new(Semaphore::new(1));
+    let semaphore = Arc::new(Semaphore::<L>::new(1));
 
     for _ in 0..NUM {
         let semaphore = semaphore.clone();
@@ -102,9 +107,9 @@ fn concurrent_close() {
     }
 }
 
-#[test]
-fn concurrent_cancel() {
-    async fn poll_and_cancel(semaphore: Arc<Semaphore>) {
+#[rstest]
+fn concurrent_cancel<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+    async fn poll_and_cancel<L: Linking>(semaphore: Arc<Semaphore<L>>) {
         let mut acquire1 = Some(semaphore.acquire());
         let mut acquire2 = Some(semaphore.acquire());
         poll_fn(|cx| {
@@ -124,7 +129,7 @@ fn concurrent_cancel() {
         .await;
     }
 
-    let semaphore = Arc::new(Semaphore::new(0));
+    let semaphore = Arc::new(Semaphore::<L>::new(0));
     let t1 = {
         let semaphore = semaphore.clone();
         thread::spawn(move || block_on(poll_and_cancel(semaphore)))
@@ -144,9 +149,9 @@ fn concurrent_cancel() {
     t3.join().unwrap();
 }
 
-#[test]
-fn batch() {
-    let semaphore = Arc::new(Semaphore::new(10));
+#[rstest]
+fn batch<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+    let semaphore = Arc::new(Semaphore::<L>::new(10));
     let active = Arc::new(AtomicUsize::new(0));
     let mut threads = vec![];
 
@@ -177,9 +182,9 @@ fn batch() {
     assert_eq!(10, semaphore.available_permits());
 }
 
-#[test]
-fn release_during_acquire() {
-    let semaphore = Arc::new(Semaphore::new(10));
+#[rstest]
+fn release_during_acquire<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+    let semaphore = Arc::new(Semaphore::<L>::new(10));
     let permits = semaphore
         .try_acquire_many(8)
         .expect("try_acquire should succeed; semaphore uncontended");
@@ -192,9 +197,9 @@ fn release_during_acquire() {
     assert_eq!(10, semaphore.available_permits());
 }
 
-#[test]
-fn concurrent_permit_updates() {
-    let semaphore = Arc::new(Semaphore::new(5));
+#[rstest]
+fn concurrent_permit_updates<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+    let semaphore = Arc::new(Semaphore::<L>::new(5));
     let t1 = {
         let semaphore = semaphore.clone();
         thread::spawn(move || semaphore.add_permits(3))

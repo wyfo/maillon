@@ -1,320 +1,266 @@
-#[cfg(feature = "alloc")]
-extern crate alloc;
-
-#[cfg(feature = "alloc")]
-use alloc::sync::Arc;
 use core::{
-    future::Future,
     hint::assert_unchecked,
     marker::PhantomData,
     mem::MaybeUninit,
-    ops::Deref,
     pin::Pin,
-    task::{Context, Poll, Waker},
+    sync::atomic::Ordering::{Acquire, Release, SeqCst},
+    task::Waker,
 };
 
 use crate::{
-    Node, NodeState, Queue,
-    queue::LockedQueue,
-    queue_ref,
-    sync::{DefaultSyncPrimitives, SyncPrimitives},
+    List, Node, as_list,
+    list::{Eager, GetBack, GetFront, Linking, ListEnd, ListGetEnd, LockedList},
+    loom::sync::atomic::Ordering::Relaxed,
+    node::{NodeData, NodeRef},
+    sync::mutex::{DefaultMutex, Mutex},
+    wait_list::{
+        synchronization::{SyncMode, Synchronization, Synchronized},
+        wait::{Wait, WaitUntil, WakeCondition},
+    },
 };
 
-const EMPTY: usize = 0;
-const CLOSED: usize = 1;
+pub mod synchronization;
+pub mod wait;
 
-#[derive(Debug, Default)]
+const STATE_OPEN: usize = 0;
+const STATE_CLOSED: usize = 1;
+
+#[derive(Default)]
 struct Waiter {
     waker: Option<Waker>,
     notification: Option<Notification>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClosedError;
+
+#[derive(Clone, Copy)]
 enum Notification {
-    One,
-    Last,
+    Fifo,
+    Lifo,
+    All,
 }
 
-pub struct WaitQueue<SP: SyncPrimitives = DefaultSyncPrimitives> {
-    queue: Queue<Waiter, usize, SP>,
+pub struct WaitList<S: Synchronization = Synchronized, L: Linking = Eager, M: Mutex = DefaultMutex>
+{
+    list: List<Waiter, usize, L, M>,
+    _synchronization: PhantomData<S>,
 }
 
-impl<SP: SyncPrimitives> Default for WaitQueue<SP> {
+impl<S: Synchronization, L: Linking, M: Mutex> Default for WaitList<S, L, M> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<SP: SyncPrimitives> WaitQueue<SP> {
+impl<S: Synchronization, L: Linking, M: Mutex> WaitList<S, L, M> {
     #[cfg_attr(loom, const_fn::const_fn(cfg(false)))]
     #[inline]
     pub const fn new() -> Self {
         Self {
-            queue: Queue::with_state_const(EMPTY),
-        }
-    }
-
-    pub fn is_closed(&self) -> bool {
-        self.queue.state().is_some_and(|s| s != EMPTY)
-    }
-
-    pub fn close(&self) {
-        if let Some(locked) = self.queue.fetch_update_state_or_lock(|_| CLOSED) {
-            drain_queue::<CLOSED, SP>(locked);
+            list: List::with_state(STATE_OPEN),
+            _synchronization: PhantomData,
         }
     }
 
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.queue.is_empty()
-    }
-
-    #[inline]
-    pub fn notify_one(&self) {
-        self.queue.is_empty_or_locked(|mut locked| {
-            let mut waiter = unsafe { locked.dequeue().unwrap_unchecked() };
-            waiter.with_data_mut(|mut w| w.notification = Some(Notification::One));
-            let waker = waiter.with_data_mut(|mut w| unsafe { w.waker.take().unwrap_unchecked() });
-            drop(waiter);
-            drop(locked);
-            waker.wake();
-        });
-    }
-
-    #[inline]
-    pub fn notify_last(&self) {
-        self.queue.is_empty_or_locked(|mut locked| {
-            let mut waiter = unsafe { locked.pop().unwrap_unchecked() };
-            waiter.with_data_mut(|mut w| w.notification = Some(Notification::Last));
-            let waker = waiter.with_data_mut(|mut w| unsafe { w.waker.take().unwrap_unchecked() });
-            drop(waiter);
-            drop(locked);
-            waker.wake();
-        });
-    }
-
-    #[inline]
-    pub fn notify_many(&self, count: usize) {
-        self.queue
-            .is_empty_or_locked(|locked| notify_many(locked, count));
-    }
-
-    #[inline]
-    pub fn notify_many_const<const COUNT: usize>(&self) {
-        if COUNT == 1 {
-            self.notify_one();
-        } else {
-            self.queue
-                .is_empty_or_locked(|locked| notify_many(locked, COUNT));
+        match S::MODE {
+            SyncMode::Synchronized => self.list.is_empty_rmw(Release),
+            SyncMode::Sequential => self.list.is_empty(SeqCst),
+            SyncMode::Unsynchronized => self.list.is_empty(Relaxed),
         }
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.list
+            .load_state(Acquire)
+            .is_some_and(|s| s != STATE_OPEN)
+    }
+
+    pub fn close(&self) {
+        self.list.update_state_or_lock_with(
+            Release,
+            Relaxed,
+            |_| STATE_CLOSED,
+            |locked| Self::wake_all(locked, STATE_CLOSED, None),
+        );
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn wake_all(
+        locked: LockedList<Waiter, usize, L, M>,
+        state: usize,
+        notification: Option<Notification>,
+    ) {
+        let mut wakers = WakerList::new();
+        locked.drain(|| state).for_each(
+            &mut wakers,
+            |wakers, mut waiter| {
+                if let Some(notification) = notification {
+                    waiter.notification = Some(notification);
+                }
+                wakers.push(unsafe { waiter.waker.take().unwrap_unchecked() });
+                wakers.is_full()
+            },
+            |wakers| wakers.drain().for_each(Waker::wake),
+        );
+    }
+
+    #[inline]
+    pub fn notify_fifo(&self, count: usize) {
+        self.notify_end::<GetFront>(count, Notification::Fifo);
+    }
+
+    #[inline]
+    pub fn notify_lifo(&self, count: usize) {
+        self.notify_end::<GetBack>(count, Notification::Lifo);
+    }
+
+    #[inline(always)]
+    fn notify_end<E: ListGetEnd<L>>(&self, count: usize, notification: Notification) {
+        if count == 0 || self.is_empty() {
+            return;
+        }
+        if count == 1 {
+            self.wake_single::<E>(notification);
+        } else {
+            self.wake_many::<E>(count, notification);
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn wake_single<E: ListGetEnd<L>>(&self, notification: Notification) {
+        Self::wake_single_locked::<E>(self.list.lock(), notification);
+    }
+
+    fn wake_single_locked<E: ListGetEnd<L>>(
+        mut locked: LockedList<Waiter, usize, L, M>,
+        notification: Notification,
+    ) {
+        let Some(mut waiter) = E::get_end(&mut locked) else {
+            return;
+        };
+        waiter.data_mut().notification = Some(notification);
+        let waker = waiter.data_mut().waker.take();
+        waiter.unlink(|| STATE_OPEN);
+        drop(locked);
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn wake_many<E: ListGetEnd<L>>(&self, count: usize, notification: Notification) {
+        let mut wakers = WakerList::new();
+        let mut locked = self.list.lock();
+        let mut end = E::get_end(&mut locked);
+        for _ in 0..count {
+            let Some(mut waiter) = end else {
+                break;
+            };
+            waiter.data_mut().notification = Some(notification);
+            wakers.push(unsafe { waiter.data_mut().waker.take().unwrap_unchecked() });
+            end = ListEnd::unlink(waiter, || STATE_OPEN);
+            if wakers.is_full() {
+                drop(end);
+                let list = locked.unlock();
+                wakers.drain().for_each(Waker::wake);
+                if list.is_empty(Relaxed) {
+                    return;
+                }
+                locked = list.lock();
+                end = E::get_end(&mut locked);
+            }
+        }
+        drop(end);
+        drop(locked);
+        wakers.drain().for_each(Waker::wake);
     }
 
     #[inline]
     pub fn notify_all(&self) {
-        self.queue.is_empty_or_locked(drain_queue::<EMPTY, SP>);
-    }
-
-    #[inline]
-    pub fn wait(&self) -> Wait<&Self, SP> {
-        Wait {
-            node: Node::new(WaitQueueRef {
-                wait_queue: self,
-                _sync_primitives: PhantomData,
-            }),
+        if !self.is_empty() {
+            self.notify_all_impl();
         }
     }
 
-    #[cfg(feature = "alloc")]
-    #[inline]
-    pub fn wait_owned(self: Arc<Self>) -> Wait<Arc<Self>, SP> {
-        Wait {
-            node: Node::new(WaitQueueRef {
-                wait_queue: self,
-                _sync_primitives: PhantomData,
-            }),
-        }
-    }
-
-    #[inline]
-    pub fn wait_if<P: WaitIfPredicate>(&self, predicate: P) -> WaitIf<&Self, P, SP> {
-        WaitIf {
-            wait: self.wait(),
-            predicate: Some(predicate),
-        }
-    }
-
-    #[cfg(feature = "alloc")]
-    #[inline]
-    pub fn wait_if_owned<P: WaitIfPredicate>(
-        self: Arc<Self>,
-        predicate: P,
-    ) -> WaitIf<Arc<Self>, P, SP> {
-        WaitIf {
-            wait: self.wait_owned(),
-            predicate: Some(predicate),
-        }
-    }
-
-    #[inline]
-    pub fn wait_until<P: WaitUntilPredicate>(&self, predicate: P) -> WaitUntil<&Self, P, SP> {
-        WaitUntil {
-            wait: self.wait(),
-            predicate,
-        }
-    }
-
-    #[cfg(feature = "alloc")]
-    #[inline]
-    pub fn wait_until_owned<P: WaitUntilPredicate>(
-        self: Arc<Self>,
-        predicate: P,
-    ) -> WaitUntil<Arc<Self>, P, SP> {
-        WaitUntil {
-            wait: self.wait_owned(),
-            predicate,
-        }
-    }
-}
-
-struct WaitQueueRef<L, SP> {
-    wait_queue: L,
-    _sync_primitives: PhantomData<SP>,
-}
-
-unsafe impl<L: Send, SP> Send for WaitQueueRef<L, SP> {}
-unsafe impl<L: Sync, SP> Sync for WaitQueueRef<L, SP> {}
-
-queue_ref!(WaitQueueRef<L: Deref<Target = WaitQueue<SP>>, SP: SyncPrimitives>, NodeData = Waiter, State = usize, SyncPrimitives = SP, &self.wait_queue.queue, |q: &WaitQueueRef<L, SP>, w: &mut Waiter| match w.notification {
-    Some(Notification::One) => q.wait_queue.notify_one(),
-    Some(Notification::Last) => q.wait_queue.notify_last(),
-    None => {}
-});
-
-pub struct Wait<L: Deref<Target = WaitQueue<SP>>, SP: SyncPrimitives = DefaultSyncPrimitives> {
-    node: Node<WaitQueueRef<L, SP>>,
-}
-
-impl<L: Deref<Target = WaitQueue<SP>>, SP: SyncPrimitives> Wait<L, SP> {
     #[cold]
-    pub fn poll_wait(self: Pin<&mut Self>, cx: &mut Context<'_>, requeue: bool) -> Poll<()> {
-        let mut waiter = match unsafe { self.map_unchecked_mut(|this| &mut this.node) }.state() {
-            NodeState::Unqueued(waiter) => waiter,
-            NodeState::Queued(mut waiter) => {
-                waiter.with_data_mut(|mut waiter| {
-                    if (waiter.waker.as_ref()).is_none_or(|w| !w.will_wake(cx.waker())) {
-                        waiter.waker = Some(cx.waker().clone());
-                    }
-                });
-                return Poll::Pending;
-            }
-            NodeState::Dequeued(waiter) if requeue => waiter.reset(),
-            NodeState::Dequeued(mut waiter) => {
-                // remove the notification, so destructor don't trigger a new notification
-                waiter.with_data_mut(|mut waiter| waiter.notification.take());
-                return Poll::Ready(());
-            }
-        };
-        waiter.with_data_mut(|mut waiter| {
-            waiter.waker = Some(cx.waker().clone());
-        });
-        match waiter.try_enqueue_with_queue_state(|s| s.is_none_or(|s| s == EMPTY)) {
-            Ok(_) => Poll::Pending,
-            Err(_) => Poll::Ready(()),
-        }
+    #[inline(never)]
+    fn notify_all_impl(&self) {
+        let locked = self.list.lock();
+        Self::wake_all(locked, STATE_OPEN, Some(Notification::All));
     }
-}
-
-impl<L: Deref<Target = WaitQueue<SP>>, SP: SyncPrimitives> Future for Wait<L, SP> {
-    type Output = ();
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        self.poll_wait(cx, false)
-    }
-}
-
-pub trait WaitIfPredicate {
-    fn check(self) -> bool;
-}
-
-impl<F: FnOnce() -> bool> WaitIfPredicate for F {
-    fn check(self) -> bool {
-        self()
-    }
-}
-
-pub struct WaitIf<
-    L: Deref<Target = WaitQueue<SP>>,
-    P: WaitIfPredicate,
-    SP: SyncPrimitives = DefaultSyncPrimitives,
-> {
-    wait: Wait<L, SP>,
-    predicate: Option<P>,
-}
-
-impl<L: Deref<Target = WaitQueue<SP>>, P: WaitIfPredicate, SP: SyncPrimitives> Future
-    for WaitIf<L, P, SP>
-{
-    type Output = ();
 
     #[inline]
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let this = unsafe { self.get_unchecked_mut() };
-        match unsafe { Pin::new_unchecked(&mut this.wait) }.poll_wait(cx, false) {
-            Poll::Pending if this.predicate.take().is_some_and(|p| !p.check()) => Poll::Ready(()),
-            poll => poll,
-        }
+    pub fn wait(&self) -> Wait<'_, S, L, M> {
+        Wait::new(Node::new(WaitListRef { wait_list: self }))
     }
-}
 
-pub trait WaitUntilPredicate {
-    type Output;
-    fn check(&mut self) -> Option<Self::Output>;
-}
-
-impl<F: FnMut() -> Option<T>, T> WaitUntilPredicate for F {
-    type Output = T;
-
-    fn check(&mut self) -> Option<Self::Output> {
-        self()
+    #[inline]
+    pub fn wait_until<F: FnMut(bool) -> W, W: WakeCondition>(
+        &self,
+        wake_condition: F,
+    ) -> WaitUntil<'_, F, S, L, M> {
+        WaitUntil::new(self.wait(), wake_condition)
     }
-}
 
-pub struct WaitUntil<
-    L: Deref<Target = WaitQueue<SP>>,
-    P: WaitUntilPredicate,
-    SP: SyncPrimitives = DefaultSyncPrimitives,
-> {
-    wait: Wait<L, SP>,
-    predicate: P,
-}
-
-impl<L: Deref<Target = WaitQueue<SP>>, P: WaitUntilPredicate, SP: SyncPrimitives>
-    WaitUntil<L, P, SP>
-{
     #[cold]
-    unsafe fn poll_cold(&mut self, cx: &mut Context<'_>) -> Poll<P::Output> {
-        let is_closed = unsafe { Pin::new_unchecked(&mut self.wait) }
-            .poll_wait(cx, true)
-            .is_ready();
-        match self.predicate.check() {
-            Some(res) => Poll::Ready(res),
-            None if is_closed => panic!("wait queue is closed but predicate didn't return `Some`"),
-            None => Poll::Pending,
+    #[inline(never)]
+    fn renotify(&self, notification: Notification) {
+        match notification {
+            Notification::Fifo => self.notify_fifo(1),
+            Notification::Lifo => self.notify_lifo(1),
+            _ => unreachable!(),
         }
     }
 }
 
-impl<L: Deref<Target = WaitQueue<SP>>, P: WaitUntilPredicate, SP: SyncPrimitives> Future
-    for WaitUntil<L, P, SP>
-{
-    type Output = P::Output;
+struct WaitListRef<'a, S: Synchronization, L: Linking, M: Mutex> {
+    wait_list: &'a WaitList<S, L, M>,
+}
 
-    #[inline]
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let this = unsafe { self.get_unchecked_mut() };
-        match this.predicate.check() {
-            Some(res) => Poll::Ready(res),
-            None => unsafe { this.poll_cold(cx) },
+as_list!(
+    WaitListRef<'a, S: Synchronization, L: Linking, M: Mutex>,
+    List<Waiter, usize, L, M>,
+    &self.wait_list.list,
+);
+
+impl<'a, S: Synchronization, L: Linking, M: Mutex> NodeData<WaitListRef<'a, S, L, M>, usize, L, M>
+    for Waiter
+{
+    fn new_state_if_last_node_on_drop(
+        self: Pin<&mut Self>,
+        _list: &WaitListRef<'a, S, L, M>,
+    ) -> usize {
+        STATE_OPEN
+    }
+
+    fn on_drop<'list>(
+        self: Pin<&mut Self>,
+        list: &'list WaitListRef<'a, S, L, M>,
+        locked: Option<LockedList<'list, Self, usize, L, M>>,
+        state_updated_on_unlink: bool,
+    ) {
+        if matches!(self.notification, None | Some(Notification::All)) {
+            return;
+        }
+        if let Some(locked) = locked {
+            debug_assert!(!state_updated_on_unlink);
+            match self.notification {
+                Some(Notification::Fifo) => {
+                    WaitList::<S, L, M>::wake_single_locked::<GetFront>(locked, Notification::Fifo);
+                }
+                Some(Notification::Lifo) => {
+                    WaitList::<S, L, M>::wake_single_locked::<GetBack>(locked, Notification::Lifo);
+                }
+                _ => {}
+            }
+        } else {
+            list.wait_list.renotify(self.notification.unwrap());
         }
     }
 }
@@ -352,43 +298,4 @@ impl Drop for WakerList {
     fn drop(&mut self) {
         self.drain().for_each(drop);
     }
-}
-
-fn notify_many<SP: SyncPrimitives>(mut locked: LockedQueue<Waiter, usize, SP>, count: usize) {
-    let mut wakers = WakerList::new();
-    for _ in 0..count {
-        let Some(mut waiter) = locked.dequeue() else {
-            drop(locked);
-            break;
-        };
-        waiter.with_data_mut(|mut w| w.notification = Some(Notification::One));
-        wakers.push(waiter.with_data_mut(|mut w| unsafe { w.waker.take().unwrap_unchecked() }));
-        drop(waiter);
-        if wakers.is_full() {
-            let queue = locked.unlock();
-            wakers.drain().for_each(Waker::wake);
-            match queue.is_empty_or_lock() {
-                Some(l) => locked = l,
-                None => break,
-            };
-        }
-    }
-    wakers.drain().for_each(Waker::wake);
-}
-
-fn drain_queue<const STATE: usize, SP: SyncPrimitives>(locked: LockedQueue<Waiter, usize, SP>) {
-    let mut wakers = WakerList::new();
-    locked.drain_try_set_state(STATE).for_each(
-        &mut wakers,
-        |wakers, mut waker| {
-            wakers.push(unsafe { waker.waker.take().unwrap_unchecked() });
-            wakers.is_full()
-        },
-        |wakers| wakers.drain().for_each(Waker::wake),
-    );
-}
-
-#[unsafe(no_mangle)]
-fn plop(q: &WaitQueue) {
-    q.notify_many_const::<32>();
 }

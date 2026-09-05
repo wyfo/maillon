@@ -11,7 +11,10 @@ use std::{
 };
 
 use aiq::{
-    List, Node, NodeState, as_list, list::LockedList, node::NodeData, sync::DefaultSyncPrimitives,
+    List, Node, NodeState, as_list,
+    list::{Eager, Linking, LockedList},
+    node::NodeData,
+    sync::mutex::DefaultMutex,
 };
 use arrayvec::ArrayVec;
 use pin_project_lite::pin_project;
@@ -19,10 +22,15 @@ use pin_project_lite::pin_project;
 const CLOSED: usize = 1;
 const PERMIT_SHIFT: usize = 1;
 
-#[derive(Default)]
-pub struct Semaphore(List<Waiter, usize>);
+pub struct Semaphore<L: Linking = Eager>(List<Waiter, usize, L>);
 
-impl Semaphore {
+impl<L: Linking> Default for Semaphore<L> {
+    fn default() -> Self {
+        Self::new(0)
+    }
+}
+
+impl<L: Linking> Semaphore<L> {
     pub const MAX_PERMITS: usize = usize::MAX >> 3;
 
     #[inline(always)]
@@ -67,7 +75,7 @@ impl Semaphore {
     fn add_permits_locked<'a>(
         &'a self,
         mut permits: usize,
-        mut locked: LockedList<'a, Waiter, usize>,
+        mut locked: LockedList<'a, Waiter, usize, L>,
     ) {
         assert!(!self.is_closed());
         let mut wakers = ArrayVec::<Waker, 32>::new();
@@ -119,12 +127,12 @@ impl Semaphore {
     }
 
     #[inline]
-    pub async fn acquire(&self) -> Result<SemaphorePermit<'_>, AcquireError> {
+    pub async fn acquire(&self) -> Result<SemaphorePermit<'_, L>, AcquireError> {
         self.acquire_many(1).await
     }
 
     #[inline]
-    pub async fn acquire_many(&self, permits: u32) -> Result<SemaphorePermit<'_>, AcquireError> {
+    pub async fn acquire_many(&self, permits: u32) -> Result<SemaphorePermit<'_, L>, AcquireError> {
         let acquire = |state| Self::check_acquire_permits(state, permits as _);
         if self.0.try_update_state(Acquire, Relaxed, acquire).is_err() {
             let node = Node::with_data(SemaphoreRef(self), Waiter::new(permits));
@@ -134,12 +142,15 @@ impl Semaphore {
     }
 
     #[inline]
-    pub fn try_acquire(&self) -> Result<SemaphorePermit<'_>, TryAcquireError> {
+    pub fn try_acquire(&self) -> Result<SemaphorePermit<'_, L>, TryAcquireError> {
         self.try_acquire_many(1)
     }
 
     #[inline]
-    pub fn try_acquire_many(&self, permits: u32) -> Result<SemaphorePermit<'_>, TryAcquireError> {
+    pub fn try_acquire_many(
+        &self,
+        permits: u32,
+    ) -> Result<SemaphorePermit<'_, L>, TryAcquireError> {
         let acquire = |state| Self::check_acquire_permits(state, permits);
         match self.0.try_update_state(Acquire, Relaxed, acquire) {
             Ok(_) => Ok(SemaphorePermit { sem: self, permits }),
@@ -149,7 +160,7 @@ impl Semaphore {
     }
 
     #[inline]
-    pub async fn acquire_owned(self: Arc<Self>) -> Result<OwnedSemaphorePermit, AcquireError> {
+    pub async fn acquire_owned(self: Arc<Self>) -> Result<OwnedSemaphorePermit<L>, AcquireError> {
         self.acquire_many_owned(1).await
     }
 
@@ -157,13 +168,13 @@ impl Semaphore {
     pub async fn acquire_many_owned(
         self: Arc<Self>,
         permits: u32,
-    ) -> Result<OwnedSemaphorePermit, AcquireError> {
-        mem::forget(self.acquire().await?);
+    ) -> Result<OwnedSemaphorePermit<L>, AcquireError> {
+        mem::forget(self.acquire_many(permits).await?);
         Ok(OwnedSemaphorePermit { sem: self, permits })
     }
 
     #[inline]
-    pub fn try_acquire_owned(self: Arc<Self>) -> Result<OwnedSemaphorePermit, TryAcquireError> {
+    pub fn try_acquire_owned(self: Arc<Self>) -> Result<OwnedSemaphorePermit<L>, TryAcquireError> {
         self.try_acquire_many_owned(1)
     }
 
@@ -171,7 +182,7 @@ impl Semaphore {
     pub fn try_acquire_many_owned(
         self: Arc<Self>,
         permits: u32,
-    ) -> Result<OwnedSemaphorePermit, TryAcquireError> {
+    ) -> Result<OwnedSemaphorePermit<L>, TryAcquireError> {
         mem::forget(self.try_acquire_many(permits)?);
         Ok(OwnedSemaphorePermit { sem: self, permits })
     }
@@ -215,19 +226,19 @@ impl Waiter {
     }
 }
 
-struct SemaphoreRef<'a>(&'a Semaphore);
-as_list!(SemaphoreRef<'a>, List<Waiter, usize>, &self.0.0);
+struct SemaphoreRef<'a, L: Linking>(&'a Semaphore<L>);
+as_list!(SemaphoreRef<'a, L: Linking>, List<Waiter, usize, L>, &self.0.0);
 
-impl<'a> NodeData<SemaphoreRef<'a>, usize> for Waiter {
-    fn new_state_if_last_node_on_drop(self: Pin<&mut Self>, _list: &SemaphoreRef<'a>) -> usize {
+impl<'a, L: Linking> NodeData<SemaphoreRef<'a, L>, usize, L> for Waiter {
+    fn new_state_if_last_node_on_drop(self: Pin<&mut Self>, _list: &SemaphoreRef<'a, L>) -> usize {
         (self.permits_total - self.permits_remaining) as _
     }
 
     #[inline]
     fn on_drop<'list>(
         self: Pin<&mut Self>,
-        list: &'list SemaphoreRef<'a>,
-        locked: Option<LockedList<'list, Self, usize, DefaultSyncPrimitives>>,
+        list: &'list SemaphoreRef<'a, L>,
+        locked: Option<LockedList<'list, Self, usize, L, DefaultMutex>>,
         state_updated_on_unlink: bool,
     ) {
         if state_updated_on_unlink || self.permits_remaining == 0 {
@@ -238,7 +249,7 @@ impl<'a> NodeData<SemaphoreRef<'a>, usize> for Waiter {
             list.0.add_permits_locked(acquired as _, locked);
         } else {
             #[cold]
-            fn add_permits_cold(semaphore: &Semaphore, permits: usize) {
+            fn add_permits_cold<L: Linking>(semaphore: &Semaphore<L>, permits: usize) {
                 semaphore.add_permits(permits);
             }
             add_permits_cold(list.0, acquired as _);
@@ -255,13 +266,13 @@ pub enum TryAcquireError {
 }
 
 pin_project! {
-    struct AcquireFuture<'a> {
+    struct AcquireFuture<'a, L: Linking> {
         #[pin]
-        node: Node<SemaphoreRef<'a>, Waiter, usize>
+        node: Node<SemaphoreRef<'a, L>, Waiter, usize, L>
     }
 }
 
-impl<'a> Future for AcquireFuture<'a> {
+impl<'a, L: Linking> Future for AcquireFuture<'a, L> {
     type Output = Result<(), AcquireError>;
 
     #[cold]
@@ -274,7 +285,9 @@ impl<'a> Future for AcquireFuture<'a> {
                 match node.try_update_state_or_push_back_with(
                     Acquire, // TODO Acquire for close
                     Acquire,
-                    |waiter, state| Semaphore::check_acquire_permits(state, waiter.permits_total),
+                    |waiter, state| {
+                        Semaphore::<L>::check_acquire_permits(state, waiter.permits_total)
+                    },
                     |mut waiter, _| waiter.permits_remaining = 0,
                     |mut waiter, state| {
                         if state.is_some_and(|s| s & CLOSED != 0) {
@@ -302,12 +315,12 @@ impl<'a> Future for AcquireFuture<'a> {
     }
 }
 
-pub struct SemaphorePermit<'a> {
-    sem: &'a Semaphore,
+pub struct SemaphorePermit<'a, L: Linking = Eager> {
+    sem: &'a Semaphore<L>,
     permits: u32,
 }
 
-impl SemaphorePermit<'_> {
+impl<L: Linking> SemaphorePermit<'_, L> {
     pub fn forget(mut self) {
         self.permits = 0;
     }
@@ -341,18 +354,18 @@ impl SemaphorePermit<'_> {
     }
 }
 
-impl Drop for SemaphorePermit<'_> {
+impl<L: Linking> Drop for SemaphorePermit<'_, L> {
     fn drop(&mut self) {
         self.sem.add_permits(self.permits as _);
     }
 }
 
-pub struct OwnedSemaphorePermit {
-    sem: Arc<Semaphore>,
+pub struct OwnedSemaphorePermit<L: Linking = Eager> {
+    sem: Arc<Semaphore<L>>,
     permits: u32,
 }
 
-impl OwnedSemaphorePermit {
+impl<L: Linking> OwnedSemaphorePermit<L> {
     pub fn forget(mut self) {
         self.permits = 0;
     }
@@ -381,7 +394,7 @@ impl OwnedSemaphorePermit {
         })
     }
 
-    pub fn semaphore(&self) -> &Arc<Semaphore> {
+    pub fn semaphore(&self) -> &Arc<Semaphore<L>> {
         &self.sem
     }
 
@@ -390,7 +403,7 @@ impl OwnedSemaphorePermit {
     }
 }
 
-impl Drop for OwnedSemaphorePermit {
+impl<L: Linking> Drop for OwnedSemaphorePermit<L> {
     fn drop(&mut self) {
         self.sem.add_permits(self.permits as _);
     }

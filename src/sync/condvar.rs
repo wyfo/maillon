@@ -19,7 +19,7 @@ use crate::sync::mutex::Mutex;
 ///
 /// Calls to [`notify_one`](Self::notify_one) must *synchronize-with* the
 /// [`wait`](Self::wait) calls they wake up.
-pub unsafe trait CondVar<M: Mutex>: Send + Sync {
+pub unsafe trait CondVar<M: Mutex>: Send + Sync + 'static {
     const INIT: Self;
     #[doc(hidden)]
     fn new() -> Self

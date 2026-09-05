@@ -3,19 +3,24 @@
 #[path = "../examples/semaphore.rs"]
 mod semaphore;
 
+mod linking;
+
 use std::sync::Arc;
 
+use aiq::list::Linking;
+use linking::{EAGER, LAZY, LinkingMode};
+use rstest::rstest;
 use semaphore::Semaphore;
 
-#[test]
-fn no_permits() {
+#[rstest]
+fn no_permits<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
     // this should not panic
-    Semaphore::new(0);
+    Semaphore::<L>::new(0);
 }
 
-#[test]
-fn try_acquire() {
-    let sem = Semaphore::new(1);
+#[rstest]
+fn try_acquire<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+    let sem = Semaphore::<L>::new(1);
     {
         let p1 = sem.try_acquire();
         assert!(p1.is_ok());
@@ -26,9 +31,10 @@ fn try_acquire() {
     assert!(p3.is_ok());
 }
 
+#[rstest]
 #[tokio::test]
-async fn acquire() {
-    let sem = Arc::new(Semaphore::new(1));
+async fn acquire<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+    let sem = Arc::new(Semaphore::<L>::new(1));
     let p1 = sem.try_acquire().unwrap();
     let sem_clone = sem.clone();
     let j = tokio::spawn(async move {
@@ -38,9 +44,10 @@ async fn acquire() {
     j.await.unwrap();
 }
 
+#[rstest]
 #[tokio::test]
-async fn add_permits() {
-    let sem = Arc::new(Semaphore::new(0));
+async fn add_permits<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+    let sem = Arc::new(Semaphore::<L>::new(0));
     let sem_clone = sem.clone();
     let j = tokio::spawn(async move {
         let _p2 = sem_clone.acquire().await;
@@ -49,9 +56,9 @@ async fn add_permits() {
     j.await.unwrap();
 }
 
-#[test]
-fn forget() {
-    let sem = Arc::new(Semaphore::new(1));
+#[rstest]
+fn forget<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+    let sem = Arc::new(Semaphore::<L>::new(1));
     {
         let p = sem.try_acquire().unwrap();
         assert_eq!(sem.available_permits(), 0);
@@ -62,9 +69,9 @@ fn forget() {
     assert!(sem.try_acquire().is_err());
 }
 
-#[test]
-fn merge() {
-    let sem = Arc::new(Semaphore::new(3));
+#[rstest]
+fn merge<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+    let sem = Arc::new(Semaphore::<L>::new(3));
     {
         let mut p1 = sem.try_acquire().unwrap();
         assert_eq!(sem.available_permits(), 2);
@@ -76,20 +83,20 @@ fn merge() {
     assert_eq!(sem.available_permits(), 3);
 }
 
-#[test]
+#[rstest]
 #[cfg(not(target_family = "wasm"))] // No stack unwinding on wasm targets
 #[should_panic]
-fn merge_unrelated_permits() {
-    let sem1 = Arc::new(Semaphore::new(3));
-    let sem2 = Arc::new(Semaphore::new(3));
+fn merge_unrelated_permits<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+    let sem1 = Arc::new(Semaphore::<L>::new(3));
+    let sem2 = Arc::new(Semaphore::<L>::new(3));
     let mut p1 = sem1.try_acquire().unwrap();
     let p2 = sem2.try_acquire().unwrap();
     p1.merge(p2);
 }
 
-#[test]
-fn split() {
-    let sem = Semaphore::new(5);
+#[rstest]
+fn split<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+    let sem = Semaphore::<L>::new(5);
     let mut p1 = sem.try_acquire_many(3).unwrap();
     assert_eq!(sem.available_permits(), 2);
     assert_eq!(p1.num_permits(), 3);
@@ -113,9 +120,10 @@ fn split() {
     assert_eq!(sem.available_permits(), 5);
 }
 
+#[rstest]
 #[tokio::test]
-async fn stress_test() {
-    let sem = Arc::new(Semaphore::new(5));
+async fn stress_test<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+    let sem = Arc::new(Semaphore::<L>::new(5));
     let mut join_handles = Vec::new();
     for _ in 0..1000 {
         let sem_clone = sem.clone();
@@ -135,40 +143,40 @@ async fn stress_test() {
     assert!(sem.try_acquire().is_err());
 }
 
-#[test]
-fn add_max_amount_permits() {
-    let s = tokio::sync::Semaphore::new(0);
-    s.add_permits(tokio::sync::Semaphore::MAX_PERMITS);
-    assert_eq!(s.available_permits(), tokio::sync::Semaphore::MAX_PERMITS);
+#[rstest]
+fn add_max_amount_permits<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+    let s = Semaphore::<L>::new(0);
+    s.add_permits(Semaphore::<L>::MAX_PERMITS);
+    assert_eq!(s.available_permits(), Semaphore::<L>::MAX_PERMITS);
 }
 
 #[cfg(not(target_family = "wasm"))] // wasm currently doesn't support unwinding
-#[test]
+#[rstest]
 #[should_panic]
-fn add_more_than_max_amount_permits1() {
-    let s = tokio::sync::Semaphore::new(1);
-    s.add_permits(tokio::sync::Semaphore::MAX_PERMITS);
+fn add_more_than_max_amount_permits1<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+    let s = Semaphore::<L>::new(1);
+    s.add_permits(Semaphore::<L>::MAX_PERMITS);
 }
 
 #[cfg(not(target_family = "wasm"))] // wasm currently doesn't support unwinding
-#[test]
+#[rstest]
 #[should_panic]
-fn add_more_than_max_amount_permits2() {
-    let s = Semaphore::new(Semaphore::MAX_PERMITS - 1);
+fn add_more_than_max_amount_permits2<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+    let s = Semaphore::<L>::new(Semaphore::<L>::MAX_PERMITS - 1);
     s.add_permits(1);
     s.add_permits(1);
 }
 
 #[cfg(not(target_family = "wasm"))] // wasm currently doesn't support unwinding
-#[test]
+#[rstest]
 #[should_panic]
-fn panic_when_exceeds_maxpermits() {
-    let _ = Semaphore::new(Semaphore::MAX_PERMITS + 1);
+fn panic_when_exceeds_maxpermits<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+    let _ = Semaphore::<L>::new(Semaphore::<L>::MAX_PERMITS + 1);
 }
 
-#[test]
-fn no_panic_at_maxpermits() {
-    let _ = Semaphore::new(Semaphore::MAX_PERMITS);
-    let s = Semaphore::new(Semaphore::MAX_PERMITS - 1);
+#[rstest]
+fn no_panic_at_maxpermits<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+    let _ = Semaphore::<L>::new(Semaphore::<L>::MAX_PERMITS);
+    let s = Semaphore::<L>::new(Semaphore::<L>::MAX_PERMITS - 1);
     s.add_permits(1);
 }

@@ -6,46 +6,42 @@ use core::{marker::PhantomData, pin::Pin, ptr, ptr::NonNull};
 use crate::unsafe_pinned::UnsafePinned;
 use crate::{
     List,
-    list::{AsList, ListState, LockedList},
+    list::{AsList, Eager, Linking, ListState, LockedList},
     loom::{
         cell::Cell,
         sync::atomic::{AtomicPtr, Ordering, Ordering::*},
     },
-    sync::{DefaultSyncPrimitives, SyncPrimitives},
+    sync::mutex::{DefaultMutex, Mutex},
 };
 
-pub(crate) const NULL: *mut NodeLink = ptr::null_mut();
-
-pub trait NodeData<L, S: ListState = (), SP: SyncPrimitives = DefaultSyncPrimitives>:
+pub trait NodeData<LR, S: ListState = (), L: Linking = Eager, M: Mutex = DefaultMutex>:
     Sized
 {
-    fn new_state_if_last_node_on_drop(self: Pin<&mut Self>, list: &L) -> S;
+    fn new_state_if_last_node_on_drop(self: Pin<&mut Self>, list: &LR) -> S;
     fn on_drop<'list>(
         self: Pin<&mut Self>,
-        list: &'list L,
-        locked: Option<LockedList<'list, Self, S, SP>>,
+        list: &'list LR,
+        locked: Option<LockedList<'list, Self, S, L, M>>,
         state_updated_on_unlink: bool,
     );
 }
 
 #[repr(align(4))]
-pub(crate) struct NodeLink {
-    pub(crate) prev: AtomicPtr<NodeLink>,
-    pub(crate) next: AtomicPtr<NodeLink>,
+pub(crate) struct NodeLink<L: PrivateLinking> {
+    pub(crate) prev: AtomicPtr<NodeLink<L>>,
+    pub(crate) next: L::NextPtr,
 }
 
-impl NodeLink {
+impl<L: Linking> NodeLink<L> {
     #[cfg_attr(loom, const_fn::const_fn(cfg(false)))]
     pub(crate) const fn new() -> Self {
         Self {
-            prev: AtomicPtr::new(NULL),
-            next: AtomicPtr::new(NULL),
+            prev: AtomicPtr::new(ptr::null_mut()),
+            #[cfg(not(loom))]
+            next: L::NEW_NEXT,
+            #[cfg(loom)]
+            next: L::new_next(None),
         }
-    }
-
-    #[inline(always)]
-    pub(crate) fn next(&self) -> Option<NonNull<NodeLink>> {
-        NonNull::new(self.next.load(Acquire))
     }
 
     #[inline(always)]
@@ -55,8 +51,8 @@ impl NodeLink {
 }
 
 #[repr(C)]
-pub(crate) struct NodeInner<T> {
-    pub(crate) link: NodeLink,
+pub(crate) struct NodeInner<T, L: Linking> {
+    pub(crate) link: NodeLink<L>,
     pub(crate) data: T,
     // TODO
     /// Dummy cell, whose only purpose is to report data accesses to loom: the real accesses go
@@ -68,49 +64,53 @@ pub(crate) struct NodeInner<T> {
 
 pub enum NodeState<
     'a,
-    L: AsList<List<T, S, SP>>,
-    T: NodeData<L, S, SP>,
+    LR: AsList<List<T, S, L, M>>,
+    T: NodeData<LR, S, L, M>,
     S: ListState,
-    SP: SyncPrimitives,
+    L: Linking,
+    M: Mutex,
 > {
-    Unlinked(NodeUnlinked<'a, L, T, S, SP>),
-    Linked(NodeLinked<'a, L, T, S, SP>),
+    Unlinked(NodeUnlinked<'a, LR, T, S, L, M>),
+    Linked(NodeLinked<'a, LR, T, S, L, M>),
 }
 
 pub struct Node<
-    L: AsList<List<T, S, SP>>,
-    T: NodeData<L, S, SP>,
+    LR: AsList<List<T, S, L, M>>,
+    T: NodeData<LR, S, L, M>,
     S: ListState = (),
-    SP: SyncPrimitives = DefaultSyncPrimitives,
+    L: Linking = Eager,
+    M: Mutex = DefaultMutex,
 > {
-    list: L,
-    node: UnsafePinned<NodeInner<T>>,
+    list: LR,
+    node: UnsafePinned<NodeInner<T, L>>,
     linked: Cell<bool>,
     _state: PhantomData<S>,
-    _sync: PhantomData<SP>,
+    _sync: PhantomData<(L, M)>,
 }
 
 unsafe impl<
-    L: AsList<List<T, S, SP>> + Send,
-    T: NodeData<L, S, SP> + Send,
+    LR: AsList<List<T, S, L, M>> + Send,
+    T: NodeData<LR, S, L, M> + Send,
     S: ListState,
-    SP: SyncPrimitives + Send,
-> Send for Node<L, T, S, SP>
+    L: Linking,
+    M: Mutex,
+> Send for Node<LR, T, S, L, M>
 {
 }
 unsafe impl<
-    L: AsList<List<T, S, SP>> + Sync,
-    T: NodeData<L, S, SP>,
+    LR: AsList<List<T, S, L, M>> + Sync,
+    T: NodeData<LR, S, L, M>,
     S: ListState,
-    SP: SyncPrimitives + Sync,
-> Sync for Node<L, T, S, SP>
+    L: Linking,
+    M: Mutex,
+> Sync for Node<LR, T, S, L, M>
 {
 }
 
-impl<L: AsList<List<T, S, SP>>, T: NodeData<L, S, SP>, S: ListState, SP: SyncPrimitives>
-    Node<L, T, S, SP>
+impl<LR: AsList<List<T, S, L, M>>, T: NodeData<LR, S, L, M>, S: ListState, L: Linking, M: Mutex>
+    Node<LR, T, S, L, M>
 {
-    pub fn new(list: L) -> Self
+    pub fn new(list: LR) -> Self
     where
         T: Default,
     {
@@ -118,7 +118,7 @@ impl<L: AsList<List<T, S, SP>>, T: NodeData<L, S, SP>, S: ListState, SP: SyncPri
     }
 
     #[cfg_attr(loom, const_fn::const_fn(cfg(false)))]
-    pub const fn with_data(list: L, data: T) -> Self {
+    pub const fn with_data(list: LR, data: T) -> Self {
         Self {
             list,
             node: UnsafePinned::new(NodeInner {
@@ -134,11 +134,11 @@ impl<L: AsList<List<T, S, SP>>, T: NodeData<L, S, SP>, S: ListState, SP: SyncPri
     }
 
     #[inline(always)]
-    pub const fn list(&self) -> &L {
+    pub const fn list(&self) -> &LR {
         &self.list
     }
 
-    fn link(&self) -> NonNull<NodeLink> {
+    fn link(&self) -> NonNull<NodeLink<L>> {
         NonNull::new(self.node.get()).unwrap().cast()
     }
 
@@ -148,7 +148,7 @@ impl<L: AsList<List<T, S, SP>>, T: NodeData<L, S, SP>, S: ListState, SP: SyncPri
     }
 
     #[inline(always)]
-    pub fn state(self: Pin<&mut Self>) -> NodeState<'_, L, T, S, SP> {
+    pub fn state(self: Pin<&mut Self>) -> NodeState<'_, LR, T, S, L, M> {
         let this = self.into_ref().get_ref();
         if this.linked.get() {
             if this.is_linked() {
@@ -177,8 +177,8 @@ impl<L: AsList<List<T, S, SP>>, T: NodeData<L, S, SP>, S: ListState, SP: SyncPri
     }
 }
 
-impl<L: AsList<List<T, S, SP>>, T: NodeData<L, S, SP>, S: ListState, SP: SyncPrimitives> Drop
-    for Node<L, T, S, SP>
+impl<LR: AsList<List<T, S, L, M>>, T: NodeData<LR, S, L, M>, S: ListState, L: Linking, M: Mutex>
+    Drop for Node<LR, T, S, L, M>
 {
     #[inline]
     fn drop(&mut self) {
@@ -192,65 +192,86 @@ impl<L: AsList<List<T, S, SP>>, T: NodeData<L, S, SP>, S: ListState, SP: SyncPri
 
 pub struct NodeUnlinked<
     'a,
-    L: AsList<List<T, S, SP>>,
-    T: NodeData<L, S, SP>,
+    LR: AsList<List<T, S, L, M>>,
+    T: NodeData<LR, S, L, M>,
     S: ListState = (),
-    SP: SyncPrimitives = DefaultSyncPrimitives,
->(&'a Node<L, T, S, SP>);
+    L: Linking = Eager,
+    M: Mutex = DefaultMutex,
+>(&'a Node<LR, T, S, L, M>);
 
 unsafe impl<
-    L: AsList<List<T, S, SP>> + Sync,
-    T: NodeData<L, S, SP> + Send,
+    LR: AsList<List<T, S, L, M>> + Sync,
+    T: NodeData<LR, S, L, M> + Send,
     S: ListState,
-    SP: SyncPrimitives,
-> Send for NodeUnlinked<'_, L, T, S, SP>
+    L: Linking,
+    M: Mutex,
+> Send for NodeUnlinked<'_, LR, T, S, L, M>
 {
 }
 unsafe impl<
-    L: AsList<List<T, S, SP>> + Sync,
-    T: NodeData<L, S, SP> + Sync,
+    LR: AsList<List<T, S, L, M>> + Sync,
+    T: NodeData<LR, S, L, M> + Sync,
     S: ListState,
-    SP: SyncPrimitives,
-> Sync for NodeUnlinked<'_, L, T, S, SP>
+    L: Linking,
+    M: Mutex,
+> Sync for NodeUnlinked<'_, LR, T, S, L, M>
 {
 }
 
 node_ref!(
     NodeUnlinked<
         'a,
-        L: AsList<List<T, S, SP>>,
-        T: NodeData<L, S, SP>,
+        LR: AsList<List<T, S, L, M>>,
+        T: NodeData<LR, S, L, M>,
         S: ListState,
-        SP: SyncPrimitives,
+        L: Linking,
+        M: Mutex,
     >,
     T,
+    L,
     self.0.link()
 );
 
-impl<'a, L: AsList<List<T, S, SP>>, T: NodeData<L, S, SP>, S: ListState, SP: SyncPrimitives>
-    NodeUnlinked<'a, L, T, S, SP>
+impl<'a, LR: AsList<List<T, S, L, M>>, T: NodeData<LR, S, L, M>, S: ListState, L: Linking, M: Mutex>
+    NodeUnlinked<'a, LR, T, S, L, M>
 {
     #[inline]
-    pub fn list(&self) -> &'a L {
+    pub fn list(&self) -> &'a LR {
         self.0.list()
     }
 }
 
-impl<'a, L: AsList<List<T, (), SP>>, T: NodeData<L, (), SP>, SP: SyncPrimitives>
-    NodeUnlinked<'a, L, T, (), SP>
+impl<'a, LR: AsList<List<T, (), L, M>>, T: NodeData<LR, (), L, M>, L: Linking, M: Mutex>
+    NodeUnlinked<'a, LR, T, (), L, M>
 {
     #[inline]
     pub fn push_back(self, order: Ordering) {
         let list = self.list().as_list();
-        let on_pushed = || self.0.linked.set(true);
         let link = self.0.link();
-        let _ = unsafe { list.push_back(link, order, Relaxed, |_| None, |_| true, on_pushed) };
+        let f = None::<fn(()) -> Option<()>>;
+        let on_pushed = || self.0.linked.set(true);
+        let _ = unsafe { list.push_back(link, order, Relaxed, f, |_| true, on_pushed) };
     }
 }
 
-impl<'a, L: AsList<List<T, usize, SP>>, T: NodeData<L, usize, SP>, SP: SyncPrimitives>
-    NodeUnlinked<'a, L, T, usize, SP>
+impl<'a, LR: AsList<List<T, usize, L, M>>, T: NodeData<LR, usize, L, M>, L: Linking, M: Mutex>
+    NodeUnlinked<'a, LR, T, usize, L, M>
 {
+    pub fn try_push_back_with<P: FnMut(Pin<&mut T>, Option<usize>) -> bool>(
+        self,
+        set_order: Ordering,
+        fetch_order: Ordering,
+        mut on_push: P,
+    ) -> bool {
+        let list = self.list().as_list();
+        let link = self.0.link();
+        let f = None::<fn(usize) -> Option<usize>>;
+        let on_push_back = |state| on_push(Self(self.0).data_mut(), state);
+        let on_pushed = || self.0.linked.set(true);
+        unsafe { list.push_back(link, set_order, fetch_order, f, on_push_back, on_pushed) }
+            .unwrap_err()
+    }
+
     pub fn try_update_state_or_push_back_with<
         F: FnMut(Pin<&mut T>, usize) -> Option<usize>,
         P: FnMut(Pin<&mut T>, Option<usize>) -> bool,
@@ -261,87 +282,97 @@ impl<'a, L: AsList<List<T, usize, SP>>, T: NodeData<L, usize, SP>, SP: SyncPrimi
         fetch_order: Ordering,
         mut f: F,
         on_state_updated: U,
-        mut on_push_back: P,
+        mut on_push: P,
     ) -> Result<usize, bool> {
         let list = self.list().as_list();
         let link = self.0.link();
         let f = |state| f(Self(self.0).data_mut(), state);
-        let on_push_back = |state| on_push_back(Self(self.0).data_mut(), state);
+        let on_push = |state| on_push(Self(self.0).data_mut(), state);
         let on_pushed = || self.0.linked.set(true);
-        unsafe { list.push_back(link, set_order, fetch_order, f, on_push_back, on_pushed) }
+        unsafe { list.push_back(link, set_order, fetch_order, Some(f), on_push, on_pushed) }
             .inspect(|&state| on_state_updated(self.data_mut(), state))
     }
 }
 
 pub struct NodeLinked<
     'a,
-    L: AsList<List<T, S, SP>>,
-    T: NodeData<L, S, SP>,
+    LR: AsList<List<T, S, L, M>>,
+    T: NodeData<LR, S, L, M>,
     S: ListState = (),
-    SP: SyncPrimitives = DefaultSyncPrimitives,
+    L: Linking = Eager,
+    M: Mutex = DefaultMutex,
 > {
-    node: &'a Node<L, T, S, SP>,
-    locked: LockedList<'a, T, S, SP>,
+    node: &'a Node<LR, T, S, L, M>,
+    locked: LockedList<'a, T, S, L, M>,
 }
 
 unsafe impl<
     'a,
-    L: AsList<List<T, S, SP>> + Sync,
-    T: NodeData<L, S, SP> + Send,
+    LR: AsList<List<T, S, L, M>> + Sync,
+    T: NodeData<LR, S, L, M> + Send,
     S: ListState,
-    SP: SyncPrimitives,
-> Send for NodeLinked<'a, L, T, S, SP>
+    L: Linking,
+    M: Mutex,
+> Send for NodeLinked<'a, LR, T, S, L, M>
 where
-    LockedList<'a, T, S, SP>: Send,
+    LockedList<'a, T, S, L, M>: Send,
 {
 }
 unsafe impl<
     'a,
-    L: AsList<List<T, S, SP>> + Sync,
-    T: NodeData<L, S, SP> + Sync,
+    LR: AsList<List<T, S, L, M>> + Sync,
+    T: NodeData<LR, S, L, M> + Sync,
     S: ListState,
-    SP: SyncPrimitives + Sync,
-> Sync for NodeLinked<'a, L, T, S, SP>
+    L: Linking,
+    M: Mutex,
+> Sync for NodeLinked<'a, LR, T, S, L, M>
 where
-    LockedList<'a, T, S, SP>: Sync,
+    LockedList<'a, T, S, L, M>: Sync,
 {
 }
 
 node_ref!(
     NodeLinked<
         'a,
-        L: AsList<List<T, S, SP>>,
-        T: NodeData<L, S, SP>,
+        LR: AsList<List<T, S, L, M>>,
+        T: NodeData<LR, S, L, M>,
         S: ListState,
-        SP: SyncPrimitives,
+        L: Linking,
+        M: Mutex,
     >,
     T,
+    L,
     self.node.link()
 );
 
-impl<'a, L: AsList<List<T, S, SP>>, T: NodeData<L, S, SP>, S: ListState, SP: SyncPrimitives>
-    NodeLinked<'a, L, T, S, SP>
+impl<'a, LR: AsList<List<T, S, L, M>>, T: NodeData<LR, S, L, M>, S: ListState, L: Linking, M: Mutex>
+    NodeLinked<'a, LR, T, S, L, M>
 {
     #[inline]
-    pub fn list(&self) -> &'a L {
+    pub fn list(&self) -> &'a LR {
         self.node.list()
     }
 }
 
-impl<'a, L: AsList<List<T, (), SP>>, T: NodeData<L, (), SP>, SP: SyncPrimitives>
-    NodeLinked<'a, L, T, (), SP>
+impl<'a, LR: AsList<List<T, (), L, M>>, T: NodeData<LR, (), L, M>, L: Linking, M: Mutex>
+    NodeLinked<'a, LR, T, (), L, M>
 {
     #[inline]
     #[allow(clippy::type_complexity)]
-    pub fn unlink(mut self) -> (NodeUnlinked<'a, L, T, (), SP>, LockedList<'a, T, (), SP>) {
+    pub fn unlink(
+        mut self,
+    ) -> (
+        NodeUnlinked<'a, LR, T, (), L, M>,
+        LockedList<'a, T, (), L, M>,
+    ) {
         unsafe { self.locked.remove(self.node.link(), || (), false, false) };
         self.node.linked.set(false);
         (NodeUnlinked(self.node), self.locked)
     }
 }
 
-impl<'a, L: AsList<List<T, usize, SP>>, T: NodeData<L, usize, SP>, SP: SyncPrimitives>
-    NodeLinked<'a, L, T, usize, SP>
+impl<'a, LR: AsList<List<T, usize, L, M>>, T: NodeData<LR, usize, L, M>, L: Linking, M: Mutex>
+    NodeLinked<'a, LR, T, usize, L, M>
 {
     #[inline]
     #[allow(clippy::type_complexity)]
@@ -349,8 +380,8 @@ impl<'a, L: AsList<List<T, usize, SP>>, T: NodeData<L, usize, SP>, SP: SyncPrimi
         mut self,
         new_state_if_last_node: F,
     ) -> (
-        NodeUnlinked<'a, L, T, usize, SP>,
-        LockedList<'a, T, usize, SP>,
+        NodeUnlinked<'a, LR, T, usize, L, M>,
+        LockedList<'a, T, usize, L, M>,
         bool,
     ) {
         let (next, tail) = unsafe {
@@ -365,35 +396,43 @@ impl<'a, L: AsList<List<T, usize, SP>>, T: NodeData<L, usize, SP>, SP: SyncPrimi
 
 struct NodeDropped<
     'a,
-    L: AsList<List<T, S, SP>>,
-    T: NodeData<L, S, SP>,
+    LR: AsList<List<T, S, L, M>>,
+    T: NodeData<LR, S, L, M>,
     S: ListState,
-    SP: SyncPrimitives,
->(&'a Node<L, T, S, SP>);
+    L: Linking,
+    M: Mutex,
+>(&'a Node<LR, T, S, L, M>);
 
 node_ref!(
     NodeDropped<
         'a,
-        L: AsList<List<T, S, SP>>,
-        T: NodeData<L, S, SP>,
+        LR: AsList<List<T, S, L, M>>,
+        T: NodeData<LR, S, L, M>,
         S: ListState,
-        SP: SyncPrimitives,
+        L: Linking,
+        M: Mutex,
     >,
     T,
+    L,
     self.0.link()
 );
 
 pub(crate) mod private {
     use core::ptr::NonNull;
 
-    use crate::node::{NodeInner, NodeLink};
+    use crate::{
+        list::Linking,
+        node::{NodeInner, NodeLink},
+    };
 
     pub(crate) trait NodeRef {
-        fn node(&self) -> NonNull<NodeLink>;
+        type Linking: Linking;
+
+        fn node(&self) -> NonNull<NodeLink<Self::Linking>>;
 
         #[inline(always)]
         fn data_ptr<T>(&self) -> *mut T {
-            let inner = self.node().as_ptr().cast::<NodeInner<T>>();
+            let inner = self.node().as_ptr().cast::<NodeInner<T, Self::Linking>>();
             #[cfg(loom)]
             unsafe {
                 (*inner).access.set(());
@@ -417,12 +456,14 @@ pub trait NodeRef<T>: private::NodeRef {
 }
 
 macro_rules! node_ref {
-    ($ty:ident<$($lf:lifetime,)* $($arg:ident $(:$bound:path)?),* $(,)?>, $data:ty, self.$($node_path:tt)*) => {
+    ($ty:ident<$($lf:lifetime,)* $($arg:ident $(:$bound:path)?),* $(,)?>, $data:ty, $linking:ty, self.$($node_path:tt)*) => {
         impl<$($lf,)* $($arg $(:$bound)?),*> crate::node::private::NodeRef
             for $ty<$($lf,)* $($arg),*>
         {
+            type Linking = $linking;
+
             #[inline(always)]
-            fn node(&self) -> core::ptr::NonNull<crate::node::NodeLink> {
+            fn node(&self) -> core::ptr::NonNull<crate::node::NodeLink<$linking>> {
                 self.$($node_path)*
             }
         }
@@ -452,3 +493,5 @@ macro_rules! node_ref {
     };
 }
 pub(crate) use node_ref;
+
+use crate::list::PrivateLinking;

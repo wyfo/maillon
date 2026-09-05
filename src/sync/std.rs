@@ -12,7 +12,7 @@ fn panic_lock() -> ! {
 #[derive(Debug)]
 pub struct StdMutex(Mutex<()>);
 
-unsafe impl super::Mutex for StdMutex {
+unsafe impl super::mutex::Mutex for StdMutex {
     #[cfg(not(loom))]
     #[allow(clippy::declare_interior_mutable_const)]
     const INIT: Self = Self(Mutex::new(()));
@@ -56,8 +56,8 @@ unsafe impl CondVar<StdMutex> for StdCondVar {
     unsafe fn wait<'a>(
         &self,
         _mutex: &'a StdMutex,
-        guard: <StdMutex as super::Mutex>::Guard<'a>,
-    ) -> <StdMutex as super::Mutex>::Guard<'a> {
+        guard: <StdMutex as super::mutex::Mutex>::Guard<'a>,
+    ) -> <StdMutex as super::mutex::Mutex>::Guard<'a> {
         self.0.wait(guard).unwrap_or_else(|_| panic_lock())
     }
 

@@ -3,25 +3,30 @@
 #[path = "../examples/notify.rs"]
 mod notify;
 
+mod linking;
+
+use aiq::list::Linking;
+use linking::{EAGER, LAZY, LinkingMode};
 use notify::Notify;
+use rstest::rstest;
 use tokio_test::{task::spawn, *};
 
 #[allow(unused)]
 trait AssertSend: Send + Sync {}
-impl AssertSend for Notify {}
+impl<L: Linking> AssertSend for Notify<L> {}
 
-#[test]
-fn notify_notified_one() {
-    let notify = Notify::new();
+#[rstest]
+fn notify_notified_one<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+    let notify = Notify::<L>::new();
     let mut notified = spawn(async { notify.notified().await });
 
     notify.notify_one();
     assert_ready!(notified.poll());
 }
 
-#[test]
-fn notify_multi_notified_one() {
-    let notify = Notify::new();
+#[rstest]
+fn notify_multi_notified_one<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+    let notify = Notify::<L>::new();
     let mut notified1 = spawn(async { notify.notified().await });
     let mut notified2 = spawn(async { notify.notified().await });
 
@@ -35,9 +40,9 @@ fn notify_multi_notified_one() {
     assert_pending!(notified2.poll());
 }
 
-#[test]
-fn notify_multi_notified_last() {
-    let notify = Notify::new();
+#[rstest]
+fn notify_multi_notified_last<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+    let notify = Notify::<L>::new();
     let mut notified1 = spawn(async { notify.notified().await });
     let mut notified2 = spawn(async { notify.notified().await });
 
@@ -51,9 +56,9 @@ fn notify_multi_notified_last() {
     assert_ready!(notified2.poll());
 }
 
-#[test]
-fn notified_one_notify() {
-    let notify = Notify::new();
+#[rstest]
+fn notified_one_notify<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+    let notify = Notify::<L>::new();
     let mut notified = spawn(async { notify.notified().await });
 
     assert_pending!(notified.poll());
@@ -63,9 +68,9 @@ fn notified_one_notify() {
     assert_ready!(notified.poll());
 }
 
-#[test]
-fn notified_multi_notify() {
-    let notify = Notify::new();
+#[rstest]
+fn notified_multi_notify<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+    let notify = Notify::<L>::new();
     let mut notified1 = spawn(async { notify.notified().await });
     let mut notified2 = spawn(async { notify.notified().await });
 
@@ -80,9 +85,9 @@ fn notified_multi_notify() {
     assert_pending!(notified2.poll());
 }
 
-#[test]
-fn notify_notified_multi() {
-    let notify = Notify::new();
+#[rstest]
+fn notify_notified_multi<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+    let notify = Notify::<L>::new();
 
     notify.notify_one();
 
@@ -98,9 +103,9 @@ fn notify_notified_multi() {
     assert_ready!(notified2.poll());
 }
 
-#[test]
-fn notified_drop_notified_notify() {
-    let notify = Notify::new();
+#[rstest]
+fn notified_drop_notified_notify<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+    let notify = Notify::<L>::new();
     let mut notified1 = spawn(async { notify.notified().await });
     let mut notified2 = spawn(async { notify.notified().await });
 
@@ -115,9 +120,9 @@ fn notified_drop_notified_notify() {
     assert_ready!(notified2.poll());
 }
 
-#[test]
-fn notified_multi_notify_drop_one() {
-    let notify = Notify::new();
+#[rstest]
+fn notified_multi_notify_drop_one<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+    let notify = Notify::<L>::new();
     let mut notified1 = spawn(async { notify.notified().await });
     let mut notified2 = spawn(async { notify.notified().await });
 
@@ -135,9 +140,9 @@ fn notified_multi_notify_drop_one() {
     assert_ready!(notified2.poll());
 }
 
-#[test]
-fn notified_multi_notify_one_drop() {
-    let notify = Notify::new();
+#[rstest]
+fn notified_multi_notify_one_drop<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+    let notify = Notify::<L>::new();
     let mut notified1 = spawn(async { notify.notified().await });
     let mut notified2 = spawn(async { notify.notified().await });
     let mut notified3 = spawn(async { notify.notified().await });
@@ -157,9 +162,9 @@ fn notified_multi_notify_one_drop() {
     assert_pending!(notified3.poll());
 }
 
-#[test]
-fn notified_multi_notify_last_drop() {
-    let notify = Notify::new();
+#[rstest]
+fn notified_multi_notify_last_drop<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+    let notify = Notify::<L>::new();
     let mut notified1 = spawn(async { notify.notified().await });
     let mut notified2 = spawn(async { notify.notified().await });
     let mut notified3 = spawn(async { notify.notified().await });
@@ -178,21 +183,21 @@ fn notified_multi_notify_last_drop() {
     assert_pending!(notified1.poll());
 }
 
-#[test]
-fn notify_in_drop_after_wake() {
+#[rstest]
+fn notify_in_drop_after_wake<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
     use std::{future::Future, sync::Arc};
 
     use futures::task::ArcWake;
 
-    let notify = Arc::new(Notify::new());
+    let notify = Arc::new(Notify::<L>::new());
 
-    struct NotifyOnDrop(Arc<Notify>);
+    struct NotifyOnDrop<L: Linking>(Arc<Notify<L>>);
 
-    impl ArcWake for NotifyOnDrop {
+    impl<L: Linking> ArcWake for NotifyOnDrop<L> {
         fn wake_by_ref(_arc_self: &Arc<Self>) {}
     }
 
-    impl Drop for NotifyOnDrop {
+    impl<L: Linking> Drop for NotifyOnDrop<L> {
         fn drop(&mut self) {
             self.0.notify_waiters();
         }
@@ -212,9 +217,9 @@ fn notify_in_drop_after_wake() {
     notify.notify_waiters();
 }
 
-#[test]
-fn notify_one_after_dropped_all() {
-    let notify = Notify::new();
+#[rstest]
+fn notify_one_after_dropped_all<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+    let notify = Notify::<L>::new();
     let mut notified1 = spawn(async { notify.notified().await });
 
     assert_pending!(notified1.poll());
@@ -229,18 +234,18 @@ fn notify_one_after_dropped_all() {
     assert_ready!(notified2.poll());
 }
 
-#[test]
-fn test_notify_one_not_enabled() {
-    let notify = Notify::new();
+#[rstest]
+fn test_notify_one_not_enabled<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+    let notify = Notify::<L>::new();
     let mut future = spawn(notify.notified());
 
     notify.notify_one();
     assert_ready!(future.poll());
 }
 
-#[test]
-fn test_notify_one_after_enable() {
-    let notify = Notify::new();
+#[rstest]
+fn test_notify_one_after_enable<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+    let notify = Notify::<L>::new();
     let mut future = spawn(notify.notified());
 
     future.enter(|_, fut| assert!(!fut.enable()));
@@ -250,27 +255,27 @@ fn test_notify_one_after_enable() {
     future.enter(|_, fut| assert!(fut.enable()));
 }
 
-#[test]
-fn test_poll_after_enable() {
-    let notify = Notify::new();
+#[rstest]
+fn test_poll_after_enable<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+    let notify = Notify::<L>::new();
     let mut future = spawn(notify.notified());
 
     future.enter(|_, fut| assert!(!fut.enable()));
     assert_pending!(future.poll());
 }
 
-#[test]
-fn test_enable_after_poll() {
-    let notify = Notify::new();
+#[rstest]
+fn test_enable_after_poll<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+    let notify = Notify::<L>::new();
     let mut future = spawn(notify.notified());
 
     assert_pending!(future.poll());
     future.enter(|_, fut| assert!(!fut.enable()));
 }
 
-#[test]
-fn test_enable_consumes_permit() {
-    let notify = Notify::new();
+#[rstest]
+fn test_enable_consumes_permit<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+    let notify = Notify::<L>::new();
 
     // Add a permit.
     notify.notify_one();
@@ -282,13 +287,13 @@ fn test_enable_consumes_permit() {
     future2.enter(|_, fut| assert!(!fut.enable()));
 }
 
-#[test]
-fn test_waker_update() {
+#[rstest]
+fn test_waker_update<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
     use std::{future::Future, task::Context};
 
     use futures::task::noop_waker;
 
-    let notify = Notify::new();
+    let notify = Notify::<L>::new();
     let mut future = spawn(notify.notified());
 
     let noop = noop_waker();

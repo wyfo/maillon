@@ -6,32 +6,34 @@ use core::{
 
 use crate::{
     List,
-    list::{GetBack, GetFront, IntoTail, ListState, LockedList, NodeLink, TailExt},
+    list::{Eager, GetBack, GetFront, IntoTail, Linking, ListState, LockedList, NodeLink, TailExt},
     loom::{
         AtomicPtrExt,
         sync::atomic::{AtomicPtr, Ordering::*},
     },
-    node::{NULL, NodeRef, node_ref},
-    sync::{DefaultSyncPrimitives, SyncPrimitives},
+    node::{NodeRef, node_ref},
+    sync::mutex::{DefaultMutex, Mutex},
     utils::{OptionNonNullExt, defer},
 };
 
-pub struct Drain<'a, T, S: ListState = (), SP: SyncPrimitives + 'a = DefaultSyncPrimitives> {
-    sentinel_node: NodeLink,
-    queue: &'a List<T, S, SP>,
-    locked: Option<LockedList<'a, T, S, SP>>,
+// TODO it should be possible to accept L: Linking, but it currently breaks everything with head
+// always returning None
+pub struct Drain<'a, T, S: ListState = (), L: Linking = Eager, M: Mutex + 'a = DefaultMutex> {
+    sentinel_node: NodeLink<L>,
+    queue: &'a List<T, S, L, M>,
+    locked: Option<LockedList<'a, T, S, L, M>>,
 }
 
-impl<'a, T, S: ListState, SP: SyncPrimitives> Drain<'a, T, S, SP> {
+impl<'a, T, S: ListState, L: Linking, M: Mutex> Drain<'a, T, S, L, M> {
     pub(super) fn new<F: FnOnce() -> S>(
-        locked: LockedList<'a, T, S, SP>,
+        locked: LockedList<'a, T, S, L, M>,
         new_state_if_not_empty: F,
     ) -> Self {
         let mut head = None;
         let mut tail = None;
-        if locked.tail().is_some() {
-            head = Some(locked.get_next(&locked.queue.head));
-            locked.head.store(NULL, Relaxed);
+        if let Some(t) = locked.tail() {
+            head = Some(locked.get_next(None, &locked.queue.head, t));
+            L::update_next(&locked.head, None);
             // TODO
             // `Release` is for the `head` store just above: it must not sink past the swap.
             // Otherwise a concurrent enqueuer whose phase-1 CAS lands after the swap writes
@@ -54,31 +56,31 @@ impl<'a, T, S: ListState, SP: SyncPrimitives> Drain<'a, T, S, SP> {
         Self {
             sentinel_node: NodeLink {
                 prev: AtomicPtr::new(tail.as_ptr()),
-                next: AtomicPtr::new(head.as_ptr()),
+                next: L::new_next(head),
             },
             queue: locked.queue,
             locked: Some(locked),
         }
     }
 
-    fn head(&mut self) -> Option<NonNull<NodeLink>> {
-        NonNull::new(self.sentinel_node.next.load_mut())
+    fn head(&mut self) -> Option<NonNull<NodeLink<L>>> {
+        L::load_next_mut(&mut self.sentinel_node.next)
     }
 
-    fn tail(&mut self) -> Option<NonNull<NodeLink>> {
+    fn tail(&mut self) -> Option<NonNull<NodeLink<L>>> {
         NonNull::new(self.sentinel_node.prev.load_mut())
     }
 
-    fn set_head(&mut self, head: Option<NonNull<NodeLink>>) {
-        self.sentinel_node.next.store_mut(head.as_ptr());
+    fn set_head(&mut self, head: Option<NonNull<NodeLink<L>>>) {
+        L::update_next_mut(&mut self.sentinel_node.next, head);
     }
 
-    fn set_tail(&mut self, tail: Option<NonNull<NodeLink>>) {
+    fn set_tail(&mut self, tail: Option<NonNull<NodeLink<L>>>) {
         self.sentinel_node.prev.store_mut(tail.as_ptr());
     }
 
     pub fn is_empty(&self) -> bool {
-        self.sentinel_node.next.load(Relaxed).is_null()
+        self.sentinel_node.prev.load(Relaxed).is_null()
     }
 
     fn check_locked(&self) {
@@ -92,7 +94,7 @@ impl<'a, T, S: ListState, SP: SyncPrimitives> Drain<'a, T, S, SP> {
     }
 
     #[inline]
-    pub fn front(self: Pin<&mut Self>) -> Option<DrainFront<'a, '_, T, S, SP>> {
+    pub fn front(self: Pin<&mut Self>) -> Option<DrainFront<'a, '_, T, S, L, M>> {
         self.check_locked();
         let this = unsafe { self.get_unchecked_mut() };
         Some(DrainFront {
@@ -102,7 +104,7 @@ impl<'a, T, S: ListState, SP: SyncPrimitives> Drain<'a, T, S, SP> {
     }
 
     #[inline]
-    pub fn back(self: Pin<&mut Self>) -> Option<DrainBack<'a, '_, T, S, SP>> {
+    pub fn back(self: Pin<&mut Self>) -> Option<DrainBack<'a, '_, T, S, L, M>> {
         self.check_locked();
         let this = unsafe { self.get_unchecked_mut() };
         Some(DrainBack {
@@ -119,7 +121,7 @@ impl<'a, T, S: ListState, SP: SyncPrimitives> Drain<'a, T, S, SP> {
         if let Some(head) = this.head() {
             unsafe { head.as_ref().prev.store(sentinel_ptr, Relaxed) }
             let tail = unsafe { this.tail().unwrap_unchecked() };
-            unsafe { tail.as_ref().next.store(sentinel_ptr, Relaxed) };
+            unsafe { L::update_next(&tail.as_ref().next, NonNull::new(sentinel_ptr)) };
         }
         drop(unsafe { this.locked.take().unwrap_unchecked() });
         let _guard = defer(|| {
@@ -133,7 +135,7 @@ impl<'a, T, S: ListState, SP: SyncPrimitives> Drain<'a, T, S, SP> {
         f()
     }
 
-    fn for_each_impl<E: DrainGetEnd, H>(
+    fn for_each_impl<E: DrainGetEnd<L>, H>(
         self,
         helper: &mut H,
         mut on_next: impl FnMut(&mut H, Pin<&mut T>) -> bool,
@@ -146,11 +148,15 @@ impl<'a, T, S: ListState, SP: SyncPrimitives> Drain<'a, T, S, SP> {
                 let unlock = on_next(helper, node.data_mut());
                 end = node.unlink();
                 if unlock {
-                    // Ends the borrow of `this`: borrowck must assume the projected end type
-                    // has a destructor, so the borrow would otherwise live to the end of scope.
+                    if end.is_none() {
+                        break;
+                    }
                     drop(end);
                     this.as_mut().execute_unlocked(|| on_unlock(helper));
                     end = E::get_end(this.as_mut());
+                    if end.is_none() {
+                        return;
+                    }
                 }
             }
         }
@@ -187,60 +193,63 @@ impl<'a, T, S: ListState, SP: SyncPrimitives> Drain<'a, T, S, SP> {
     }
 }
 
-impl<'a, T, S: ListState, SP: SyncPrimitives> Drop for Drain<'a, T, S, SP> {
+impl<'a, T, S: ListState, L: Linking, M: Mutex> Drop for Drain<'a, T, S, L, M> {
     #[inline]
     fn drop(&mut self) {
-        if !self.sentinel_node.next.load(Relaxed).is_null() {
+        if !self.is_empty() {
             self.unlink_all();
         }
     }
 }
 
-pub trait DrainEnd<'drain, 'a, T, S: ListState = (), SP: SyncPrimitives = DefaultSyncPrimitives>:
+pub trait DrainEnd<'drain, 'a, T, S: ListState = (), L: Linking = Eager, M: Mutex = DefaultMutex>:
     NodeRef<T> + Sized
 {
     fn unlink(self) -> Option<Self>;
 }
 
-pub struct DrainFront<'drain, 'a, T, S: ListState = (), SP: SyncPrimitives = DefaultSyncPrimitives>
+pub struct DrainFront<'drain, 'a, T, S: ListState = (), L: Linking = Eager, M: Mutex = DefaultMutex>
 {
-    node: NonNull<NodeLink>,
-    drain: &'a mut Drain<'drain, T, S, SP>,
+    node: NonNull<NodeLink<L>>,
+    drain: &'a mut Drain<'drain, T, S, L, M>,
 }
 
-unsafe impl<'drain, T: Send, S: ListState, SP: SyncPrimitives> Send
-    for DrainFront<'drain, '_, T, S, SP>
+unsafe impl<'drain, T: Send, S: ListState, L: Linking, M: Mutex> Send
+    for DrainFront<'drain, '_, T, S, L, M>
 where
-    LockedList<'drain, T, S, SP>: Sync,
+    LockedList<'drain, T, S, L, M>: Sync,
 {
 }
-unsafe impl<'drain, T: Sync, S: ListState, SP: SyncPrimitives> Sync
-    for DrainFront<'drain, '_, T, S, SP>
+unsafe impl<'drain, T: Sync, S: ListState, L: Linking, M: Mutex> Sync
+    for DrainFront<'drain, '_, T, S, L, M>
 where
-    LockedList<'drain, T, S, SP>: Sync,
+    LockedList<'drain, T, S, L, M>: Sync,
 {
 }
 
-impl<'drain, 'a, T, S: ListState, SP: SyncPrimitives> DrainEnd<'drain, 'a, T, S, SP>
-    for DrainFront<'drain, 'a, T, S, SP>
+impl<'drain, 'a, T, S: ListState, L: Linking, M: Mutex> DrainEnd<'drain, 'a, T, S, L, M>
+    for DrainFront<'drain, 'a, T, S, L, M>
 {
     fn unlink(self) -> Option<Self> {
         DrainFront::unlink(self)
     }
 }
 
-impl<T, S: ListState, SP: SyncPrimitives> DrainFront<'_, '_, T, S, SP> {
+impl<T, S: ListState, L: Linking, M: Mutex> DrainFront<'_, '_, T, S, L, M> {
     pub fn unlink(self) -> Option<Self> {
         let node = unsafe { self.node.as_ref() };
         let mut next = None;
-        if self.drain.tail() != Some(self.node) {
-            let locked = unsafe { self.drain.locked.as_mut().unwrap_unchecked() };
-            next = Some(locked.get_next(&node.next));
+        // TODO there is at least one node so the tail cannot be null
+        let tail = unsafe { self.drain.tail().unwrap_unchecked() };
+        if tail != self.node {
+            let locked = unsafe { self.drain.locked.as_ref().unwrap_unchecked() };
+            next = Some(locked.get_next(Some(node.into()), &node.next, tail));
         } else {
             self.drain.set_tail(None);
         }
         self.drain.set_head(next);
-        node.prev.store(NULL, Release);
+        L::update_next(&node.next, None);
+        node.prev.store(ptr::null_mut(), Release);
         Some(Self {
             node: next?,
             drain: self.drain,
@@ -249,52 +258,54 @@ impl<T, S: ListState, SP: SyncPrimitives> DrainFront<'_, '_, T, S, SP> {
 }
 
 node_ref!(
-    DrainFront<'drain, 'a, T, S: ListState, SP: SyncPrimitives>,
+    DrainFront<'drain, 'a, T, S: ListState, L: Linking, M: Mutex>,
     T,
+    L,
     self.node
 );
 
-pub struct DrainBack<'drain, 'a, T, S: ListState = (), SP: SyncPrimitives = DefaultSyncPrimitives> {
-    node: NonNull<NodeLink>,
-    drain: &'a mut Drain<'drain, T, S, SP>,
+pub struct DrainBack<'drain, 'a, T, S: ListState = (), L: Linking = Eager, M: Mutex = DefaultMutex>
+{
+    node: NonNull<NodeLink<L>>,
+    drain: &'a mut Drain<'drain, T, S, L, M>,
 }
 
-unsafe impl<'drain, T: Send, S: ListState, SP: SyncPrimitives> Send
-    for DrainBack<'drain, '_, T, S, SP>
+unsafe impl<'drain, T: Send, S: ListState, L: Linking, M: Mutex> Send
+    for DrainBack<'drain, '_, T, S, L, M>
 where
-    LockedList<'drain, T, S, SP>: Sync,
+    LockedList<'drain, T, S, L, M>: Sync,
 {
 }
-unsafe impl<'drain, T: Sync, S: ListState, SP: SyncPrimitives> Sync
-    for DrainBack<'drain, '_, T, S, SP>
+unsafe impl<'drain, T: Sync, S: ListState, L: Linking, M: Mutex> Sync
+    for DrainBack<'drain, '_, T, S, L, M>
 where
-    LockedList<'drain, T, S, SP>: Sync,
+    LockedList<'drain, T, S, L, M>: Sync,
 {
 }
 
-impl<'drain, 'a, T, S: ListState, SP: SyncPrimitives> DrainEnd<'drain, 'a, T, S, SP>
-    for DrainBack<'drain, 'a, T, S, SP>
+impl<'drain, 'a, T, S: ListState, L: Linking, M: Mutex> DrainEnd<'drain, 'a, T, S, L, M>
+    for DrainBack<'drain, 'a, T, S, L, M>
 {
     fn unlink(self) -> Option<Self> {
         DrainBack::unlink(self)
     }
 }
 
-impl<T, S: ListState, SP: SyncPrimitives> DrainBack<'_, '_, T, S, SP> {
+impl<T, S: ListState, L: Linking, M: Mutex> DrainBack<'_, '_, T, S, L, M> {
     pub fn unlink(self) -> Option<Self> {
         let node = unsafe { self.node.as_ref() };
         let mut prev = None;
         if self.drain.head() != Some(self.node) {
-            prev = NonNull::new(node.prev.load(Relaxed));
+            prev = Some(unsafe { NonNull::new_unchecked(node.prev.load(Relaxed)) });
             let locked = unsafe { self.drain.locked.as_mut().unwrap_unchecked() };
-            let next = locked.get_next(unsafe { &prev.unwrap().as_ref().next });
-            debug_assert_eq!(next, node.into());
+            L::wait_next(unsafe { &prev.unwrap().as_ref().next }, &locked.parker);
         } else {
             // TODO setting the head is required as the head is checked in many places
             self.drain.set_head(None);
         }
         self.drain.set_tail(prev);
-        node.prev.store(NULL, Release);
+        L::update_next(&node.next, None);
+        node.prev.store(ptr::null_mut(), Release);
         Some(Self {
             node: prev?,
             drain: self.drain,
@@ -303,30 +314,31 @@ impl<T, S: ListState, SP: SyncPrimitives> DrainBack<'_, '_, T, S, SP> {
 }
 
 node_ref!(
-    DrainBack<'drain, 'a, T, S: ListState, SP: SyncPrimitives>,
+    DrainBack<'drain, 'a, T, S: ListState, L: Linking, M: Mutex>,
     T,
+    L,
     self.node
 );
 
-pub trait DrainGetEnd: Sized {
-    type DrainEnd<'drain, 'a, T, S: ListState, SP: SyncPrimitives>: DrainEnd<'drain, 'a, T, S, SP>
+pub trait DrainGetEnd<L: Linking>: Sized {
+    type DrainEnd<'drain, 'a, T, S: ListState, M: Mutex>: DrainEnd<'drain, 'a, T, S, L, M>
     where
         'drain: 'a,
         T: 'drain;
 
-    fn get_end<'drain, 'a, T, S: ListState, SP: SyncPrimitives>(
-        drain: Pin<&'a mut Drain<'drain, T, S, SP>>,
-    ) -> Option<Self::DrainEnd<'drain, 'a, T, S, SP>>;
+    fn get_end<'drain, 'a, T, S: ListState, M: Mutex>(
+        drain: Pin<&'a mut Drain<'drain, T, S, L, M>>,
+    ) -> Option<Self::DrainEnd<'drain, 'a, T, S, M>>;
 
     fn for_each<
         T,
         S: ListState,
-        SP: SyncPrimitives,
+        M: Mutex,
         H,
         N: FnMut(&mut H, Pin<&mut T>) -> bool,
         U: FnMut(&mut H),
     >(
-        drain: Drain<'_, T, S, SP>,
+        drain: Drain<'_, T, S, L, M>,
         helper: &mut H,
         on_next: N,
         on_unlock: U,
@@ -335,32 +347,32 @@ pub trait DrainGetEnd: Sized {
     }
 }
 
-impl DrainGetEnd for GetFront {
-    type DrainEnd<'drain, 'a, T, S: ListState, SP: SyncPrimitives>
-        = DrainFront<'drain, 'a, T, S, SP>
+impl<L: Linking> DrainGetEnd<L> for GetFront {
+    type DrainEnd<'drain, 'a, T, S: ListState, M: Mutex>
+        = DrainFront<'drain, 'a, T, S, L, M>
     where
         'drain: 'a,
         T: 'drain;
 
     #[inline]
-    fn get_end<'drain, 'a, T, S: ListState, SP: SyncPrimitives>(
-        drain: Pin<&'a mut Drain<'drain, T, S, SP>>,
-    ) -> Option<Self::DrainEnd<'drain, 'a, T, S, SP>> {
+    fn get_end<'drain, 'a, T, S: ListState, M: Mutex>(
+        drain: Pin<&'a mut Drain<'drain, T, S, L, M>>,
+    ) -> Option<Self::DrainEnd<'drain, 'a, T, S, M>> {
         drain.front()
     }
 }
 
-impl DrainGetEnd for GetBack {
-    type DrainEnd<'drain, 'a, T, S: ListState, SP: SyncPrimitives>
-        = DrainBack<'drain, 'a, T, S, SP>
+impl<L: Linking> DrainGetEnd<L> for GetBack {
+    type DrainEnd<'drain, 'a, T, S: ListState, M: Mutex>
+        = DrainBack<'drain, 'a, T, S, L, M>
     where
         'drain: 'a,
         T: 'drain;
 
     #[inline]
-    fn get_end<'drain, 'a, T, S: ListState, SP: SyncPrimitives>(
-        drain: Pin<&'a mut Drain<'drain, T, S, SP>>,
-    ) -> Option<Self::DrainEnd<'drain, 'a, T, S, SP>> {
+    fn get_end<'drain, 'a, T, S: ListState, M: Mutex>(
+        drain: Pin<&'a mut Drain<'drain, T, S, L, M>>,
+    ) -> Option<Self::DrainEnd<'drain, 'a, T, S, M>> {
         drain.back()
     }
 }

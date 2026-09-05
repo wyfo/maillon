@@ -10,7 +10,7 @@ pub use super::std::StdMutex;
 /// exclusive: a lock can't be acquired while the mutex is already locked.
 ///
 /// Calls to [`unlock`](Self::unlock) must *synchronize-with* calls to [`lock`](Self::lock).
-pub unsafe trait Mutex: Send + Sync {
+pub unsafe trait Mutex: Send + Sync + 'static {
     const INIT: Self;
     #[doc(hidden)]
     fn new() -> Self
@@ -30,7 +30,7 @@ pub unsafe trait Mutex: Send + Sync {
 }
 
 #[cfg(feature = "lock_api")]
-unsafe impl<R: lock_api::RawMutex + Send + Sync> Mutex for lock_api::Mutex<R, ()> {
+unsafe impl<R: lock_api::RawMutex + Send + Sync + 'static> Mutex for lock_api::Mutex<R, ()> {
     #[allow(clippy::declare_interior_mutable_const)]
     const INIT: Self = lock_api::Mutex::new(());
     type Guard<'a>

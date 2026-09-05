@@ -2,6 +2,7 @@
 #[cfg(not(loom))]
 use std::sync::atomic::{AtomicUsize, fence};
 use std::{
+    marker::PhantomData,
     ops::Deref,
     pin::Pin,
     sync::{
@@ -13,9 +14,9 @@ use std::{
 
 use aiq::{
     List, Node, NodeState, as_list,
-    list::{GetBack, GetFront, ListEnd, ListGetEnd, LockedList},
+    list::{Eager, GetBack, GetFront, Linking, ListEnd, ListGetEnd, LockedList},
     node::{NodeData, NodeRef},
-    sync::DefaultSyncPrimitives,
+    sync::mutex::DefaultMutex,
 };
 use arrayvec::ArrayVec;
 #[cfg(loom)]
@@ -32,13 +33,18 @@ enum Notification {
     All,
 }
 
-#[derive(Default)]
-pub struct Notify {
-    list: List<Waiter, usize>,
+pub struct Notify<L: Linking = Eager> {
+    list: List<Waiter, usize, L>,
     generation_backup: AtomicUsize,
 }
 
-impl Notify {
+impl<L: Linking> Default for Notify<L> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<L: Linking> Notify<L> {
     #[cfg_attr(loom, const_fn::const_fn(cfg(false)))]
     #[inline]
     pub const fn new() -> Self {
@@ -49,7 +55,7 @@ impl Notify {
     }
 
     #[inline(always)]
-    fn notify_single<E: ListGetEnd>(&self, notification: Notification) {
+    fn notify_single<E: ListGetEnd<L>>(&self, notification: Notification) {
         self.list.update_state_or_lock_with(
             Relaxed,
             Relaxed,
@@ -58,10 +64,10 @@ impl Notify {
         );
     }
 
-    fn wake_single<'a, E: ListGetEnd>(
+    fn wake_single<'a, E: ListGetEnd<L>>(
         &'a self,
         notification: Notification,
-        mut locked: LockedList<'a, Waiter, usize>,
+        mut locked: LockedList<'a, Waiter, usize, L>,
     ) {
         let mut waiter = E::get_end(&mut locked).unwrap();
         waiter.data_mut().notification = Some(notification);
@@ -83,7 +89,7 @@ impl Notify {
         self.notify_single::<GetBack>(Notification::Last);
     }
 
-    fn wake_waiters<'a>(&'a self, locked: LockedList<'a, Waiter, usize>) {
+    fn wake_waiters<'a>(&'a self, locked: LockedList<'a, Waiter, usize, L>) {
         let mut wakers = ArrayVec::<Waker, 32>::new();
         let next_generation =
             || (self.generation_backup.load(Relaxed)).wrapping_add(GENERATION_INCR);
@@ -155,20 +161,20 @@ impl Notify {
     }
 
     #[inline]
-    pub fn notified(&self) -> Notified<'_> {
+    pub fn notified(&self) -> Notified<'_, L> {
         Notified {
             inner: NotifiedInner {
-                node: Node::with_data(NotifyRef(self), Waiter::new(self.generation())),
+                node: Node::with_data(NotifyRef(self, PhantomData), Waiter::new(self.generation())),
             },
         }
     }
 
     #[inline]
-    pub fn notified_owned(self: Arc<Self>) -> OwnedNotified {
+    pub fn notified_owned(self: Arc<Self>) -> OwnedNotified<L> {
         let generation = self.generation();
         OwnedNotified {
             inner: NotifiedInner {
-                node: Node::with_data(NotifyRef(self), Waiter::new(generation)),
+                node: Node::with_data(NotifyRef(self, PhantomData), Waiter::new(generation)),
             },
         }
     }
@@ -192,19 +198,19 @@ impl Waiter {
     }
 }
 
-struct NotifyRef<N>(N);
-as_list!(NotifyRef<N: Deref<Target=Notify>>, List<Waiter, usize>, &self.0.list);
+struct NotifyRef<N, L: Linking>(N, PhantomData<L>);
+as_list!(NotifyRef<N: Deref<Target=Notify<L>>, L: Linking>, List<Waiter, usize, L>, &self.0.list);
 
-impl<N: Deref<Target = Notify>> NodeData<NotifyRef<N>, usize> for Waiter {
-    fn new_state_if_last_node_on_drop(self: Pin<&mut Self>, list: &NotifyRef<N>) -> usize {
+impl<N: Deref<Target = Notify<L>>, L: Linking> NodeData<NotifyRef<N, L>, usize, L> for Waiter {
+    fn new_state_if_last_node_on_drop(self: Pin<&mut Self>, list: &NotifyRef<N, L>) -> usize {
         list.0.generation_backup.load(Relaxed)
     }
 
     #[inline(always)]
     fn on_drop<'list>(
         self: Pin<&mut Self>,
-        list: &'list NotifyRef<N>,
-        locked: Option<LockedList<'list, Self, usize, DefaultSyncPrimitives>>,
+        list: &'list NotifyRef<N, L>,
+        locked: Option<LockedList<'list, Self, usize, L, DefaultMutex>>,
         state_updated_on_unlink: bool,
     ) {
         if let Some(locked) = locked {
@@ -229,7 +235,7 @@ impl<N: Deref<Target = Notify>> NodeData<NotifyRef<N>, usize> for Waiter {
             }
         } else if !self.completed {
             #[cold]
-            fn renotify(notify: &Notify, notification: Option<Notification>) {
+            fn renotify<L: Linking>(notify: &Notify<L>, notification: Option<Notification>) {
                 match notification {
                     Some(Notification::One) => notify.notify_one(),
                     Some(Notification::Last) => notify.notify_last(),
@@ -242,13 +248,13 @@ impl<N: Deref<Target = Notify>> NodeData<NotifyRef<N>, usize> for Waiter {
 }
 
 pin_project! {
-    struct NotifiedInner<N: Deref<Target = Notify>> {
+    struct NotifiedInner<N: Deref<Target = Notify<L>>, L: Linking> {
         #[pin]
-        node: Node<NotifyRef<N>, Waiter, usize>,
+        node: Node<NotifyRef<N, L>, Waiter, usize, L>,
     }
 }
 
-impl<N: Deref<Target = Notify>> NotifiedInner<N> {
+impl<N: Deref<Target = Notify<L>>, L: Linking> NotifiedInner<N, L> {
     #[inline(always)]
     fn poll_notified(self: Pin<&mut Self>, cx: Option<&mut Context<'_>>) -> Poll<()> {
         match self.project().node.state() {
@@ -263,11 +269,19 @@ impl<N: Deref<Target = Notify>> NotifiedInner<N> {
                 match node.try_update_state_or_push_back_with(
                     AcqRel,  // TODO Acquire for successful notification, Release for generation_backup CAS
                     Acquire, // TODO Acquire for generation
-                    |_, state| (state & STATE_NOTIFIED != 0).then_some(state & !STATE_NOTIFIED),
+                    |waiter, state| {
+                        (state == waiter.generation | STATE_NOTIFIED)
+                            .then_some(state & !STATE_NOTIFIED)
+                    },
                     |mut waiter, _| waiter.completed = true,
                     |mut waiter, state| {
                         let completed = match state {
                             Some(state) => {
+                                // TODO this assertion is just the negation of the condition above
+                                debug_assert!(
+                                    state & STATE_NOTIFIED == 0
+                                        || state & !STATE_NOTIFIED != waiter.generation
+                                );
                                 waiter.generation != state || !notify.store_generation_backup(state)
                             }
                             None => waiter.generation != notify.generation_backup.load(Relaxed),
@@ -305,19 +319,19 @@ impl<N: Deref<Target = Notify>> NotifiedInner<N> {
 }
 
 pin_project! {
-    pub struct Notified<'a> {
+    pub struct Notified<'a, L: Linking = Eager> {
         #[pin]
-        inner: NotifiedInner<&'a Notify>
+        inner: NotifiedInner<&'a Notify<L>, L>
     }
 }
 
-impl Notified<'_> {
+impl<L: Linking> Notified<'_, L> {
     pub fn enable(self: Pin<&mut Self>) -> bool {
         self.project().inner.poll_notified(None).is_ready()
     }
 }
 
-impl Future for Notified<'_> {
+impl<L: Linking> Future for Notified<'_, L> {
     type Output = ();
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -326,19 +340,19 @@ impl Future for Notified<'_> {
 }
 
 pin_project! {
-    pub struct OwnedNotified {
+    pub struct OwnedNotified<L: Linking = Eager> {
         #[pin]
-        inner: NotifiedInner<Arc<Notify>>
+        inner: NotifiedInner<Arc<Notify<L>>, L>
     }
 }
 
-impl OwnedNotified {
+impl<L: Linking> OwnedNotified<L> {
     pub fn enable(self: Pin<&mut Self>) -> bool {
         self.project().inner.poll_notified(None).is_ready()
     }
 }
 
-impl Future for OwnedNotified {
+impl<L: Linking> Future for OwnedNotified<L> {
     type Output = ();
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {

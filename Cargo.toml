@@ -44,6 +44,7 @@ arrayvec = "0.7.6"
 criterion = "0.8.2"
 futures = "0.3.32"
 pin-project-lite = "0.2.16"
+rstest = "0.26.1"
 tokio = { version = "1.49.0", features = ["full"] }
 tokio-test = "0.4.5"
 
@@ -57,8 +58,16 @@ loom = { version = "0.7.2", features = ["futures"] }
 [lib]
 test = false
 
+[[test]]
+name = "wait_list"
+required-features = ["wait-list"]
+
 [[bench]]
 name = "notify"
+harness = false
+
+[[bench]]
+name = "notify_lazy_linked"
 harness = false
 
 [[bench]]
@@ -67,6 +76,10 @@ harness = false
 
 [[bench]]
 name = "semaphore"
+harness = false
+
+[[bench]]
+name = "semaphore_lazy_linked"
 harness = false
 
 [[bench]]

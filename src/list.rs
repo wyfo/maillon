@@ -1,64 +1,59 @@
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
-use core::{hint, marker::PhantomData, mem::ManuallyDrop, ops::Deref, ptr, ptr::NonNull};
+use core::{marker::PhantomData, mem::ManuallyDrop, ops::Deref, ptr, ptr::NonNull};
 
 use crate::{
     loom::{
         AtomicPtrExt,
         sync::atomic::{AtomicPtr, Ordering, Ordering::*, fence},
     },
-    node::{NULL, NodeLink, node_ref},
-    sync::{DefaultSyncPrimitives, SyncPrimitives, mutex::Mutex, parker::Parker},
+    node::{NodeLink, node_ref},
+    sync::mutex::{DefaultMutex, Mutex},
 };
 
 mod drain;
+mod linking;
 pub(crate) mod state;
 
 pub use drain::*;
+pub use linking::*;
 pub use state::*;
 
 use crate::node::NodeRef;
 
-type MutexGuard<'a, SP> = <<SP as SyncPrimitives>::Mutex as Mutex>::Guard<'a>;
+type MutexGuard<'a, M> = <M as Mutex>::Guard<'a>;
 
-const HEAD_MARKER: *mut NodeLink = ptr::without_provenance_mut(1);
+const HEAD_MARKER: usize = 1;
 
-pub struct List<T, S: ListState = (), SP: SyncPrimitives = DefaultSyncPrimitives> {
-    tail: AtomicPtr<Tail<S>>,
-    head: AtomicPtr<NodeLink>,
-    mutex: SP::Mutex,
-    parker: SP::Parker,
+pub struct List<T, S: ListState = (), L: Linking = Eager, M: Mutex = DefaultMutex> {
+    tail: AtomicPtr<Tail<S, L>>,
+    head: L::NextPtr,
+    mutex: M,
+    parker: L::Parker,
     _node_data: PhantomData<T>,
 }
 
-unsafe impl<T: Send, S: ListState + Send, SP: SyncPrimitives> Send for List<T, S, SP>
-where
-    SP::Mutex: Send,
-    SP::Parker: Send,
-{
-}
-unsafe impl<T: Send, S: ListState + Send, SP: SyncPrimitives> Sync for List<T, S, SP>
-where
-    SP::Mutex: Sync,
-    SP::Parker: Sync,
-{
-}
+unsafe impl<T: Send, S: ListState, L: Linking, M: Mutex> Send for List<T, S, L, M> {}
+unsafe impl<T: Send, S: ListState, L: Linking, M: Mutex> Sync for List<T, S, L, M> {}
 
-impl<T, S: ListState, SP: SyncPrimitives> List<T, S, SP> {
+impl<T, S: ListState, L: Linking, M: Mutex> List<T, S, L, M> {
     #[cfg_attr(loom, const_fn::const_fn(cfg(false)))]
-    const fn new_impl(tail: *mut Tail<S>) -> Self {
+    const fn new_impl(tail: *mut Tail<S, L>) -> Self {
         Self {
             tail: AtomicPtr::new(tail),
-            head: AtomicPtr::new(NULL),
             #[cfg(not(loom))]
-            mutex: SP::Mutex::INIT,
+            head: L::NEW_NEXT,
             #[cfg(loom)]
-            mutex: SP::Mutex::new(),
+            head: L::new_next(None),
             #[cfg(not(loom))]
-            parker: SP::Parker::INIT,
+            mutex: M::INIT,
             #[cfg(loom)]
-            parker: SP::Parker::new(),
+            mutex: M::new(),
+            #[cfg(not(loom))]
+            parker: L::NEW_PARKER,
+            #[cfg(loom)]
+            parker: L::new_parker(),
             _node_data: PhantomData,
         }
     }
@@ -70,7 +65,7 @@ impl<T, S: ListState, SP: SyncPrimitives> List<T, S, SP> {
     }
 
     #[inline(always)]
-    fn tail(&self) -> Option<NonNull<NodeLink>> {
+    fn tail(&self) -> Option<NonNull<NodeLink<L>>> {
         self.tail.load(Acquire).ptr()
     }
 
@@ -85,7 +80,7 @@ impl<T, S: ListState, SP: SyncPrimitives> List<T, S, SP> {
     }
 
     #[inline]
-    pub fn lock(&self) -> LockedList<'_, T, S, SP> {
+    pub fn lock(&self) -> LockedList<'_, T, S, L, M> {
         LockedList {
             queue: self,
             guard: ManuallyDrop::new(self.mutex.lock()),
@@ -95,28 +90,30 @@ impl<T, S: ListState, SP: SyncPrimitives> List<T, S, SP> {
 
     pub(crate) unsafe fn push_back(
         &self,
-        mut node: NonNull<NodeLink>,
+        mut node: NonNull<NodeLink<L>>,
         set_order: Ordering,
         fetch_order: Ordering,
-        mut f: impl FnMut(S) -> Option<S>,
-        mut on_push_back: impl FnMut(Option<S>) -> bool,
+        mut f: Option<impl FnMut(S) -> Option<S>>,
+        mut on_push: impl FnMut(Option<S>) -> bool,
         on_pushed: impl FnOnce(),
     ) -> Result<S, bool> {
-        let set_order = match set_order {
-            Relaxed | Acquire | Release | AcqRel => AcqRel,
-            _ => SeqCst, // `Ordering` is `#[non_exhaustive]`
-        };
+        let set_order = L::push_back_set_order(set_order);
         let mut tail = self.tail.load(fetch_order);
         let prev = loop {
             let (new_tail, prev) = match S::tail_to_enum(tail) {
-                StateOrPtr::State(state) if let Some(new_state) = f(state) => {
-                    (new_state.into_tail(), NULL)
+                StateOrPtr::State(state)
+                    if let Some(f) = f.as_mut()
+                        && let Some(new_state) = f(state) =>
+                {
+                    (new_state.into_tail(), ptr::null_mut())
                 }
-                state_or_ptr if !on_push_back(state_or_ptr.state()) => {
-                    unsafe { node.as_mut().prev.store_mut(NULL) };
+                state_or_ptr if !on_push(state_or_ptr.state()) => {
+                    unsafe { node.as_mut().prev.store_mut(ptr::null_mut()) };
                     return Err(false);
                 }
-                StateOrPtr::State(_) => (node.into_tail(), HEAD_MARKER),
+                StateOrPtr::State(_) => {
+                    (node.into_tail(), ptr::without_provenance_mut(HEAD_MARKER))
+                }
                 StateOrPtr::Ptr(prev) => (node.into_tail(), prev.as_ptr()),
             };
             unsafe { node.as_mut().prev.store_mut(prev) };
@@ -125,28 +122,19 @@ impl<T, S: ListState, SP: SyncPrimitives> List<T, S, SP> {
                 Err(t) => tail = t,
             }
         };
-        let prev_next = NonNull::from(match prev {
-            NULL => return Ok(unsafe { tail.state().unwrap_unchecked() }),
-            HEAD_MARKER => &self.head,
-            _ => unsafe { &(*prev).next },
-        });
+        let prev_next = match prev.addr() {
+            0 if f.is_some() => return Ok(unsafe { tail.state().unwrap_unchecked() }),
+            HEAD_MARKER => NonNull::from(&self.head),
+            _ => unsafe { NonNull::new_unchecked((&raw const (*prev).next).cast_mut()) },
+        };
+        // TODO must be called before unpark in case unpark panics
         on_pushed();
-        if SP::Parker::NEVER_BLOCKS {
-            unsafe { prev_next.as_ref() }.store(node.as_ptr(), Release);
-        } else if unsafe { !(prev_next.as_ref().swap(node.as_ptr(), Release)).is_null() } {
-            self.unpark();
-        }
+        L::store_next(prev_next, node, &self.parker);
         Err(true)
-    }
-
-    #[cold]
-    #[inline(never)]
-    fn unpark(&self) {
-        self.parker.unpark();
     }
 }
 
-impl<T, SP: SyncPrimitives> List<T, usize, SP> {
+impl<T, L: Linking, M: Mutex> List<T, usize, L, M> {
     #[cfg_attr(loom, const_fn::const_fn(cfg(false)))]
     #[inline]
     pub const fn with_state(state: usize) -> Self {
@@ -209,7 +197,7 @@ impl<T, SP: SyncPrimitives> List<T, usize, SP> {
         set_order: Ordering,
         fetch_order: Ordering,
         mut f: F,
-    ) -> Result<usize, LockedList<'_, T, usize, SP>> {
+    ) -> Result<usize, LockedList<'_, T, usize, L, M>> {
         if let Ok(s) = self.try_update_state(set_order, fetch_order, |s| Some(f(s))) {
             return Ok(s);
         }
@@ -222,13 +210,13 @@ impl<T, SP: SyncPrimitives> List<T, usize, SP> {
     pub fn update_state_or_lock_with<
         'a,
         F: FnMut(usize) -> usize,
-        L: FnOnce(LockedList<'a, T, usize, SP>),
+        G: FnOnce(LockedList<'a, T, usize, L, M>),
     >(
         &'a self,
         set_order: Ordering,
         fetch_order: Ordering,
         mut f: F,
-        locked_fallback: L,
+        locked_fallback: G,
     ) {
         if (self.try_update_state(set_order, fetch_order, |s| Some(f(s)))).is_err() {
             self.update_state_or_lock_with_cold(set_order, fetch_order, f, locked_fallback);
@@ -240,13 +228,13 @@ impl<T, SP: SyncPrimitives> List<T, usize, SP> {
     fn update_state_or_lock_with_cold<
         'a,
         F: FnMut(usize) -> usize,
-        L: FnOnce(LockedList<'a, T, usize, SP>),
+        G: FnOnce(LockedList<'a, T, usize, L, M>),
     >(
         &'a self,
         set_order: Ordering,
         fetch_order: Ordering,
         mut f: F,
-        locked_fallback: L,
+        locked_fallback: G,
     ) {
         let locked = self.lock();
         if (self.try_update_state(set_order, fetch_order, |s| Some(f(s)))).is_err() {
@@ -255,99 +243,91 @@ impl<T, SP: SyncPrimitives> List<T, usize, SP> {
     }
 }
 
-impl<T, S: ListState, SP: SyncPrimitives> Default for List<T, S, SP> {
+impl<T, S: ListState, L: Linking, M: Mutex> Default for List<T, S, L, M> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-pub struct LockedList<'a, T, S: ListState = (), SP: SyncPrimitives = DefaultSyncPrimitives> {
-    queue: &'a List<T, S, SP>,
-    guard: ManuallyDrop<MutexGuard<'a, SP>>,
+pub struct LockedList<'a, T, S: ListState = (), L: Linking = Eager, M: Mutex = DefaultMutex> {
+    queue: &'a List<T, S, L, M>,
+    guard: ManuallyDrop<MutexGuard<'a, M>>,
     _not_send: PhantomData<*mut ()>,
 }
 
-unsafe impl<'a, T, S: ListState, SP: SyncPrimitives> Sync for LockedList<'a, T, S, SP> {}
+unsafe impl<'a, T: Send, S: ListState, L: Linking, M: Mutex> Sync for LockedList<'a, T, S, L, M> {}
 
-impl<'a, T, S: ListState, SP: SyncPrimitives> LockedList<'a, T, S, SP> {
+impl<'a, T, S: ListState, L: Linking, M: Mutex> LockedList<'a, T, S, L, M> {
+    /// [`Linking::get_next`] with the list's head slot and parker filled in.
     #[inline(always)]
-    fn get_next(&self, next: &AtomicPtr<NodeLink>) -> NonNull<NodeLink> {
-        if let Some(next) = NonNull::new(next.load(Acquire)) {
-            return next;
-        }
-        self.wait_for_next(next)
-    }
-
-    #[cold]
-    #[inline(never)]
-    fn wait_for_next(&self, next: &AtomicPtr<NodeLink>) -> NonNull<NodeLink> {
-        if SP::Parker::NEVER_BLOCKS {
-            return unsafe { self.parker.park_until(|| NonNull::new(next.load(Acquire))) };
-        }
-        for _ in 0..SP::SPIN_BEFORE_PARK {
-            hint::spin_loop();
-            if let Some(next) = NonNull::new(next.load(Acquire)) {
-                return next;
-            }
-        }
-        const PARKED: *mut NodeLink = ptr::without_provenance_mut(1);
-        if let Err(next) = next.compare_exchange(ptr::null_mut(), PARKED, Relaxed, Acquire) {
-            return unsafe { NonNull::new_unchecked(next) };
-        }
-        let load_next = || {
-            let next = next.load(Acquire);
-            (next != PARKED).then(|| unsafe { NonNull::new_unchecked(next) })
-        };
-        unsafe { self.parker.park_until(load_next) }
+    fn get_next(
+        &self,
+        node: Option<NonNull<NodeLink<L>>>,
+        next: &L::NextPtr,
+        tail: NonNull<NodeLink<L>>,
+    ) -> NonNull<NodeLink<L>> {
+        L::get_next(node, next, tail, &self.head, &self.parker)
     }
 
     #[inline]
-    pub fn front(&mut self) -> Option<ListFront<'a, '_, T, S, SP>> {
-        self.tail()?;
-        let node = self.get_next(&self.queue.head);
+    pub fn front(&mut self) -> Option<ListFront<'a, '_, T, S, L, M>>
+    where
+        L: Linking,
+    {
+        let node = self.get_next(None, &self.queue.head, self.tail()?);
         Some(ListFront { node, locked: self })
     }
 
     #[inline]
-    pub fn back(&mut self) -> Option<ListBack<'a, '_, T, S, SP>> {
+    pub fn back(&mut self) -> Option<ListBack<'a, '_, T, S, L, M>> {
         let node = self.tail()?;
         Some(ListBack { node, locked: self })
     }
 
-    pub fn unlock(self) -> &'a List<T, S, SP> {
+    pub fn unlock(self) -> &'a List<T, S, L, M> {
         self.queue
     }
 
+    #[allow(clippy::type_complexity)]
     #[inline(always)]
     pub(crate) unsafe fn remove<F: FnOnce() -> S>(
         &mut self,
-        node: NonNull<NodeLink>,
+        node: NonNull<NodeLink<L>>,
         new_state_if_last_node: F,
         is_front: bool,
         is_back: bool,
-    ) -> (Option<NonNull<NodeLink>>, Option<NonNull<NodeLink>>) {
+    ) -> (Option<NonNull<NodeLink<L>>>, Option<NonNull<NodeLink<L>>>) {
         debug_assert!(!(is_front && is_back));
+        // TODO for self-removal with LazyDoubly/Singly, the tail may not have been acquired
+        // (it was written with at least Release in push_back, but a fence(Acquire) would not
+        // work as the task may have moved in another thread)
+        if L::PREV_OR_GET_NEXT_REQUIRES_TAIL_ACQUIRE && !is_front && !is_back {
+            self.tail();
+        }
         let node = unsafe { node.as_ref() };
         let prev = if is_front {
-            NonNull::new(HEAD_MARKER).unwrap()
+            NonNull::new(ptr::without_provenance_mut(HEAD_MARKER)).unwrap()
         } else {
             // TODO safety the node is linked
             unsafe { NonNull::new_unchecked(node.prev.load(Relaxed)) }
         };
-        let is_head = prev.as_ptr() == HEAD_MARKER;
+        let is_head = prev.addr().get() == HEAD_MARKER;
         let prev_next = if is_head {
             &self.head
         } else {
             unsafe { &prev.as_ref().next }
         };
         if is_back {
-            let prev_next = self.get_next(prev_next);
-            debug_assert_eq!(prev_next, node.into());
+            L::wait_next(prev_next, &self.parker);
         }
-        let mut next = if is_back { None } else { node.next() };
+        let mut next = if is_back {
+            None
+        } else {
+            L::load_next(&node.next)
+        };
         let mut tail = None;
         if next.is_none() {
-            prev_next.store(ptr::null_mut(), Relaxed);
+            L::update_next(prev_next, None);
             let new_tail = if is_head {
                 new_state_if_last_node().into_tail()
             } else {
@@ -355,79 +335,83 @@ impl<'a, T, S: ListState, SP: SyncPrimitives> LockedList<'a, T, S, SP> {
             };
             let node_ptr = NonNull::from(node).into_tail();
             if let Err(t) = (self.tail).compare_exchange(node_ptr, new_tail, Release, Relaxed) {
-                if is_back {
+                if is_back || L::PREV_OR_GET_NEXT_REQUIRES_TAIL_ACQUIRE {
                     fence(Acquire);
                 }
                 tail = Some(unsafe { t.ptr().unwrap_unchecked() });
-                next = Some(self.get_next(&node.next));
+                next = Some(self.get_next(Some(node.into()), &node.next, tail.unwrap()));
             } else if !is_head {
                 tail = Some(prev);
             }
         }
         if let Some(next) = next {
             unsafe { next.as_ref().prev.store(prev.as_ptr(), Relaxed) };
-            prev_next.store(next.as_ptr(), Relaxed);
+            L::update_next(prev_next, Some(next));
         }
-        node.prev.store(NULL, Release);
+        L::update_next(&node.next, None);
+        node.prev.store(ptr::null_mut(), Release);
         (next, tail)
     }
 }
 
-impl<'a, T, SP: SyncPrimitives> LockedList<'a, T, (), SP> {
+impl<'a, T, L: Linking, M: Mutex> LockedList<'a, T, (), L, M> {
     #[inline]
-    pub fn drain(self) -> Drain<'a, T, (), SP> {
+    pub fn drain(self) -> Drain<'a, T, (), L, M> {
         Drain::new(self, || ())
     }
 }
 
-impl<'a, T, SP: SyncPrimitives> LockedList<'a, T, usize, SP> {
-    pub fn drain<F: FnOnce() -> usize>(self, new_state_if_not_empty: F) -> Drain<'a, T, usize, SP> {
+impl<'a, T, L: Linking, M: Mutex> LockedList<'a, T, usize, L, M> {
+    pub fn drain<F: FnOnce() -> usize>(
+        self,
+        new_state_if_not_empty: F,
+    ) -> Drain<'a, T, usize, L, M> {
         Drain::new(self, new_state_if_not_empty)
     }
 }
 
-impl<T, S: ListState, SP: SyncPrimitives> Drop for LockedList<'_, T, S, SP> {
+impl<T, S: ListState, L: Linking, M: Mutex> Drop for LockedList<'_, T, S, L, M> {
     #[inline]
     fn drop(&mut self) {
         unsafe { self.queue.mutex.unlock(ManuallyDrop::take(&mut self.guard)) };
     }
 }
 
-impl<T, S: ListState, SP: SyncPrimitives> Deref for LockedList<'_, T, S, SP> {
-    type Target = List<T, S, SP>;
+impl<T, S: ListState, L: Linking, M: Mutex> Deref for LockedList<'_, T, S, L, M> {
+    type Target = List<T, S, L, M>;
 
     fn deref(&self) -> &Self::Target {
         self.queue
     }
 }
 
-pub trait ListEnd<'locked, 'a, T, S: ListState = (), SP: SyncPrimitives = DefaultSyncPrimitives>:
+pub trait ListEnd<'locked, 'a, T, S: ListState = (), L: Linking = Eager, M: Mutex = DefaultMutex>:
     NodeRef<T> + Sized
 {
     fn unlink<F: FnOnce() -> S>(self, new_state_if_last_node: F) -> Option<Self>;
 }
 
-pub struct ListFront<'locked, 'a, T, S: ListState = (), SP: SyncPrimitives = DefaultSyncPrimitives>
+pub struct ListFront<'locked, 'a, T, S: ListState = (), L: Linking = Eager, M: Mutex = DefaultMutex>
 {
-    node: NonNull<NodeLink>,
-    locked: &'a mut LockedList<'locked, T, S, SP>,
+    node: NonNull<NodeLink<L>>,
+    locked: &'a mut LockedList<'locked, T, S, L, M>,
 }
 
-unsafe impl<'locked, T: Send, S: ListState, SP: SyncPrimitives> Send
-    for ListFront<'locked, '_, T, S, SP>
+unsafe impl<'locked, T: Send, S: ListState, L: Linking, M: Mutex> Send
+    for ListFront<'locked, '_, T, S, L, M>
 where
-    LockedList<'locked, T, S, SP>: Send,
+    LockedList<'locked, T, S, L, M>: Send,
 {
 }
-unsafe impl<'locked, T: Sync, S: ListState, SP: SyncPrimitives> Sync
-    for ListFront<'locked, '_, T, S, SP>
+unsafe impl<'locked, T: Sync, S: ListState, L: Linking, M: Mutex> Sync
+    for ListFront<'locked, '_, T, S, L, M>
 where
-    LockedList<'locked, T, S, SP>: Sync,
+    LockedList<'locked, T, S, L, M>: Sync,
 {
 }
 
-impl<'locked, 'a, T, S: ListState, SP: SyncPrimitives> ListEnd<'locked, 'a, T, S, SP>
-    for ListFront<'locked, 'a, T, S, SP>
+impl<'locked, 'a, T, S: ListState, L: Linking, M: Mutex> ListEnd<'locked, 'a, T, S, L, M>
+    for ListFront<'locked, 'a, T, S, L, M>
 {
     #[inline]
     fn unlink<F: FnOnce() -> S>(self, new_state_if_last_node: F) -> Option<Self> {
@@ -440,44 +424,46 @@ impl<'locked, 'a, T, S: ListState, SP: SyncPrimitives> ListEnd<'locked, 'a, T, S
     }
 }
 
-impl<T, SP: SyncPrimitives> ListFront<'_, '_, T, (), SP> {
+impl<T, L: Linking, M: Mutex> ListFront<'_, '_, T, (), L, M> {
     pub fn unlink(self) -> Option<Self> {
         ListEnd::unlink(self, || ())
     }
 }
 
-impl<T, SP: SyncPrimitives> ListFront<'_, '_, T, usize, SP> {
+impl<T, L: Linking, M: Mutex> ListFront<'_, '_, T, usize, L, M> {
     pub fn unlink<F: FnOnce() -> usize>(self, new_state_if_last_node: F) -> Option<Self> {
         ListEnd::unlink(self, new_state_if_last_node)
     }
 }
 
 node_ref!(
-    ListFront<'locked, 'a, T, S: ListState, SP: SyncPrimitives>,
+    ListFront<'locked, 'a, T, S: ListState, L: Linking, M: Mutex>,
     T,
+    L,
     self.node
 );
 
-pub struct ListBack<'locked, 'a, T, S: ListState = (), SP: SyncPrimitives = DefaultSyncPrimitives> {
-    node: NonNull<NodeLink>,
-    locked: &'a mut LockedList<'locked, T, S, SP>,
+pub struct ListBack<'locked, 'a, T, S: ListState = (), L: Linking = Eager, M: Mutex = DefaultMutex>
+{
+    node: NonNull<NodeLink<L>>,
+    locked: &'a mut LockedList<'locked, T, S, L, M>,
 }
 
-unsafe impl<'locked, T: Send, S: ListState, SP: SyncPrimitives> Send
-    for ListBack<'locked, '_, T, S, SP>
+unsafe impl<'locked, T: Send, S: ListState, L: Linking, M: Mutex> Send
+    for ListBack<'locked, '_, T, S, L, M>
 where
-    LockedList<'locked, T, S, SP>: Send,
+    LockedList<'locked, T, S, L, M>: Send,
 {
 }
-unsafe impl<'locked, T: Sync, S: ListState, SP: SyncPrimitives> Sync
-    for ListBack<'locked, '_, T, S, SP>
+unsafe impl<'locked, T: Sync, S: ListState, L: Linking, M: Mutex> Sync
+    for ListBack<'locked, '_, T, S, L, M>
 where
-    LockedList<'locked, T, S, SP>: Sync,
+    LockedList<'locked, T, S, L, M>: Sync,
 {
 }
 
-impl<'locked, 'a, T, S: ListState, SP: SyncPrimitives> ListEnd<'locked, 'a, T, S, SP>
-    for ListBack<'locked, 'a, T, S, SP>
+impl<'locked, 'a, T, S: ListState, L: Linking, M: Mutex> ListEnd<'locked, 'a, T, S, L, M>
+    for ListBack<'locked, 'a, T, S, L, M>
 {
     #[inline]
     fn unlink<F: FnOnce() -> S>(self, new_state_if_last_node: F) -> Option<Self> {
@@ -490,64 +476,65 @@ impl<'locked, 'a, T, S: ListState, SP: SyncPrimitives> ListEnd<'locked, 'a, T, S
     }
 }
 
-impl<T, SP: SyncPrimitives> ListBack<'_, '_, T, (), SP> {
+impl<T, L: Linking, M: Mutex> ListBack<'_, '_, T, (), L, M> {
     pub fn unlink(self) -> Option<Self> {
         ListEnd::unlink(self, || ())
     }
 }
 
-impl<T, SP: SyncPrimitives> ListBack<'_, '_, T, usize, SP> {
+impl<T, L: Linking, M: Mutex> ListBack<'_, '_, T, usize, L, M> {
     pub fn unlink<F: FnOnce() -> usize>(self, new_state_if_last_node: F) -> Option<Self> {
         ListEnd::unlink(self, new_state_if_last_node)
     }
 }
 
 node_ref!(
-    ListBack<'locked, 'a, T, S: ListState, SP: SyncPrimitives>,
+    ListBack<'locked, 'a, T, S: ListState, L: Linking, M: Mutex>,
     T,
+    L,
     self.node
 );
 
 pub struct GetFront;
 pub struct GetBack;
 
-pub trait ListGetEnd {
-    type ListEnd<'locked, 'a, T, S: ListState, SP: SyncPrimitives>: ListEnd<'locked, 'a, T, S, SP>
+pub trait ListGetEnd<L: Linking> {
+    type ListEnd<'locked, 'a, T, S: ListState, M: Mutex>: ListEnd<'locked, 'a, T, S, L, M>
     where
         'locked: 'a,
         T: 'locked;
 
-    fn get_end<'locked, 'a, T, S: ListState, SP: SyncPrimitives>(
-        locked: &'a mut LockedList<'locked, T, S, SP>,
-    ) -> Option<Self::ListEnd<'locked, 'a, T, S, SP>>;
+    fn get_end<'locked, 'a, T, S: ListState, M: Mutex>(
+        locked: &'a mut LockedList<'locked, T, S, L, M>,
+    ) -> Option<Self::ListEnd<'locked, 'a, T, S, M>>;
 }
 
-impl ListGetEnd for GetFront {
-    type ListEnd<'locked, 'a, T, S: ListState, SP: SyncPrimitives>
-        = ListFront<'locked, 'a, T, S, SP>
+impl<L: Linking> ListGetEnd<L> for GetFront {
+    type ListEnd<'locked, 'a, T, S: ListState, M: Mutex>
+        = ListFront<'locked, 'a, T, S, L, M>
     where
         'locked: 'a,
         T: 'locked;
 
     #[inline]
-    fn get_end<'locked, 'a, T, S: ListState, SP: SyncPrimitives>(
-        locked: &'a mut LockedList<'locked, T, S, SP>,
-    ) -> Option<Self::ListEnd<'locked, 'a, T, S, SP>> {
+    fn get_end<'locked, 'a, T, S: ListState, M: Mutex>(
+        locked: &'a mut LockedList<'locked, T, S, L, M>,
+    ) -> Option<Self::ListEnd<'locked, 'a, T, S, M>> {
         locked.front()
     }
 }
 
-impl ListGetEnd for GetBack {
-    type ListEnd<'locked, 'a, T, S: ListState, SP: SyncPrimitives>
-        = ListBack<'locked, 'a, T, S, SP>
+impl<L: Linking> ListGetEnd<L> for GetBack {
+    type ListEnd<'locked, 'a, T, S: ListState, M: Mutex>
+        = ListBack<'locked, 'a, T, S, L, M>
     where
         'locked: 'a,
         T: 'locked;
 
     #[inline]
-    fn get_end<'locked, 'a, T, S: ListState, SP: SyncPrimitives>(
-        locked: &'a mut LockedList<'locked, T, S, SP>,
-    ) -> Option<Self::ListEnd<'locked, 'a, T, S, SP>> {
+    fn get_end<'locked, 'a, T, S: ListState, M: Mutex>(
+        locked: &'a mut LockedList<'locked, T, S, L, M>,
+    ) -> Option<Self::ListEnd<'locked, 'a, T, S, M>> {
         locked.back()
     }
 }

@@ -3,13 +3,18 @@
 #[path = "../examples/semaphore.rs"]
 mod semaphore;
 
+mod linking;
+
 use std::sync::Arc;
 
+use aiq::list::Linking;
+use linking::{EAGER, LAZY, LinkingMode};
+use rstest::rstest;
 use semaphore::Semaphore;
 
-#[test]
-fn try_acquire() {
-    let sem = Arc::new(Semaphore::new(1));
+#[rstest]
+fn try_acquire<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+    let sem = Arc::new(Semaphore::<L>::new(1));
     {
         let p1 = sem.clone().try_acquire_owned();
         assert!(p1.is_ok());
@@ -20,9 +25,9 @@ fn try_acquire() {
     assert!(p3.is_ok());
 }
 
-#[test]
-fn try_acquire_many() {
-    let sem = Arc::new(Semaphore::new(42));
+#[rstest]
+fn try_acquire_many<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+    let sem = Arc::new(Semaphore::<L>::new(42));
     {
         let p1 = sem.clone().try_acquire_many_owned(42);
         assert!(p1.is_ok());
@@ -36,9 +41,10 @@ fn try_acquire_many() {
     assert!(sem.try_acquire_owned().is_err());
 }
 
+#[rstest]
 #[tokio::test]
-async fn acquire() {
-    let sem = Arc::new(Semaphore::new(1));
+async fn acquire<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+    let sem = Arc::new(Semaphore::<L>::new(1));
     let p1 = sem.clone().try_acquire_owned().unwrap();
     let sem_clone = sem.clone();
     let j = tokio::spawn(async move {
@@ -48,9 +54,10 @@ async fn acquire() {
     j.await.unwrap();
 }
 
+#[rstest]
 #[tokio::test]
-async fn acquire_many() {
-    let semaphore = Arc::new(Semaphore::new(42));
+async fn acquire_many<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+    let semaphore = Arc::new(Semaphore::<L>::new(42));
     let permit32 = semaphore.clone().try_acquire_many_owned(32).unwrap();
     let (sender, receiver) = tokio::sync::oneshot::channel();
     let join_handle = tokio::spawn(async move {
@@ -63,9 +70,10 @@ async fn acquire_many() {
     join_handle.await.unwrap();
 }
 
+#[rstest]
 #[tokio::test]
-async fn add_permits() {
-    let sem = Arc::new(Semaphore::new(0));
+async fn add_permits<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+    let sem = Arc::new(Semaphore::<L>::new(0));
     let sem_clone = sem.clone();
     let j = tokio::spawn(async move {
         let _p2 = sem_clone.acquire_owned().await;
@@ -74,9 +82,9 @@ async fn add_permits() {
     j.await.unwrap();
 }
 
-#[test]
-fn forget() {
-    let sem = Arc::new(Semaphore::new(1));
+#[rstest]
+fn forget<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+    let sem = Arc::new(Semaphore::<L>::new(1));
     {
         let p = sem.clone().try_acquire_owned().unwrap();
         assert_eq!(sem.available_permits(), 0);
@@ -87,9 +95,9 @@ fn forget() {
     assert!(sem.try_acquire_owned().is_err());
 }
 
-#[test]
-fn merge() {
-    let sem = Arc::new(Semaphore::new(3));
+#[rstest]
+fn merge<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+    let sem = Arc::new(Semaphore::<L>::new(3));
     {
         let mut p1 = sem.clone().try_acquire_owned().unwrap();
         assert_eq!(sem.available_permits(), 2);
@@ -101,20 +109,20 @@ fn merge() {
     assert_eq!(sem.available_permits(), 3);
 }
 
-#[test]
+#[rstest]
 #[cfg(not(target_family = "wasm"))] // No stack unwinding on wasm targets
 #[should_panic]
-fn merge_unrelated_permits() {
-    let sem1 = Arc::new(Semaphore::new(3));
-    let sem2 = Arc::new(Semaphore::new(3));
+fn merge_unrelated_permits<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+    let sem1 = Arc::new(Semaphore::<L>::new(3));
+    let sem2 = Arc::new(Semaphore::<L>::new(3));
     let mut p1 = sem1.try_acquire_owned().unwrap();
     let p2 = sem2.try_acquire_owned().unwrap();
     p1.merge(p2);
 }
 
-#[test]
-fn split() {
-    let sem = Arc::new(Semaphore::new(5));
+#[rstest]
+fn split<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+    let sem = Arc::new(Semaphore::<L>::new(5));
     let mut p1 = sem.clone().try_acquire_many_owned(3).unwrap();
     assert_eq!(sem.available_permits(), 2);
     assert_eq!(p1.num_permits(), 3);
@@ -138,9 +146,10 @@ fn split() {
     assert_eq!(sem.available_permits(), 5);
 }
 
+#[rstest]
 #[tokio::test]
-async fn stress_test() {
-    let sem = Arc::new(Semaphore::new(5));
+async fn stress_test<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+    let sem = Arc::new(Semaphore::<L>::new(5));
     let mut join_handles = Vec::new();
     for _ in 0..1000 {
         let sem_clone = sem.clone();

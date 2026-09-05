@@ -2,17 +2,22 @@
 #[path = "../examples/notify.rs"]
 mod notify;
 
+mod linking;
+
 use std::{sync::Arc, thread};
 
+use aiq::list::Linking;
 use futures::executor::block_on;
+use linking::{EAGER, LAZY, LinkingMode};
 use notify::Notify;
+use rstest::rstest;
 use tokio_test::{assert_pending, assert_ready};
 
 const WAKE_LIST_SIZE: usize = 32;
 
-#[test]
-fn notify_one() {
-    let tx = Arc::new(Notify::new());
+#[rstest]
+fn notify_one<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+    let tx = Arc::new(Notify::<L>::new());
     let rx = tx.clone();
 
     let th = thread::spawn(move || {
@@ -25,9 +30,9 @@ fn notify_one() {
     th.join().unwrap();
 }
 
-#[test]
-fn notify_waiters() {
-    let notify = Arc::new(Notify::new());
+#[rstest]
+fn notify_waiters<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+    let notify = Arc::new(Notify::<L>::new());
     let tx = notify.clone();
     let notified1 = notify.notified();
     let notified2 = notify.notified();
@@ -44,9 +49,9 @@ fn notify_waiters() {
     th.join().unwrap();
 }
 
-#[test]
-fn notify_waiters_and_one() {
-    let notify = Arc::new(Notify::new());
+#[rstest]
+fn notify_waiters_and_one<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+    let notify = Arc::new(Notify::<L>::new());
     let tx1 = notify.clone();
     let tx2 = notify.clone();
 
@@ -71,9 +76,9 @@ fn notify_waiters_and_one() {
     th3.join().unwrap();
 }
 
-#[test]
-fn notify_multi() {
-    let notify = Arc::new(Notify::new());
+#[rstest]
+fn notify_multi<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+    let notify = Arc::new(Notify::<L>::new());
 
     let mut threads = vec![];
 
@@ -99,14 +104,14 @@ fn notify_multi() {
     });
 }
 
-#[test]
-fn notify_drop() {
+#[rstest]
+fn notify_drop<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
     use std::{
         future::{Future, poll_fn},
         task::Poll,
     };
 
-    let notify = Arc::new(Notify::new());
+    let notify = Arc::new(Notify::<L>::new());
     let rx1 = notify.clone();
     let rx2 = notify.clone();
 
@@ -139,10 +144,10 @@ fn notify_drop() {
 /// Polls two `Notified` futures and checks if poll results are consistent
 /// with each other. If the first future is notified by a `notify_waiters`
 /// call, then the second one must be notified as well.
-#[test]
-fn notify_waiters_poll_consistency() {
-    fn notify_waiters_poll_consistency_variant(poll_setting: [bool; 2]) {
-        let notify = Arc::new(Notify::new());
+#[rstest]
+fn notify_waiters_poll_consistency<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+    fn notify_waiters_poll_consistency_variant<L: Linking>(poll_setting: [bool; 2]) {
+        let notify = Arc::new(Notify::<L>::new());
         let mut notified = [
             tokio_test::task::spawn(notify.notified()),
             tokio_test::task::spawn(notify.notified()),
@@ -169,10 +174,10 @@ fn notify_waiters_poll_consistency() {
 
     // We test different scenarios in which pending futures had or had not
     // been polled before the call to `notify_waiters`.
-    notify_waiters_poll_consistency_variant([false, false]);
-    notify_waiters_poll_consistency_variant([true, false]);
-    notify_waiters_poll_consistency_variant([false, true]);
-    notify_waiters_poll_consistency_variant([true, true]);
+    notify_waiters_poll_consistency_variant::<L>([false, false]);
+    notify_waiters_poll_consistency_variant::<L>([true, false]);
+    notify_waiters_poll_consistency_variant::<L>([false, true]);
+    notify_waiters_poll_consistency_variant::<L>([true, true]);
 }
 
 /// Polls two `Notified` futures and checks if poll results are consistent
@@ -181,10 +186,12 @@ fn notify_waiters_poll_consistency() {
 ///
 /// Here we also add other `Notified` futures in between to force the two
 /// tested futures to end up in different chunks.
-#[test]
-fn notify_waiters_poll_consistency_many() {
-    fn notify_waiters_poll_consistency_many_variant(order: [usize; 2]) {
-        let notify = Arc::new(Notify::new());
+#[rstest]
+fn notify_waiters_poll_consistency_many<L: Linking>(
+    #[values(EAGER, LAZY)] _linking: LinkingMode<L>,
+) {
+    fn notify_waiters_poll_consistency_many_variant<L: Linking>(order: [usize; 2]) {
+        let notify = Arc::new(Notify::<L>::new());
 
         let mut futs = (0..WAKE_LIST_SIZE + 1)
             .map(|_| tokio_test::task::spawn(notify.notified()))
@@ -211,16 +218,16 @@ fn notify_waiters_poll_consistency_many() {
     }
 
     // We test different scenarios in which futures are polled in different order.
-    notify_waiters_poll_consistency_many_variant([0, 1]);
-    notify_waiters_poll_consistency_many_variant([1, 0]);
+    notify_waiters_poll_consistency_many_variant::<L>([0, 1]);
+    notify_waiters_poll_consistency_many_variant::<L>([1, 0]);
 }
 
 /// Checks if a call to `notify_waiters` is observed as atomic when combined
 /// with a concurrent call to `notify_one`.
-#[test]
-fn notify_waiters_is_atomic() {
-    fn notify_waiters_is_atomic_variant(tested_fut_index: usize) {
-        let notify = Arc::new(Notify::new());
+#[rstest]
+fn notify_waiters_is_atomic<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+    fn notify_waiters_is_atomic_variant<L: Linking>(tested_fut_index: usize) {
+        let notify = Arc::new(Notify::<L>::new());
 
         let mut futs = (0..WAKE_LIST_SIZE + 1)
             .map(|_| tokio_test::task::spawn(notify.notified()))
@@ -256,8 +263,8 @@ fn notify_waiters_is_atomic() {
 
     // We test different scenarios in which the tested future is at the beginning
     // or at the end of the waiters list used by `Notify`.
-    notify_waiters_is_atomic_variant(0);
-    notify_waiters_is_atomic_variant(32);
+    notify_waiters_is_atomic_variant::<L>(0);
+    notify_waiters_is_atomic_variant::<L>(32);
 }
 
 /// Checks if a single call to `notify_waiters` does not get through two `Notified`
@@ -266,11 +273,13 @@ fn notify_waiters_is_atomic() {
 /// notify.notified().await;
 /// notify.notified().await;
 /// ```
-#[test]
-fn notify_waiters_sequential_notified_await() {
+#[rstest]
+fn notify_waiters_sequential_notified_await<L: Linking>(
+    #[values(EAGER, LAZY)] _linking: LinkingMode<L>,
+) {
     use tokio::sync::oneshot;
 
-    let notify = Arc::new(Notify::new());
+    let notify = Arc::new(Notify::<L>::new());
 
     let (tx_fst, rx_fst) = oneshot::channel();
     let (tx_snd, rx_snd) = oneshot::channel();

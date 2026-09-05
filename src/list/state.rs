@@ -1,28 +1,34 @@
-use core::{hint, marker::PhantomData, ptr, ptr::NonNull};
+use core::{fmt::Debug, hint, marker::PhantomData, ptr, ptr::NonNull};
 
-use crate::node::NodeLink;
+use crate::{list::Linking, node::NodeLink};
 
-pub(super) struct Tail<S>(PhantomData<S>);
+pub(super) struct Tail<S, L>(PhantomData<(S, L)>);
 
 #[expect(private_bounds)]
-pub trait ListState: QueueStatePrivate + Copy + PartialEq + 'static {}
+pub trait ListState: QueueStatePrivate + Debug + Copy + PartialEq + Send + Sync + 'static {}
 
 /// # Safety
 ///
 /// Implementation must be bijective.
 pub(super) unsafe trait QueueStatePrivate: Sized {
-    fn tail_to_enum(tail: *mut Tail<Self>) -> StateOrPtr<Self>;
-    fn enum_to_tail(state_or_ptr: StateOrPtr<Self>) -> *mut Tail<Self>;
-    fn tail_to_state_or(tail: *mut Tail<Self>, default: Self) -> Self;
+    fn tail_to_enum<L: Linking>(tail: *mut Tail<Self, L>) -> StateOrPtr<Self, L>;
+    fn enum_to_tail<L: Linking>(state_or_ptr: StateOrPtr<Self, L>) -> *mut Tail<Self, L>;
+    fn tail_to_state_or<L: Linking>(tail: *mut Tail<Self, L>, default: Self) -> Self;
 }
 
-#[derive(Clone, Copy)]
-pub(super) enum StateOrPtr<S> {
+pub(super) enum StateOrPtr<S, L: Linking> {
     State(S),
-    Ptr(NonNull<NodeLink>),
+    Ptr(NonNull<NodeLink<L>>),
 }
 
-impl<S> StateOrPtr<S> {
+impl<S: Copy, L: Linking> Clone for StateOrPtr<S, L> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<S: Copy, L: Linking> Copy for StateOrPtr<S, L> {}
+
+impl<S, L: Linking> StateOrPtr<S, L> {
     pub(super) fn state(self) -> Option<S> {
         match self {
             Self::State(state) => Some(state),
@@ -33,18 +39,18 @@ impl<S> StateOrPtr<S> {
 
 unsafe impl QueueStatePrivate for () {
     #[inline(always)]
-    fn tail_to_enum(tail: *mut Tail<Self>) -> StateOrPtr<Self> {
+    fn tail_to_enum<L: Linking>(tail: *mut Tail<Self, L>) -> StateOrPtr<Self, L> {
         NonNull::new(tail.cast()).map_or(StateOrPtr::State(()), StateOrPtr::Ptr)
     }
     #[inline(always)]
-    fn enum_to_tail(state_or_ptr: StateOrPtr<Self>) -> *mut Tail<Self> {
+    fn enum_to_tail<L: Linking>(state_or_ptr: StateOrPtr<Self, L>) -> *mut Tail<Self, L> {
         match state_or_ptr {
             StateOrPtr::State(_) => ptr::null_mut(),
             StateOrPtr::Ptr(ptr) => ptr.as_ptr().cast(),
         }
     }
     #[inline(always)]
-    fn tail_to_state_or(_tail: *mut Tail<Self>, _default: Self) -> Self {}
+    fn tail_to_state_or<L: Linking>(_tail: *mut Tail<Self, L>, _default: Self) -> Self {}
 }
 impl ListState for () {}
 
@@ -53,7 +59,7 @@ const STATE_SHIFT: usize = 1;
 
 pub const INTRUSIVE_QUEUE_MAX_STATE: usize = usize::MAX >> STATE_SHIFT;
 #[inline(always)]
-pub(super) const fn state_to_ptr(state: usize) -> *mut Tail<usize> {
+pub(super) const fn state_to_ptr<L: Linking>(state: usize) -> *mut Tail<usize, L> {
     #[cold]
     #[inline(never)]
     const fn panic_queue_state_overflow() -> ! {
@@ -67,7 +73,7 @@ pub(super) const fn state_to_ptr(state: usize) -> *mut Tail<usize> {
 
 unsafe impl QueueStatePrivate for usize {
     #[inline(always)]
-    fn tail_to_enum(tail: *mut Tail<Self>) -> StateOrPtr<Self> {
+    fn tail_to_enum<L: Linking>(tail: *mut Tail<Self, L>) -> StateOrPtr<Self, L> {
         if tail.addr() & TAIL_FLAG != 0 {
             let ptr = tail.map_addr(|addr| addr & !TAIL_FLAG).cast();
             StateOrPtr::Ptr(unsafe { NonNull::new_unchecked(ptr) })
@@ -76,7 +82,7 @@ unsafe impl QueueStatePrivate for usize {
         }
     }
     #[inline(always)]
-    fn enum_to_tail(state_or_ptr: StateOrPtr<Self>) -> *mut Tail<Self> {
+    fn enum_to_tail<L: Linking>(state_or_ptr: StateOrPtr<Self, L>) -> *mut Tail<Self, L> {
         match state_or_ptr {
             StateOrPtr::State(state) => state_to_ptr(state),
             StateOrPtr::Ptr(ptr) => ptr.as_ptr().map_addr(|addr| addr | TAIL_FLAG).cast(),
@@ -84,7 +90,7 @@ unsafe impl QueueStatePrivate for usize {
     }
 
     #[inline(always)]
-    fn tail_to_state_or(tail: *mut Tail<Self>, default: Self) -> Self {
+    fn tail_to_state_or<L: Linking>(tail: *mut Tail<Self, L>, default: Self) -> Self {
         hint::select_unpredictable(
             tail.addr() & TAIL_FLAG == 0,
             tail.addr() >> STATE_SHIFT,
@@ -94,43 +100,43 @@ unsafe impl QueueStatePrivate for usize {
 }
 impl ListState for usize {}
 
-pub(super) trait TailExt<S> {
+pub(super) trait TailExt<S, L: Linking> {
     fn state(self) -> Option<S>;
-    fn ptr(self) -> Option<NonNull<NodeLink>>;
+    fn ptr(self) -> Option<NonNull<NodeLink<L>>>;
 }
 
-impl<S: ListState> TailExt<S> for *mut Tail<S> {
+impl<S: ListState, L: Linking> TailExt<S, L> for *mut Tail<S, L> {
     #[inline(always)]
     fn state(self) -> Option<S> {
-        match S::tail_to_enum(self) {
+        match S::tail_to_enum::<L>(self) {
             StateOrPtr::State(state) => Some(state),
             _ => None,
         }
     }
 
     #[inline(always)]
-    fn ptr(self) -> Option<NonNull<NodeLink>> {
-        match S::tail_to_enum(self) {
+    fn ptr(self) -> Option<NonNull<NodeLink<L>>> {
+        match S::tail_to_enum::<L>(self) {
             StateOrPtr::Ptr(ptr) => Some(ptr),
             _ => None,
         }
     }
 }
 
-pub(super) trait IntoTail<S> {
-    fn into_tail(self) -> *mut Tail<S>;
+pub(super) trait IntoTail<S, L: Linking> {
+    fn into_tail(self) -> *mut Tail<S, L>;
 }
 
-impl<S: ListState> IntoTail<S> for S {
+impl<S: ListState, L: Linking> IntoTail<S, L> for S {
     #[inline(always)]
-    fn into_tail(self) -> *mut Tail<S> {
+    fn into_tail(self) -> *mut Tail<S, L> {
         S::enum_to_tail(StateOrPtr::State(self))
     }
 }
 
-impl<S: ListState> IntoTail<S> for NonNull<NodeLink> {
+impl<S: ListState, L: Linking> IntoTail<S, L> for NonNull<NodeLink<L>> {
     #[inline(always)]
-    fn into_tail(self) -> *mut Tail<S> {
+    fn into_tail(self) -> *mut Tail<S, L> {
         S::enum_to_tail(StateOrPtr::Ptr(self))
     }
 }
