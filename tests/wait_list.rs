@@ -176,8 +176,8 @@ impl WakeConditionAccess for SyncMode<Unsynchronized> {
 
 #[derive(Clone, Copy)]
 enum NotifyMode {
-    Fifo,
-    Lifo,
+    One,
+    Last,
     All,
 }
 
@@ -189,7 +189,6 @@ enum WaitMode {
 
 trait WaitListExt<S: Synchronization, L: Linking> {
     fn notify(&self, mode: NotifyMode);
-    fn notify_many(&self, mode: NotifyMode, count: usize);
     async fn wait_until2<F: FnMut(bool) -> W, W: WakeCondition + Default>(
         &self,
         mode: WaitMode,
@@ -200,16 +199,9 @@ trait WaitListExt<S: Synchronization, L: Linking> {
 impl<S: Synchronization, L: Linking> WaitListExt<S, L> for WaitList<S, L> {
     fn notify(&self, mode: NotifyMode) {
         match mode {
-            NotifyMode::Fifo => self.notify_fifo(1),
-            NotifyMode::Lifo => self.notify_lifo(1),
+            NotifyMode::One => self.notify_one(),
+            NotifyMode::Last => self.notify_last(),
             NotifyMode::All => self.notify_all(),
-        }
-    }
-    fn notify_many(&self, mode: NotifyMode, count: usize) {
-        match mode {
-            NotifyMode::Fifo => self.notify_fifo(count),
-            NotifyMode::Lifo => self.notify_lifo(count),
-            NotifyMode::All => unreachable!(),
         }
     }
     async fn wait_until2<F: FnMut(bool) -> W, W: WakeCondition + Default>(
@@ -247,7 +239,7 @@ fn wait_until<S: Synchronization, L: Linking>(
     // loom doesn't support SEQ
     #[values(SYNC, UNSYNC, UNSYNC_RMW)] sync: SyncMode<S>,
     #[values(EAGER, LAZY)] _linking: LinkingMode<L>,
-    #[values(NotifyMode::Fifo, NotifyMode::Lifo, NotifyMode::All)] notify_mode: NotifyMode,
+    #[values(NotifyMode::One, NotifyMode::Last, NotifyMode::All)] notify_mode: NotifyMode,
     #[values(WaitMode::Normal, WaitMode::Minimal)] wait_mode: WaitMode,
 ) where
     SyncMode<S>: WakeConditionAccess,
@@ -274,7 +266,7 @@ fn wait_until<S: Synchronization, L: Linking>(
 fn notify_fifo_lifo<S: Synchronization, L: Linking>(
     #[values(SYNC, SEQ, UNSYNC)] _sync: SyncMode<S>,
     #[values(EAGER, LAZY)] _linking: LinkingMode<L>,
-    #[values((NotifyMode::Fifo, 0), (NotifyMode::Lifo, 1))] (notify_mode, wait_idx): (
+    #[values((NotifyMode::One, 0), (NotifyMode::Last, 1))] (notify_mode, wait_idx): (
         NotifyMode,
         usize,
     ),
@@ -294,7 +286,7 @@ fn notify_fifo_lifo<S: Synchronization, L: Linking>(
 fn notify_fifo_lifo_cancel<S: Synchronization, L: Linking>(
     #[values(SYNC, SEQ, UNSYNC)] _sync: SyncMode<S>,
     #[values(EAGER, LAZY)] _linking: LinkingMode<L>,
-    #[values((NotifyMode::Fifo, 0), (NotifyMode::Lifo, 1))] (notify_mode, wait_idx): (
+    #[values((NotifyMode::One, 0), (NotifyMode::Last, 1))] (notify_mode, wait_idx): (
         NotifyMode,
         usize,
     ),
@@ -373,7 +365,7 @@ fn notify_all_is_atomic<S: Synchronization, L: Linking>(
                     futs.remove(tested_fut_index).await.unwrap();
                     let mut new_fut = list.wait().boxed();
                     assert_pending!(new_fut);
-                    list.notify_fifo(1);
+                    list.notify_one();
                     assert_ready!(new_fut).unwrap();
                 });
             });
@@ -406,7 +398,6 @@ fn notify_all_sequential_wait<S: Synchronization, L: Linking>(
 fn notify_many<S: Synchronization, L: Linking>(
     #[values(SYNC, SEQ, UNSYNC)] _sync: SyncMode<S>,
     #[values(EAGER, LAZY)] _linking: LinkingMode<L>,
-    #[values(NotifyMode::Fifo, NotifyMode::Lifo)] notify_mode: NotifyMode,
     #[values(0, 2, 5)] count: usize,
 ) {
     model(move || {
@@ -415,16 +406,11 @@ fn notify_many<S: Synchronization, L: Linking>(
         for wait in &mut waits {
             assert_pending!(wait);
         }
-        list.notify_many(notify_mode, count);
+        list.notify_many(count);
         let len = waits.len();
         let notified = count.min(len);
         for (i, wait) in waits.iter_mut().enumerate() {
-            let ready = match notify_mode {
-                NotifyMode::Fifo => i < notified,
-                NotifyMode::Lifo => i >= len - notified,
-                NotifyMode::All => unreachable!(),
-            };
-            if ready {
+            if i < notified {
                 assert_ready!(wait).unwrap();
             } else {
                 assert_pending!(wait);
@@ -437,8 +423,6 @@ fn notify_many<S: Synchronization, L: Linking>(
 fn notify_many_cancel_race<S: Synchronization, L: Linking>(
     #[values(SYNC, SEQ, UNSYNC)] _sync: SyncMode<S>,
     #[values(EAGER, LAZY)] _linking: LinkingMode<L>,
-    #[values((NotifyMode::Fifo, 0), (NotifyMode::Lifo, WAKE_LIST_SIZE + 3))]
-    (notify_mode, cancelled_idx): (NotifyMode, usize),
 ) {
     const COUNT: usize = WAKE_LIST_SIZE + 1;
     model(move || {
@@ -449,20 +433,13 @@ fn notify_many_cancel_race<S: Synchronization, L: Linking>(
         for wait in &mut waits {
             assert_pending!(wait);
         }
-        let len = waits.len();
-        let cancelled = waits.remove(cancelled_idx);
+        let cancelled = waits.remove(0);
         thread::scope(|s| {
-            s.spawn(|| list.notify_many(notify_mode, COUNT));
+            s.spawn(|| list.notify_many(COUNT));
             s.spawn(move || drop(cancelled));
         });
         for (i, wait) in waits.iter_mut().enumerate() {
-            let idx = if i < cancelled_idx { i } else { i + 1 };
-            let ready = match notify_mode {
-                NotifyMode::Fifo => (1..=COUNT).contains(&idx),
-                NotifyMode::Lifo => (len - 1 - COUNT..len - 1).contains(&idx),
-                NotifyMode::All => unreachable!(),
-            };
-            if ready {
+            if i < COUNT {
                 assert_ready!(wait).unwrap();
             } else {
                 assert_pending!(wait);
@@ -563,7 +540,7 @@ fn notify_cancel_race<S: Synchronization, L: Linking>(
         assert_pending!(wait);
         assert_pending!(other);
         thread::scope(|s| {
-            s.spawn(|| list.notify_fifo(1));
+            s.spawn(|| list.notify_one());
             s.spawn(move || drop(cancelled));
         });
         assert_ready!(wait).unwrap();
@@ -579,11 +556,13 @@ fn wait_until_notified_completion<S: Synchronization, L: Linking>(
     model(|| {
         let list = WaitList::<S, L>::new();
         let cond = AtomicUsize::new(0);
-        let mut other = list.wait().boxed();
-        assert_pending!(other);
         let mut wait = Box::pin(list.wait_until(|_| cond.load(Relaxed) == 1));
         assert_pending!(wait);
-        list.notify_lifo(1);
+        let mut other = list.wait().boxed();
+        assert_pending!(other);
+        list.notify_one();
+        assert_pending!(wait); // reinserted in last position
+        list.notify_last();
         cond.store(1, Relaxed);
         assert_ready!(wait).unwrap();
         drop(wait);

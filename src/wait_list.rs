@@ -36,8 +36,8 @@ pub struct ClosedError;
 
 #[derive(Clone, Copy)]
 enum Notification {
-    Fifo,
-    Lifo,
+    One,
+    Last,
     All,
 }
 
@@ -109,24 +109,16 @@ impl<S: Synchronization, L: Linking, M: Mutex> WaitList<S, L, M> {
     }
 
     #[inline]
-    pub fn notify_fifo(&self, count: usize) {
-        self.notify_end::<GetFront>(count, Notification::Fifo);
+    pub fn notify_one(&self) {
+        if !self.is_empty() {
+            self.wake_single::<GetFront>(Notification::One);
+        }
     }
 
     #[inline]
-    pub fn notify_lifo(&self, count: usize) {
-        self.notify_end::<GetBack>(count, Notification::Lifo);
-    }
-
-    #[inline(always)]
-    fn notify_end<E: ListGetEnd>(&self, count: usize, notification: Notification) {
-        if count == 0 || self.is_empty() {
-            return;
-        }
-        if count == 1 {
-            self.wake_single::<E>(notification);
-        } else {
-            self.wake_many::<E>(count, notification);
+    pub fn notify_last(&self) {
+        if !self.is_empty() {
+            self.wake_single::<GetBack>(Notification::Last);
         }
     }
 
@@ -152,31 +144,36 @@ impl<S: Synchronization, L: Linking, M: Mutex> WaitList<S, L, M> {
         }
     }
 
+    #[inline]
+    pub fn notify_many(&self, count: usize) {
+        if !self.is_empty() {
+            self.wake_many(count);
+        }
+    }
+
     #[cold]
     #[inline(never)]
-    fn wake_many<E: ListGetEnd>(&self, count: usize, notification: Notification) {
+    fn wake_many(&self, count: usize) {
         let mut wakers = WakerList::new();
         let mut locked = self.list.lock();
-        let mut end = E::get_end(&mut locked);
+        let mut front = locked.front();
         for _ in 0..count {
-            let Some(mut waiter) = end else {
+            let Some(mut waiter) = front else {
                 break;
             };
-            waiter.data_mut().notification = Some(notification);
-            wakers.push(unsafe { waiter.data_mut().waker.take().unwrap_unchecked() });
-            end = ListEnd::unlink(waiter, || STATE_OPEN);
+            waiter.notification = Some(Notification::One);
+            wakers.push(unsafe { waiter.waker.take().unwrap_unchecked() });
+            front = ListEnd::unlink(waiter, || STATE_OPEN);
             if wakers.is_full() {
-                drop(end);
                 let list = locked.unlock();
                 wakers.drain().for_each(Waker::wake);
                 if list.is_empty(Relaxed) {
                     return;
                 }
                 locked = list.lock();
-                end = E::get_end(&mut locked);
+                front = locked.front();
             }
         }
-        drop(end);
         drop(locked);
         wakers.drain().for_each(Waker::wake);
     }
@@ -212,8 +209,8 @@ impl<S: Synchronization, L: Linking, M: Mutex> WaitList<S, L, M> {
     #[inline(never)]
     fn renotify(&self, notification: Notification) {
         match notification {
-            Notification::Fifo => self.notify_fifo(1),
-            Notification::Lifo => self.notify_lifo(1),
+            Notification::One => self.notify_one(),
+            Notification::Last => self.notify_last(),
             _ => unreachable!(),
         }
     }
@@ -251,11 +248,11 @@ impl<'a, S: Synchronization, L: Linking, M: Mutex> NodeData<WaitListRef<'a, S, L
         if let Some(locked) = locked {
             debug_assert!(!state_updated_on_unlink);
             match self.notification {
-                Some(Notification::Fifo) => {
-                    WaitList::<S, L, M>::wake_single_locked::<GetFront>(locked, Notification::Fifo);
+                Some(Notification::One) => {
+                    WaitList::<S, L, M>::wake_single_locked::<GetFront>(locked, Notification::One);
                 }
-                Some(Notification::Lifo) => {
-                    WaitList::<S, L, M>::wake_single_locked::<GetBack>(locked, Notification::Lifo);
+                Some(Notification::Last) => {
+                    WaitList::<S, L, M>::wake_single_locked::<GetBack>(locked, Notification::Last);
                 }
                 _ => {}
             }

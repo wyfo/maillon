@@ -169,10 +169,19 @@ impl<'a, T, S: ListState, L: Linking, M: Mutex> Drain<'a, T, S, L, M> {
         on_next: N,
         on_unlock: U,
     ) {
+        self.for_each_impl::<L::PreferredDrainGetEnd, _>(helper, on_next, on_unlock);
+    }
+
+    pub fn for_each_fifo<H, N: FnMut(&mut H, Pin<&mut T>) -> bool, U: FnMut(&mut H)>(
+        self,
+        helper: &mut H,
+        on_next: N,
+        on_unlock: U,
+    ) {
         self.for_each_impl::<GetFront, _>(helper, on_next, on_unlock);
     }
 
-    pub fn for_each_rev<H, N: FnMut(&mut H, Pin<&mut T>) -> bool, U: FnMut(&mut H)>(
+    pub fn for_each_lifo<H, N: FnMut(&mut H, Pin<&mut T>) -> bool, U: FnMut(&mut H)>(
         self,
         helper: &mut H,
         on_next: N,
@@ -320,7 +329,7 @@ node_ref!(
     self.node
 );
 
-pub trait DrainGetEnd: Sized {
+pub trait DrainGetEnd {
     type DrainEnd<'drain, 'a, T, S: ListState, L: Linking, M: Mutex>: DrainEnd<'drain, 'a, T, S, L, M>
     where
         'drain: 'a,
@@ -329,23 +338,6 @@ pub trait DrainGetEnd: Sized {
     fn get_end<'drain, 'a, T, S: ListState, L: Linking, M: Mutex>(
         drain: Pin<&'a mut Drain<'drain, T, S, L, M>>,
     ) -> Option<Self::DrainEnd<'drain, 'a, T, S, L, M>>;
-
-    fn for_each<
-        T,
-        S: ListState,
-        L: Linking,
-        M: Mutex,
-        H,
-        N: FnMut(&mut H, Pin<&mut T>) -> bool,
-        U: FnMut(&mut H),
-    >(
-        drain: Drain<'_, T, S, L, M>,
-        helper: &mut H,
-        on_next: N,
-        on_unlock: U,
-    ) {
-        drain.for_each_impl::<Self, _>(helper, on_next, on_unlock);
-    }
 }
 
 impl DrainGetEnd for GetFront {

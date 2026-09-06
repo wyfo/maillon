@@ -8,7 +8,7 @@ use core::{
 
 pub(crate) use self::private::Linking as PrivateLinking;
 use crate::{
-    list::HEAD_MARKER,
+    list::{DrainGetEnd, GetBack, GetFront, HEAD_MARKER},
     loom::{AtomicPtrExt, cell::Cell, sync::atomic::AtomicPtr},
     node::NodeLink,
     sync::parker::{DEFAULT_SPIN_BEFORE_PARK, DefaultParker, Parker},
@@ -16,7 +16,9 @@ use crate::{
 };
 
 #[allow(private_bounds)]
-pub trait Linking: private::Linking + Send + Sync + 'static {}
+pub trait Linking: private::Linking + Send + Sync + 'static {
+    type PreferredDrainGetEnd: DrainGetEnd;
+}
 
 #[derive(Debug)]
 pub struct Eager<
@@ -114,7 +116,9 @@ impl<P: Parker, const SPIN_BEFORE_PARK: usize> private::Linking for Eager<P, SPI
         Self::get_next(None, next, NonNull::dangling(), next, parker);
     }
 }
-impl<P: Parker, const SPIN_BEFORE_PARK: usize> Linking for Eager<P, SPIN_BEFORE_PARK> {}
+impl<P: Parker, const SPIN_BEFORE_PARK: usize> Linking for Eager<P, SPIN_BEFORE_PARK> {
+    type PreferredDrainGetEnd = GetFront;
+}
 
 #[derive(Debug)]
 pub struct Lazy;
@@ -193,7 +197,9 @@ impl private::Linking for Lazy {
     }
     fn wait_next(_next: &Self::NextPtr, _parker: &Self::Parker) {}
 }
-impl Linking for Lazy {}
+impl Linking for Lazy {
+    type PreferredDrainGetEnd = GetBack;
+}
 
 mod private {
     use core::{ptr::NonNull, sync::atomic::Ordering};
