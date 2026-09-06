@@ -498,43 +498,43 @@ node_ref!(
 pub struct GetFront;
 pub struct GetBack;
 
-pub trait ListGetEnd<L: Linking> {
-    type ListEnd<'locked, 'a, T, S: ListState, M: Mutex>: ListEnd<'locked, 'a, T, S, L, M>
+pub trait ListGetEnd {
+    type ListEnd<'locked, 'a, T, S: ListState, L: Linking, M: Mutex>: ListEnd<'locked, 'a, T, S, L, M>
     where
         'locked: 'a,
         T: 'locked;
 
-    fn get_end<'locked, 'a, T, S: ListState, M: Mutex>(
+    fn get_end<'locked, 'a, T, S: ListState, L: Linking, M: Mutex>(
         locked: &'a mut LockedList<'locked, T, S, L, M>,
-    ) -> Option<Self::ListEnd<'locked, 'a, T, S, M>>;
+    ) -> Option<Self::ListEnd<'locked, 'a, T, S, L, M>>;
 }
 
-impl<L: Linking> ListGetEnd<L> for GetFront {
-    type ListEnd<'locked, 'a, T, S: ListState, M: Mutex>
+impl ListGetEnd for GetFront {
+    type ListEnd<'locked, 'a, T, S: ListState, L: Linking, M: Mutex>
         = ListFront<'locked, 'a, T, S, L, M>
     where
         'locked: 'a,
         T: 'locked;
 
     #[inline]
-    fn get_end<'locked, 'a, T, S: ListState, M: Mutex>(
+    fn get_end<'locked, 'a, T, S: ListState, L: Linking, M: Mutex>(
         locked: &'a mut LockedList<'locked, T, S, L, M>,
-    ) -> Option<Self::ListEnd<'locked, 'a, T, S, M>> {
+    ) -> Option<Self::ListEnd<'locked, 'a, T, S, L, M>> {
         locked.front()
     }
 }
 
-impl<L: Linking> ListGetEnd<L> for GetBack {
-    type ListEnd<'locked, 'a, T, S: ListState, M: Mutex>
+impl ListGetEnd for GetBack {
+    type ListEnd<'locked, 'a, T, S: ListState, L: Linking, M: Mutex>
         = ListBack<'locked, 'a, T, S, L, M>
     where
         'locked: 'a,
         T: 'locked;
 
     #[inline]
-    fn get_end<'locked, 'a, T, S: ListState, M: Mutex>(
+    fn get_end<'locked, 'a, T, S: ListState, L: Linking, M: Mutex>(
         locked: &'a mut LockedList<'locked, T, S, L, M>,
-    ) -> Option<Self::ListEnd<'locked, 'a, T, S, M>> {
+    ) -> Option<Self::ListEnd<'locked, 'a, T, S, L, M>> {
         locked.back()
     }
 }

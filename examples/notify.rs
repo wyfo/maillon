@@ -55,7 +55,7 @@ impl<L: Linking> Notify<L> {
     }
 
     #[inline(always)]
-    fn notify_single<E: ListGetEnd<L>>(&self, notification: Notification) {
+    fn notify_single<E: ListGetEnd>(&self, notification: Notification) {
         self.list.update_state_or_lock_with(
             Relaxed,
             Relaxed,
@@ -64,7 +64,7 @@ impl<L: Linking> Notify<L> {
         );
     }
 
-    fn wake_single<'a, E: ListGetEnd<L>>(
+    fn wake_single<'a, E: ListGetEnd>(
         &'a self,
         notification: Notification,
         mut locked: LockedList<'a, Waiter, usize, L>,

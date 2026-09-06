@@ -119,7 +119,7 @@ impl<S: Synchronization, L: Linking, M: Mutex> WaitList<S, L, M> {
     }
 
     #[inline(always)]
-    fn notify_end<E: ListGetEnd<L>>(&self, count: usize, notification: Notification) {
+    fn notify_end<E: ListGetEnd>(&self, count: usize, notification: Notification) {
         if count == 0 || self.is_empty() {
             return;
         }
@@ -132,11 +132,11 @@ impl<S: Synchronization, L: Linking, M: Mutex> WaitList<S, L, M> {
 
     #[cold]
     #[inline(never)]
-    fn wake_single<E: ListGetEnd<L>>(&self, notification: Notification) {
+    fn wake_single<E: ListGetEnd>(&self, notification: Notification) {
         Self::wake_single_locked::<E>(self.list.lock(), notification);
     }
 
-    fn wake_single_locked<E: ListGetEnd<L>>(
+    fn wake_single_locked<E: ListGetEnd>(
         mut locked: LockedList<Waiter, usize, L, M>,
         notification: Notification,
     ) {
@@ -154,7 +154,7 @@ impl<S: Synchronization, L: Linking, M: Mutex> WaitList<S, L, M> {
 
     #[cold]
     #[inline(never)]
-    fn wake_many<E: ListGetEnd<L>>(&self, count: usize, notification: Notification) {
+    fn wake_many<E: ListGetEnd>(&self, count: usize, notification: Notification) {
         let mut wakers = WakerList::new();
         let mut locked = self.list.lock();
         let mut end = E::get_end(&mut locked);
