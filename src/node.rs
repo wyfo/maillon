@@ -83,7 +83,7 @@ pub struct Node<
 > {
     list: LR,
     node: UnsafePinned<NodeInner<T, L>>,
-    linked: Cell<bool>,
+    maybe_linked: Cell<bool>,
     _state: PhantomData<S>,
     _sync: PhantomData<(L, M)>,
 }
@@ -127,7 +127,7 @@ impl<LR: AsList<List<T, S, L, M>>, T: NodeData<LR, S, L, M>, S: ListState, L: Li
                 #[cfg(loom)]
                 access: loom::cell::Cell::new(()),
             }),
-            linked: Cell::new(false),
+            maybe_linked: Cell::new(false),
             _state: PhantomData,
             _sync: PhantomData,
         }
@@ -142,6 +142,15 @@ impl<LR: AsList<List<T, S, L, M>>, T: NodeData<LR, S, L, M>, S: ListState, L: Li
         NonNull::new(self.node.get()).unwrap().cast()
     }
 
+    // TODO doc: false = never pushed, or already observed unlinked -> nothing set by the list
+    // (notification etc.) can be pending; true = may be linked, or unlinked since by another
+    // thread. Set by push_back, cleared by state()/unlink. Plain Cell read, no atomic, no lock.
+    // Not the negation of is_linked, which is authoritative both ways.
+    #[inline(always)]
+    pub fn is_maybe_linked(&self) -> bool {
+        self.maybe_linked.get()
+    }
+
     #[inline(always)]
     pub fn is_linked(&self) -> bool {
         unsafe { (*self.node.get()).link.is_linked() }
@@ -150,14 +159,14 @@ impl<LR: AsList<List<T, S, L, M>>, T: NodeData<LR, S, L, M>, S: ListState, L: Li
     #[inline(always)]
     pub fn state(self: Pin<&mut Self>) -> NodeState<'_, LR, T, S, L, M> {
         let this = self.into_ref().get_ref();
-        if this.linked.get() {
+        if this.is_maybe_linked() {
             if this.is_linked() {
                 let locked = this.list.as_list().lock();
                 if this.is_linked() {
                     return NodeState::Linked(NodeLinked { node: this, locked });
                 }
             }
-            this.linked.set(false);
+            this.maybe_linked.set(false);
         }
         NodeState::Unlinked(NodeUnlinked(this))
     }
@@ -182,7 +191,7 @@ impl<LR: AsList<List<T, S, L, M>>, T: NodeData<LR, S, L, M>, S: ListState, L: Li
 {
     #[inline]
     fn drop(&mut self) {
-        if self.linked.get() && self.is_linked() {
+        if self.is_maybe_linked() && self.is_linked() {
             self.drop_linked();
         } else {
             (NodeDropped(self).data_mut()).on_drop(&self.list, None, false);
@@ -249,7 +258,7 @@ impl<'a, LR: AsList<List<T, (), L, M>>, T: NodeData<LR, (), L, M>, L: Linking, M
         let list = self.list().as_list();
         let link = self.0.link();
         let f = None::<fn(()) -> Option<()>>;
-        let on_pushed = || self.0.linked.set(true);
+        let on_pushed = || self.0.maybe_linked.set(true);
         let _ = unsafe { list.push_back(link, order, Relaxed, f, |_| true, on_pushed) };
     }
 }
@@ -267,7 +276,7 @@ impl<'a, LR: AsList<List<T, usize, L, M>>, T: NodeData<LR, usize, L, M>, L: Link
         let link = self.0.link();
         let f = None::<fn(usize) -> Option<usize>>;
         let on_push_back = |state| on_push(Self(self.0).data_mut(), state);
-        let on_pushed = || self.0.linked.set(true);
+        let on_pushed = || self.0.maybe_linked.set(true);
         unsafe { list.push_back(link, set_order, fetch_order, f, on_push_back, on_pushed) }
             .unwrap_err()
     }
@@ -288,7 +297,7 @@ impl<'a, LR: AsList<List<T, usize, L, M>>, T: NodeData<LR, usize, L, M>, L: Link
         let link = self.0.link();
         let f = |state| f(Self(self.0).data_mut(), state);
         let on_push = |state| on_push(Self(self.0).data_mut(), state);
-        let on_pushed = || self.0.linked.set(true);
+        let on_pushed = || self.0.maybe_linked.set(true);
         unsafe { list.push_back(link, set_order, fetch_order, Some(f), on_push, on_pushed) }
             .inspect(|&state| on_state_updated(self.data_mut(), state))
     }
@@ -366,7 +375,7 @@ impl<'a, LR: AsList<List<T, (), L, M>>, T: NodeData<LR, (), L, M>, L: Linking, M
         LockedList<'a, T, (), L, M>,
     ) {
         unsafe { self.locked.remove(self.node.link(), || (), false, false) };
-        self.node.linked.set(false);
+        self.node.maybe_linked.set(false);
         (NodeUnlinked(self.node), self.locked)
     }
 }
@@ -389,7 +398,7 @@ impl<'a, LR: AsList<List<T, usize, L, M>>, T: NodeData<LR, usize, L, M>, L: Link
                 .remove(self.node.link(), new_state_if_last_node, false, false)
         };
         let state_updated = next.is_none() && tail.is_none();
-        self.node.linked.set(false);
+        self.node.maybe_linked.set(false);
         (NodeUnlinked(self.node), self.locked, state_updated)
     }
 }

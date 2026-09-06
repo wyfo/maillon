@@ -70,6 +70,8 @@ impl<'a, S: Synchronization, L: Linking, M: Mutex> Wait<'a, S, L, M> {
         }
     }
 
+    #[cold]
+    #[inline(never)]
     fn unregister(self: Pin<&mut Self>) {
         match self.project().state() {
             NodeState::Unlinked(mut node) => {
@@ -171,9 +173,14 @@ impl<F: FnMut(bool) -> W, W: WakeCondition, S: Synchronization, L: Linking, M: M
 
     #[inline]
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let (_, wake_condition) = self.as_mut().project();
+        let (wait, wake_condition) = self.as_mut().project();
         match (wake_condition)(false).try_into_output() {
-            Some(res) => Poll::Ready(Ok(res)),
+            Some(res) => {
+                if wait.node.is_maybe_linked() {
+                    wait.unregister();
+                }
+                Poll::Ready(Ok(res))
+            }
             None => self.poll_wait_until(cx),
         }
     }
