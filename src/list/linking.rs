@@ -17,6 +17,7 @@ use crate::{
 
 #[allow(private_bounds)]
 pub trait Linking: private::Linking + Send + Sync + 'static {
+    #[doc(hidden)]
     type PreferredDrainGetEnd: DrainGetEnd;
 }
 
