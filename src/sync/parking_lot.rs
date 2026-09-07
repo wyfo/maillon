@@ -4,6 +4,7 @@ use parking_lot_core::{DEFAULT_PARK_TOKEN, DEFAULT_UNPARK_TOKEN};
 
 use crate::sync::{condvar::CondVar, mutex::Mutex, parker::Parker};
 
+// TODO repass on all comments
 /// A [`Parker`] built directly on `parking_lot_core`, which is what
 /// [`parking_lot::Condvar`] is itself built on: going through a mutex and a condition
 /// variable would only stack two layers on top of the very same parking lot.
@@ -29,7 +30,7 @@ impl ParkingLotParker {
     }
 }
 
-impl Parker for ParkingLotParker {
+unsafe impl Parker for ParkingLotParker {
     const INIT: Self = Self(0);
 
     #[inline]
@@ -58,7 +59,7 @@ impl Parker for ParkingLotParker {
     }
 
     #[inline]
-    fn unpark(&self) {
+    unsafe fn unpark(&self, _parked_state: *mut ()) {
         // SAFETY: the key is the address of this parker, whose storage belongs to the list,
         // and the callback neither panics nor calls into `parking_lot`.
         unsafe { parking_lot_core::unpark_one(self.key(), |_| DEFAULT_UNPARK_TOKEN) };

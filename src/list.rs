@@ -546,6 +546,12 @@ pub unsafe trait AsList<L> {
     fn as_list(&self) -> &L;
 }
 
+unsafe impl<T, S: ListState, L: Linking, M: Mutex> AsList<Self> for List<T, S, L, M> {
+    fn as_list(&self) -> &Self {
+        self
+    }
+}
+
 unsafe impl<L, R: AsList<L>> AsList<L> for &R {
     fn as_list(&self) -> &L {
         (**self).as_list()

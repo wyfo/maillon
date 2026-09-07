@@ -24,7 +24,7 @@ impl AtomicParker {
 }
 
 // implementation taken for std Parker futex implementation
-impl Parker for AtomicParker {
+unsafe impl Parker for AtomicParker {
     #[allow(clippy::declare_interior_mutable_const)]
     const INIT: Self = Self(AtomicU32::new(0));
 
@@ -39,7 +39,7 @@ impl Parker for AtomicParker {
     }
 
     #[inline]
-    fn unpark(&self) {
+    unsafe fn unpark(&self, _parked_state: *mut ()) {
         if self.0.swap(Self::NOTIFIED, Release) == Self::PARKED {
             atomic_wait::wake_one(&self.0);
         }

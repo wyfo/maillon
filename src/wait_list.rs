@@ -101,7 +101,9 @@ impl<S: Synchronization, L: Linking, M: Mutex> WaitList<S, L, M> {
                 if let Some(notification) = notification {
                     waiter.notification = Some(notification);
                 }
-                wakers.push(unsafe { waiter.waker.take().unwrap_unchecked() });
+                if let Some(waker) = waiter.waker.take() {
+                    wakers.push(waker);
+                }
                 wakers.is_full()
             },
             |wakers| wakers.drain().for_each(Waker::wake),
@@ -162,7 +164,9 @@ impl<S: Synchronization, L: Linking, M: Mutex> WaitList<S, L, M> {
                 break;
             };
             waiter.notification = Some(Notification::One);
-            wakers.push(unsafe { waiter.waker.take().unwrap_unchecked() });
+            if let Some(waker) = waiter.waker.take() {
+                wakers.push(waker);
+            }
             front = ListEnd::unlink(waiter, || STATE_OPEN);
             if wakers.is_full() {
                 let list = locked.unlock();
@@ -242,22 +246,22 @@ impl<'a, S: Synchronization, L: Linking, M: Mutex> NodeData<WaitListRef<'a, S, L
         locked: Option<LockedList<'list, Self, usize, L, M>>,
         state_updated_on_unlink: bool,
     ) {
-        if matches!(self.notification, None | Some(Notification::All)) {
+        let Some(notif @ (Notification::One | Notification::Last)) = self.notification else {
             return;
-        }
+        };
         if let Some(locked) = locked {
             debug_assert!(!state_updated_on_unlink);
-            match self.notification {
-                Some(Notification::One) => {
+            match notif {
+                Notification::One => {
                     WaitList::<S, L, M>::wake_single_locked::<GetFront>(locked, Notification::One);
                 }
-                Some(Notification::Last) => {
+                Notification::Last => {
                     WaitList::<S, L, M>::wake_single_locked::<GetBack>(locked, Notification::Last);
                 }
-                _ => {}
+                _ => unreachable!(),
             }
         } else {
-            list.wait_list.renotify(self.notification.unwrap());
+            list.wait_list.renotify(notif);
         }
     }
 }

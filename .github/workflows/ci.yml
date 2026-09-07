@@ -31,7 +31,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: loom
-        run: cargo test --test loom_notify --test loom_semaphore --release
+        run: cargo test --test wait_list --test loom_notify --test loom_semaphore --release
         env:
           RUSTFLAGS: --cfg loom
           LOOM_MAX_PREEMPTIONS: 2
@@ -46,6 +46,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: benchmark aiq
         run: cargo bench --all-features --bench notify --bench semaphore -- --warm-up-time 1 --measurement-time 1
+      - name: benchmark aiq lazy linked
+        run: cargo bench --all-features --bench notify_lazy_linked --bench semaphore_lazy_linked -- --warm-up-time 1 --measurement-time 1
       - name: benchmark tokio
         run: cargo bench --all-features --bench tokio_notify --bench tokio_semaphore -- --warm-up-time 1 --measurement-time 1
 
@@ -61,6 +63,6 @@ jobs:
       - name: install miri
         run: rustup install nightly && rustup +nightly component add miri
       - name: miri
-        run: cargo +nightly miri test --test miri_notify --test miri_semaphore
+        run: cargo +nightly miri test --test wait_list --test miri_notify --test miri_semaphore
         env:
           MIRIFLAGS: -Zmiri-many-seeds=${{ matrix.seeds }} -Zmiri-compare-exchange-weak-failure-rate=0

@@ -1,3 +1,5 @@
+use core::ptr;
+
 #[cfg(feature = "atomic-wait")]
 pub use super::atomic_wait::AtomicParker;
 #[cfg(feature = "parking_lot")]
@@ -25,7 +27,11 @@ pub const DEFAULT_SPIN_BEFORE_PARK: usize = 100; // same as `std::sys::sync::mut
 pub const DEFAULT_SPIN_BEFORE_PARK: usize = 0;
 
 // TODO it must not have spurious wakeup, can use notified in a loop
-pub trait Parker: Send + Sync + 'static {
+// TODO safety: `park_until` must not unwind, a panic in `Node`/`Drain` drop cannot be recovered
+/// # Safety
+///
+/// TODO
+pub unsafe trait Parker: Send + Sync + 'static {
     const NEVER_BLOCKS: bool = false;
     const INIT: Self;
     #[doc(hidden)]
@@ -35,12 +41,19 @@ pub trait Parker: Send + Sync + 'static {
     {
         Self::INIT
     }
+    fn parked_state(&self) -> *mut () {
+        ptr::null_mut()
+    }
     /// # Safety
     ///
     /// `park_until` can only be called by a single thread at a time.
     /// `notified` must not panic.
     unsafe fn park_until<T>(&self, notified: impl FnMut() -> Option<T>) -> T;
-    fn unpark(&self);
+    /// # Safety
+    ///
+    /// `parked_state` argument must have been returned by a `parked_state` call
+    /// preceding a `park_until` call.
+    unsafe fn unpark(&self, parked_state: *mut ());
 }
 
 /// TODO
@@ -52,12 +65,14 @@ pub trait Parker: Send + Sync + 'static {
 /// mutex, without a condition variable, and often without any state at all.
 // implementation inspired from the std parker futex/pthread implementations
 #[derive(Debug)]
-pub struct CondVarParker<M: Mutex, C: CondVar<M>> {
+pub struct CondVarParker<M: Mutex, C: CondVar<M>, const NOTIFY_WITH_MUTEX_ACQUIRED: bool> {
     mutex: M,
     condvar: C,
 }
 
-impl<M: Mutex, C: CondVar<M>> Parker for CondVarParker<M, C> {
+unsafe impl<M: Mutex, C: CondVar<M>, const NOTIFY_WITH_MUTEX_ACQUIRED: bool> Parker
+    for CondVarParker<M, C, NOTIFY_WITH_MUTEX_ACQUIRED>
+{
     #[cfg(not(loom))]
     #[allow(clippy::declare_interior_mutable_const)]
     const INIT: Self = Self {
@@ -89,13 +104,19 @@ impl<M: Mutex, C: CondVar<M>> Parker for CondVarParker<M, C> {
     }
 
     #[inline]
-    fn unpark(&self) {
+    unsafe fn unpark(&self, _parked_state: *mut ()) {
         // Acquiring the mutex waits for the parked thread to be actually waiting on the
         // condition variable, so the notification cannot be missed. There is a single
         // parked thread by contract, hence no other one can register in between.
         // SAFETY: the guard comes from this very mutex, and is used only once.
-        unsafe { self.mutex.unlock(self.mutex.lock()) };
-        self.condvar.notify_one();
+        let lock = self.mutex.lock();
+        if NOTIFY_WITH_MUTEX_ACQUIRED {
+            self.condvar.notify_one();
+        }
+        unsafe { self.mutex.unlock(lock) };
+        if !NOTIFY_WITH_MUTEX_ACQUIRED {
+            self.condvar.notify_one();
+        }
     }
 }
 

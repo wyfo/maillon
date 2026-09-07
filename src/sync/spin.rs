@@ -29,7 +29,7 @@ unsafe impl Mutex for SpinMutex {
 
 pub struct SpinParker;
 
-impl Parker for SpinParker {
+unsafe impl Parker for SpinParker {
     const NEVER_BLOCKS: bool = true;
     const INIT: Self = Self;
     #[inline]
@@ -42,5 +42,5 @@ impl Parker for SpinParker {
         }
     }
     #[inline]
-    fn unpark(&self) {}
+    unsafe fn unpark(&self, _parked_state: *mut ()) {}
 }

@@ -1,8 +1,6 @@
 #[cfg(all(feature = "pthread", unix))]
 pub use super::pthread::PthreadMutex;
 pub use super::spin::SpinMutex;
-#[cfg(feature = "std")]
-pub use super::std::StdMutex;
 
 /// # Safety
 ///
@@ -10,6 +8,7 @@ pub use super::std::StdMutex;
 /// exclusive: a lock can't be acquired while the mutex is already locked.
 ///
 /// Calls to [`unlock`](Self::unlock) must *synchronize-with* calls to [`lock`](Self::lock).
+// TODO safety: `lock` must not unwind, a panic in `Node`/`Drain` drop cannot be recovered
 pub unsafe trait Mutex: Send + Sync + 'static {
     const INIT: Self;
     #[doc(hidden)]
@@ -51,11 +50,11 @@ unsafe impl<R: lock_api::RawMutex + Send + Sync + 'static> Mutex for lock_api::M
 
 cfg_if::cfg_if! {
     if #[cfg(loom)] {
-        pub type DefaultMutex = StdMutex;
+        pub type DefaultMutex = crate::loom::sync::Mutex<()>;
     } else if #[cfg(feature = "parking_lot")] {
         pub type DefaultMutex = parking_lot::Mutex<()>;
     } else if #[cfg(feature = "std")] {
-        pub type DefaultMutex = StdMutex;
+        pub type DefaultMutex = crate::loom::sync::Mutex<()>;
     } else if #[cfg(all(feature = "pthread", unix))] {
         pub type DefaultMutex = PthreadMutex;
     } else {

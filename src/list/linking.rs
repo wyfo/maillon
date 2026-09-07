@@ -20,6 +20,8 @@ pub trait Linking: private::Linking + Send + Sync + 'static {
     type PreferredDrainGetEnd: DrainGetEnd;
 }
 
+const PARKED_TAG: usize = 1;
+
 #[derive(Debug)]
 pub struct Eager<
     P: Parker = DefaultParker,
@@ -54,13 +56,18 @@ impl<P: Parker, const SPIN_BEFORE_PARK: usize> private::Linking for Eager<P, SPI
     ) {
         if P::NEVER_BLOCKS {
             unsafe { prev_next.as_ref() }.store(node.as_ptr(), Release);
-        } else if unsafe { !(prev_next.as_ref().swap(node.as_ptr(), Release)).is_null() } {
-            #[cold]
-            #[inline(never)]
-            fn unpark<P: Parker>(parker: &P) {
-                parker.unpark();
+        } else {
+            let tagged_parked_state = unsafe { prev_next.as_ref().swap(node.as_ptr(), Release) };
+            if !tagged_parked_state.is_null() {
+                #[cold]
+                #[inline(never)]
+                fn unpark<P: Parker>(parker: &P, tagged_parked_state: *mut ()) {
+                    unsafe {
+                        parker.unpark(tagged_parked_state.map_addr(|addr| addr & !PARKED_TAG));
+                    }
+                }
+                unpark(parker, tagged_parked_state.cast());
             }
-            unpark(parker);
         }
     }
     fn load_next(next: &Self::NextPtr) -> Option<NonNull<NodeLink<Self>>> {
@@ -94,13 +101,15 @@ impl<P: Parker, const SPIN_BEFORE_PARK: usize> private::Linking for Eager<P, SPI
                     return next;
                 }
             }
-            let parked: *mut NodeLink<Eager<P, SPIN_BEFORE_PARK>> = ptr::without_provenance_mut(1);
-            if let Err(next) = next.compare_exchange(ptr::null_mut(), parked, Relaxed, Acquire) {
+            let parked_state = parker.parked_state().map_addr(|addr| addr | PARKED_TAG);
+            if let Err(next) =
+                next.compare_exchange(ptr::null_mut(), parked_state.cast(), Relaxed, Acquire)
+            {
                 return unsafe { NonNull::new_unchecked(next) };
             }
             let load_next = || {
                 let next = next.load(Acquire);
-                (next != parked).then(|| unsafe { NonNull::new_unchecked(next) })
+                (next.addr() & PARKED_TAG == 0).then(|| unsafe { NonNull::new_unchecked(next) })
             };
             unsafe { parker.park_until(load_next) }
         }

@@ -1,7 +1,5 @@
 #[cfg(all(feature = "pthread", unix))]
 pub use super::pthread::PthreadCondVar;
-#[cfg(feature = "std")]
-pub use super::std::StdCondVar;
 use crate::sync::mutex::Mutex;
 
 // TODO every condvar related doc is generated for the moment

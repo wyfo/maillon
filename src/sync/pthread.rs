@@ -3,13 +3,26 @@ extern crate alloc;
 use alloc::boxed::Box;
 use core::{
     cell::UnsafeCell,
+    mem,
     mem::MaybeUninit,
     ptr,
     ptr::NonNull,
     sync::atomic::{AtomicPtr, Ordering::*},
 };
 
-use crate::sync::{condvar::CondVar, mutex::Mutex};
+use crate::{
+    sync::{condvar::CondVar, mutex::Mutex},
+    utils::defer,
+};
+
+// TODO abort bomb: `Mutex`/`CondVar` must not unwind, and every libc error path panics
+#[inline]
+fn abort_on_unwind<R>(f: impl FnOnce() -> R) -> R {
+    let bomb = defer(|| panic!("pthread call unwound"));
+    let res = f();
+    mem::forget(bomb);
+    res
+}
 
 fn unwrap(err_code: i32) {
     if err_code != 0 {
@@ -107,11 +120,11 @@ unsafe impl Mutex for PthreadMutex {
         Self: 'a;
 
     fn lock(&self) -> Self::Guard<'_> {
-        unwrap(unsafe { libc::pthread_mutex_lock(self.raw()) });
+        abort_on_unwind(|| unwrap(unsafe { libc::pthread_mutex_lock(self.raw()) }));
     }
 
     unsafe fn unlock<'a>(&'a self, _guard: Self::Guard<'a>) {
-        unwrap(unsafe { libc::pthread_mutex_unlock(self.raw()) });
+        abort_on_unwind(|| unwrap(unsafe { libc::pthread_mutex_unlock(self.raw()) }));
     }
 }
 
@@ -159,14 +172,14 @@ unsafe impl CondVar<PthreadMutex> for PthreadCondVar {
         mutex: &'a PthreadMutex,
         guard: <PthreadMutex as Mutex>::Guard<'a>,
     ) -> <PthreadMutex as Mutex>::Guard<'a> {
-        unwrap(unsafe { libc::pthread_cond_wait(self.raw(), mutex.raw()) });
+        abort_on_unwind(|| unwrap(unsafe { libc::pthread_cond_wait(self.raw(), mutex.raw()) }));
         guard
     }
 
     #[inline]
     fn notify_one(&self) {
-        unwrap(unsafe { libc::pthread_cond_signal(self.raw()) });
+        abort_on_unwind(|| unwrap(unsafe { libc::pthread_cond_signal(self.raw()) }));
     }
 }
 
-pub type PthreadParker = super::parker::CondVarParker<PthreadMutex, PthreadCondVar>;
+pub type PthreadParker = super::parker::CondVarParker<PthreadMutex, PthreadCondVar, true>;

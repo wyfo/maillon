@@ -1,4 +1,5 @@
 use core::{
+    mem::ManuallyDrop,
     pin::{Pin, pin},
     ptr,
     ptr::NonNull,
@@ -21,7 +22,7 @@ use crate::{
 pub struct Drain<'a, T, S: ListState = (), L: Linking = Eager, M: Mutex + 'a = DefaultMutex> {
     sentinel_node: NodeLink<L>,
     queue: &'a List<T, S, L, M>,
-    locked: Option<LockedList<'a, T, S, L, M>>,
+    locked: ManuallyDrop<LockedList<'a, T, S, L, M>>,
 }
 
 impl<'a, T, S: ListState, L: Linking, M: Mutex> Drain<'a, T, S, L, M> {
@@ -59,7 +60,7 @@ impl<'a, T, S: ListState, L: Linking, M: Mutex> Drain<'a, T, S, L, M> {
                 next: L::new_next(head),
             },
             queue: locked.queue,
-            locked: Some(locked),
+            locked: ManuallyDrop::new(locked),
         }
     }
 
@@ -83,19 +84,8 @@ impl<'a, T, S: ListState, L: Linking, M: Mutex> Drain<'a, T, S, L, M> {
         self.sentinel_node.prev.load(Relaxed).is_null()
     }
 
-    fn check_locked(&self) {
-        if self.locked.is_none() {
-            #[inline(always)]
-            fn panic_unlocked() -> ! {
-                panic!("list lock should be held");
-            }
-            panic_unlocked();
-        }
-    }
-
     #[inline]
     pub fn front(self: Pin<&mut Self>) -> Option<DrainFront<'a, '_, T, S, L, M>> {
-        self.check_locked();
         let this = unsafe { self.get_unchecked_mut() };
         Some(DrainFront {
             node: this.head()?,
@@ -105,7 +95,6 @@ impl<'a, T, S: ListState, L: Linking, M: Mutex> Drain<'a, T, S, L, M> {
 
     #[inline]
     pub fn back(self: Pin<&mut Self>) -> Option<DrainBack<'a, '_, T, S, L, M>> {
-        self.check_locked();
         let this = unsafe { self.get_unchecked_mut() };
         Some(DrainBack {
             node: this.tail()?,
@@ -114,7 +103,6 @@ impl<'a, T, S: ListState, L: Linking, M: Mutex> Drain<'a, T, S, L, M> {
     }
 
     pub fn execute_unlocked<F: FnOnce() -> R, R>(self: Pin<&mut Self>, f: F) -> R {
-        self.check_locked();
         let this = unsafe { self.get_unchecked_mut() };
         // TODO constructing the pointer from a const ref should matter
         let sentinel_ptr = ptr::from_ref(&this.sentinel_node).cast_mut();
@@ -123,9 +111,9 @@ impl<'a, T, S: ListState, L: Linking, M: Mutex> Drain<'a, T, S, L, M> {
             let tail = unsafe { this.tail().unwrap_unchecked() };
             unsafe { L::update_next(&tail.as_ref().next, NonNull::new(sentinel_ptr)) };
         }
-        drop(unsafe { this.locked.take().unwrap_unchecked() });
+        drop(unsafe { ManuallyDrop::take(&mut this.locked) });
         let _guard = defer(|| {
-            this.locked = Some(this.queue.lock());
+            this.locked = ManuallyDrop::new(this.queue.lock());
             if this.head().as_ptr() == sentinel_ptr {
                 debug_assert_eq!(this.head(), this.tail());
                 this.set_head(None);
@@ -193,7 +181,6 @@ impl<'a, T, S: ListState, L: Linking, M: Mutex> Drain<'a, T, S, L, M> {
     #[cold]
     #[inline(never)]
     fn unlink_all(&mut self) {
-        self.locked.get_or_insert_with(|| self.queue.lock());
         while let Some(node) = self.head()
             && node != (&self.sentinel_node).into()
         {
@@ -208,6 +195,7 @@ impl<'a, T, S: ListState, L: Linking, M: Mutex> Drop for Drain<'a, T, S, L, M> {
         if !self.is_empty() {
             self.unlink_all();
         }
+        unsafe { ManuallyDrop::drop(&mut self.locked) };
     }
 }
 
@@ -251,7 +239,7 @@ impl<T, S: ListState, L: Linking, M: Mutex> DrainFront<'_, '_, T, S, L, M> {
         // TODO there is at least one node so the tail cannot be null
         let tail = unsafe { self.drain.tail().unwrap_unchecked() };
         if tail != self.node {
-            let locked = unsafe { self.drain.locked.as_ref().unwrap_unchecked() };
+            let locked = &self.drain.locked;
             next = Some(locked.get_next(Some(node.into()), &node.next, tail));
         } else {
             self.drain.set_tail(None);
@@ -306,7 +294,7 @@ impl<T, S: ListState, L: Linking, M: Mutex> DrainBack<'_, '_, T, S, L, M> {
         let mut prev = None;
         if self.drain.head() != Some(self.node) {
             prev = Some(unsafe { NonNull::new_unchecked(node.prev.load(Relaxed)) });
-            let locked = unsafe { self.drain.locked.as_mut().unwrap_unchecked() };
+            let locked = &self.drain.locked;
             L::wait_next(unsafe { &prev.unwrap().as_ref().next }, &locked.parker);
         } else {
             // TODO setting the head is required as the head is checked in many places
@@ -329,7 +317,7 @@ node_ref!(
     self.node
 );
 
-pub trait DrainGetEnd {
+pub trait DrainGetEnd: Sized {
     type DrainEnd<'drain, 'a, T, S: ListState, L: Linking, M: Mutex>: DrainEnd<'drain, 'a, T, S, L, M>
     where
         'drain: 'a,
@@ -338,6 +326,23 @@ pub trait DrainGetEnd {
     fn get_end<'drain, 'a, T, S: ListState, L: Linking, M: Mutex>(
         drain: Pin<&'a mut Drain<'drain, T, S, L, M>>,
     ) -> Option<Self::DrainEnd<'drain, 'a, T, S, L, M>>;
+
+    fn for_each<
+        T,
+        S: ListState,
+        L: Linking,
+        M: Mutex,
+        H,
+        N: FnMut(&mut H, Pin<&mut T>) -> bool,
+        U: FnMut(&mut H),
+    >(
+        drain: Drain<'_, T, S, L, M>,
+        helper: &mut H,
+        on_next: N,
+        on_unlock: U,
+    ) {
+        drain.for_each_impl::<Self, _>(helper, on_next, on_unlock);
+    }
 }
 
 impl DrainGetEnd for GetFront {
