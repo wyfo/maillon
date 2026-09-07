@@ -14,7 +14,7 @@ use aiq::{
     node::{NodeData, NodeRef},
 };
 use linking::{EAGER, LAZY, LinkingMode};
-use loom::model;
+use loom::{model, thread};
 use rstest::rstest;
 
 mod linking;
@@ -116,5 +116,90 @@ fn drain_many<L: Linking, E: DrainGetEnd>(
         }
         assert!(end.is_none());
         assert!(nodes.iter().all(|node| !node.is_linked()));
+    });
+}
+
+#[rstest]
+fn cursor_empty<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+    model(|| {
+        let list = TestList::<L>::new();
+        let mut locked = list.lock();
+        let mut cursor = locked.cursor_front();
+        assert!(cursor.current().is_none());
+        cursor.move_next();
+        assert!(cursor.current().is_none());
+        cursor.move_prev();
+        assert!(cursor.current().is_none());
+        assert!(!cursor.remove_current());
+        let mut cursor = locked.cursor_back();
+        assert!(cursor.current().is_none());
+    });
+}
+
+#[rstest]
+fn cursor_move<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+    model(|| {
+        let list = TestList::<L>::new();
+        let _nodes: [_; 3] = array::from_fn(|i| push_node(&list, i + 1));
+        let mut locked = list.lock();
+        let mut cursor = locked.cursor_front();
+        for id in [1, 2, 3] {
+            assert_eq!(cursor.current().unwrap().0, id);
+            cursor.move_next();
+        }
+        assert!(cursor.current().is_none());
+        cursor.move_next();
+        assert_eq!(cursor.current().unwrap().0, 1);
+        cursor.move_prev();
+        assert!(cursor.current().is_none());
+        for id in [3, 2, 1] {
+            cursor.move_prev();
+            assert_eq!(cursor.current().unwrap().0, id);
+        }
+        cursor.move_prev();
+        assert!(cursor.current().is_none());
+    });
+}
+
+#[rstest]
+fn cursor_remove_current<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+    model(|| {
+        let list = TestList::<L>::new();
+        let nodes: [_; 3] = array::from_fn(|i| push_node(&list, i + 1));
+        let mut locked = list.lock();
+        let mut cursor = locked.cursor_front();
+        cursor.move_next();
+        assert!(cursor.remove_current());
+        assert!(!nodes[1].is_linked());
+        assert_eq!(cursor.current().unwrap().0, 3);
+        assert!(cursor.remove_current());
+        assert!(!nodes[2].is_linked());
+        assert!(cursor.current().is_none());
+        assert!(!cursor.remove_current());
+        cursor.move_next();
+        assert_eq!(cursor.current().unwrap().0, 1);
+        assert!(cursor.remove_current());
+        assert!(cursor.current().is_none());
+        drop(locked);
+        assert!(list.is_empty(Relaxed));
+        assert!(nodes.iter().all(|node| !node.is_linked()));
+    });
+}
+
+#[rstest]
+fn cursor_remove_concurrent_push<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+    model(|| {
+        let list = TestList::<L>::new();
+        let node = push_node(&list, 1);
+        thread::scope(|scope| {
+            scope.spawn(|| drop(push_node(&list, 2)));
+            scope.spawn(|| list.lock().cursor_back().remove_current());
+        });
+        let mut locked = list.lock();
+        let mut cursor = locked.cursor_front();
+        while cursor.remove_current() {}
+        drop(locked);
+        assert!(list.is_empty(Relaxed));
+        assert!(!node.is_linked());
     });
 }

@@ -12,10 +12,12 @@ use crate::{
     sync::mutex::{DefaultMutex, Mutex},
 };
 
+mod cursor;
 mod drain;
 mod linking;
 pub(crate) mod state;
 
+pub use cursor::*;
 pub use drain::*;
 pub use linking::*;
 pub use state::*;
@@ -284,6 +286,16 @@ impl<'a, T, S: ListState, L: Linking, M: Mutex> LockedList<'a, T, S, L, M> {
         Some(ListBack { node, locked: self })
     }
 
+    #[inline]
+    pub fn cursor_front(&mut self) -> ListCursor<'a, '_, T, S, L, M> {
+        ListCursor::new(self.front().map(|f| f.node), self)
+    }
+
+    #[inline]
+    pub fn cursor_back(&mut self) -> ListCursor<'a, '_, T, S, L, M> {
+        ListCursor::new(self.back().map(|t| t.node), self)
+    }
+
     pub fn unlock(self) -> &'a List<T, S, L, M> {
         self.queue
     }
@@ -296,12 +308,13 @@ impl<'a, T, S: ListState, L: Linking, M: Mutex> LockedList<'a, T, S, L, M> {
         new_state_if_last_node: F,
         is_front: bool,
         is_back: bool,
+        is_cursor: bool,
     ) -> (Option<NonNull<NodeLink<L>>>, Option<NonNull<NodeLink<L>>>) {
-        debug_assert!(!(is_front && is_back));
+        debug_assert!(is_front as usize + is_back as usize + is_cursor as usize <= 1);
         // TODO for self-removal with LazyDoubly/Singly, the tail may not have been acquired
         // (it was written with at least Release in push_back, but a fence(Acquire) would not
         // work as the task may have moved in another thread)
-        if L::PREV_OR_GET_NEXT_REQUIRES_TAIL_ACQUIRE && !is_front && !is_back {
+        if L::NODES_ACCESS_REQUIRES_TAIL_ACQUIRE && !is_front && !is_back && !is_cursor {
             self.tail();
         }
         let node = unsafe { node.as_ref() };
@@ -317,7 +330,9 @@ impl<'a, T, S: ListState, L: Linking, M: Mutex> LockedList<'a, T, S, L, M> {
         } else {
             unsafe { &prev.as_ref().next }
         };
-        if is_back {
+        // TODO a cursor node may come from the tail or a `prev` walk, so its incoming edge may
+        // still be unpublished, unlike a node returned by `get_next`
+        if is_back || is_cursor {
             L::wait_next(prev_next, &self.parker);
         }
         let mut next = if is_back {
@@ -335,7 +350,7 @@ impl<'a, T, S: ListState, L: Linking, M: Mutex> LockedList<'a, T, S, L, M> {
             };
             let node_ptr = NonNull::from(node).into_tail();
             if let Err(t) = (self.tail).compare_exchange(node_ptr, new_tail, Release, Relaxed) {
-                if is_back || L::PREV_OR_GET_NEXT_REQUIRES_TAIL_ACQUIRE {
+                if is_back || L::NODES_ACCESS_REQUIRES_TAIL_ACQUIRE {
                     fence(Acquire);
                 }
                 tail = Some(unsafe { t.ptr().unwrap_unchecked() });
@@ -416,7 +431,7 @@ impl<'locked, 'a, T, S: ListState, L: Linking, M: Mutex> ListEnd<'locked, 'a, T,
     #[inline]
     fn unlink<F: FnOnce() -> S>(self, new_state_if_last_node: F) -> Option<Self> {
         let (next, _) =
-            unsafe { (self.locked).remove(self.node, new_state_if_last_node, true, false) };
+            unsafe { (self.locked).remove(self.node, new_state_if_last_node, true, false, false) };
         Some(Self {
             node: next?,
             locked: self.locked,
@@ -468,7 +483,7 @@ impl<'locked, 'a, T, S: ListState, L: Linking, M: Mutex> ListEnd<'locked, 'a, T,
     #[inline]
     fn unlink<F: FnOnce() -> S>(self, new_state_if_last_node: F) -> Option<Self> {
         let (_, tail) =
-            unsafe { (self.locked).remove(self.node, new_state_if_last_node, false, true) };
+            unsafe { (self.locked).remove(self.node, new_state_if_last_node, false, true, false) };
         Some(Self {
             node: tail?,
             locked: self.locked,

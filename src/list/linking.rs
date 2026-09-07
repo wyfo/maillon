@@ -42,7 +42,7 @@ impl<P: Parker, const SPIN_BEFORE_PARK: usize> private::Linking for Eager<P, SPI
     fn new_parker() -> Self::Parker {
         P::new()
     }
-    const PREV_OR_GET_NEXT_REQUIRES_TAIL_ACQUIRE: bool = false;
+    const NODES_ACCESS_REQUIRES_TAIL_ACQUIRE: bool = false;
     fn push_back_set_order(set_order: Ordering) -> Ordering {
         match set_order {
             Relaxed | Acquire | Release | AcqRel => AcqRel,
@@ -144,7 +144,7 @@ impl private::Linking for Lazy {
     }
     #[cfg(loom)]
     fn new_parker() -> Self::Parker {}
-    const PREV_OR_GET_NEXT_REQUIRES_TAIL_ACQUIRE: bool = true;
+    const NODES_ACCESS_REQUIRES_TAIL_ACQUIRE: bool = true;
     fn push_back_set_order(set_order: Ordering) -> Ordering {
         match set_order {
             Relaxed | Release => Release,
@@ -233,7 +233,7 @@ mod private {
         /// publication rides the tail's release sequence and `get_next` walks `prev` backwards
         /// from `tail` — there, using an unacquired tail races the enqueuer's non-atomic write
         /// of its own `prev`.
-        const PREV_OR_GET_NEXT_REQUIRES_TAIL_ACQUIRE: bool;
+        const NODES_ACCESS_REQUIRES_TAIL_ACQUIRE: bool;
         /// The ordering of `push_back`'s tail CAS: the caller's request raised to this
         /// variant's floor. The argument is a *minimum*, so a request stronger than the floor
         /// on another axis is honoured on top of it.

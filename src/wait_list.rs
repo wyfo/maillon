@@ -167,7 +167,7 @@ impl<S: Synchronization, L: Linking, M: Mutex> WaitList<S, L, M> {
             if let Some(waker) = waiter.waker.take() {
                 wakers.push(waker);
             }
-            front = ListEnd::unlink(waiter, || STATE_OPEN);
+            front = waiter.unlink(|| STATE_OPEN);
             if wakers.is_full() {
                 let list = locked.unlock();
                 wakers.drain().for_each(Waker::wake);

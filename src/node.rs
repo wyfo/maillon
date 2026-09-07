@@ -48,6 +48,18 @@ impl<L: Linking> NodeLink<L> {
     pub(crate) fn is_linked(&self) -> bool {
         !self.prev.load(Acquire).is_null()
     }
+
+    // TODO takes `NonNull<Self>`, not `&self`: a reference would only carry provenance over the
+    // link, not over the whole `NodeInner`
+    #[inline(always)]
+    pub(crate) fn data_ptr<T>(node: NonNull<Self>) -> *mut T {
+        let inner = node.as_ptr().cast::<NodeInner<T, L>>();
+        #[cfg(loom)]
+        unsafe {
+            (*inner).access.set(());
+        }
+        unsafe { &raw mut (*inner).data }
+    }
 }
 
 #[repr(C)]
@@ -171,6 +183,17 @@ impl<LR: AsList<List<T, S, L, M>>, T: NodeData<LR, S, L, M>, S: ListState, L: Li
         NodeState::Unlinked(NodeUnlinked(this))
     }
 
+    #[inline]
+    fn unlink<F: FnOnce() -> S>(
+        &self,
+        locked: &mut LockedList<'_, T, S, L, M>,
+        new_state_if_last_node: F,
+    ) -> bool {
+        let (next, tail) =
+            unsafe { locked.remove(self.link(), new_state_if_last_node, false, false, false) };
+        next.is_none() && tail.is_none()
+    }
+
     #[cold]
     #[inline(never)]
     fn drop_linked(&mut self) {
@@ -179,8 +202,7 @@ impl<LR: AsList<List<T, S, L, M>>, T: NodeData<LR, S, L, M>, S: ListState, L: Li
         let mut state_updated = false;
         if self.is_linked() {
             let new_state = || node.data_mut().new_state_if_last_node_on_drop(&self.list);
-            let (next, tail) = unsafe { locked.remove(self.link(), new_state, false, false) };
-            state_updated = next.is_none() && tail.is_none();
+            state_updated = self.unlink(&mut locked, new_state);
         }
         (node.data_mut()).on_drop(&self.list, Some(locked), state_updated);
     }
@@ -374,7 +396,7 @@ impl<'a, LR: AsList<List<T, (), L, M>>, T: NodeData<LR, (), L, M>, L: Linking, M
         NodeUnlinked<'a, LR, T, (), L, M>,
         LockedList<'a, T, (), L, M>,
     ) {
-        unsafe { self.locked.remove(self.node.link(), || (), false, false) };
+        self.node.unlink(&mut self.locked, || ());
         self.node.maybe_linked.set(false);
         (NodeUnlinked(self.node), self.locked)
     }
@@ -393,11 +415,7 @@ impl<'a, LR: AsList<List<T, usize, L, M>>, T: NodeData<LR, usize, L, M>, L: Link
         LockedList<'a, T, usize, L, M>,
         bool,
     ) {
-        let (next, tail) = unsafe {
-            self.locked
-                .remove(self.node.link(), new_state_if_last_node, false, false)
-        };
-        let state_updated = next.is_none() && tail.is_none();
+        let state_updated = self.node.unlink(&mut self.locked, new_state_if_last_node);
         self.node.maybe_linked.set(false);
         (NodeUnlinked(self.node), self.locked, state_updated)
     }
@@ -429,25 +447,12 @@ node_ref!(
 pub(crate) mod private {
     use core::ptr::NonNull;
 
-    use crate::{
-        list::Linking,
-        node::{NodeInner, NodeLink},
-    };
+    use crate::{list::Linking, node::NodeLink};
 
     pub(crate) trait NodeRef {
         type Linking: Linking;
 
         fn node(&self) -> NonNull<NodeLink<Self::Linking>>;
-
-        #[inline(always)]
-        fn data_ptr<T>(&self) -> *mut T {
-            let inner = self.node().as_ptr().cast::<NodeInner<T, Self::Linking>>();
-            #[cfg(loom)]
-            unsafe {
-                (*inner).access.set(());
-            }
-            unsafe { &raw mut (*inner).data }
-        }
     }
 }
 
@@ -455,12 +460,12 @@ pub(crate) mod private {
 pub trait NodeRef<T>: private::NodeRef {
     #[inline]
     fn data(&self) -> &T {
-        unsafe { &*self.data_ptr::<T>() }
+        unsafe { &*NodeLink::data_ptr(self.node()) }
     }
 
     #[inline]
     fn data_mut(&mut self) -> Pin<&mut T> {
-        unsafe { Pin::new_unchecked(&mut *self.data_ptr::<T>()) }
+        unsafe { Pin::new_unchecked(&mut *NodeLink::data_ptr(self.node())) }
     }
 }
 
