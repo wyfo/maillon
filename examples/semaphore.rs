@@ -64,12 +64,9 @@ impl<L: Linking> Semaphore<L> {
         if permits == 0 {
             return;
         }
-        self.0.update_state_or_lock_with(
-            Release,
-            Relaxed,
-            |state| Self::check_add_permits(state, permits),
-            |locked| self.add_permits_locked(permits, locked),
-        );
+        let add_permits = |state| Self::check_add_permits(state, permits);
+        let fallback = |locked| self.add_permits_locked(permits, locked);
+        (self.0).update_state_or_lock_with(Release, Relaxed, add_permits, fallback);
     }
 
     fn add_permits_locked<'a>(
@@ -77,27 +74,22 @@ impl<L: Linking> Semaphore<L> {
         mut permits: usize,
         mut locked: LockedList<'a, Waiter, usize, L>,
     ) {
-        assert!(!self.is_closed());
+        assert!(!locked.is_empty(Relaxed));
         let mut wakers = ArrayVec::<Waker, 32>::new();
-        let mut front = locked.front();
-        while let Some(mut waiter) = front {
-            let unlink = if permits >= waiter.permits_remaining as _ {
-                permits -= waiter.permits_remaining as usize;
-                waiter.permits_remaining = 0;
-                wakers.push(waiter.waker.take().unwrap());
-                true
-            } else {
+        let mut waiter = locked.front().unwrap();
+        loop {
+            if waiter.permits_remaining as usize > permits {
                 waiter.permits_remaining -= permits as u32;
-                permits = 0;
-                false
-            };
-            if !unlink {
                 break;
             }
-            front = waiter.unlink(|| permits << PERMIT_SHIFT);
-            if permits == 0 {
-                break;
-            } else if wakers.is_full() {
+            permits -= waiter.permits_remaining as usize;
+            waiter.permits_remaining = 0;
+            wakers.push(waiter.waker.take().unwrap());
+            match waiter.unlink(|| permits << PERMIT_SHIFT) {
+                Some(w) if permits > 0 => waiter = w,
+                _ => break,
+            }
+            if wakers.is_full() {
                 drop(locked);
                 wakers.drain(..).for_each(Waker::wake);
                 match self.0.update_state_or_lock(Release, Relaxed, |state| {
@@ -106,7 +98,7 @@ impl<L: Linking> Semaphore<L> {
                     Ok(_) => return,
                     Err(l) => locked = l,
                 }
-                front = locked.front();
+                waiter = locked.front().unwrap();
             }
         }
         drop(locked);
@@ -231,7 +223,7 @@ as_list!(SemaphoreRef<'a, L: Linking>, List<Waiter, usize, L>, &self.0.0);
 
 impl<'a, L: Linking> NodeData<SemaphoreRef<'a, L>, usize, L> for Waiter {
     fn new_state_if_last_node_on_drop(self: Pin<&mut Self>, _list: &SemaphoreRef<'a, L>) -> usize {
-        (self.permits_total - self.permits_remaining) as _
+        ((self.permits_total - self.permits_remaining) as usize) << PERMIT_SHIFT
     }
 
     #[inline]
@@ -246,11 +238,20 @@ impl<'a, L: Linking> NodeData<SemaphoreRef<'a, L>, usize, L> for Waiter {
         }
         let acquired = self.permits_total - self.permits_remaining;
         if let Some(locked) = locked {
+            let add_permits = |state| Some(Semaphore::<L>::check_add_permits(state, acquired as _));
+            if acquired == 0 || (locked.try_update_state(Relaxed, Relaxed, add_permits)).is_ok() {
+                return;
+            };
             list.0.add_permits_locked(acquired as _, locked);
         } else {
             #[cold]
             fn add_permits_cold<L: Linking>(semaphore: &Semaphore<L>, permits: usize) {
-                semaphore.add_permits(permits);
+                if permits == 0 {
+                    return;
+                }
+                let add_permits = |state| Semaphore::<L>::check_add_permits(state, permits);
+                let fallback = |locked| semaphore.add_permits_locked(permits, locked);
+                (semaphore.0).update_state_or_lock_with(Relaxed, Relaxed, add_permits, fallback);
             }
             add_permits_cold(list.0, acquired as _);
         }
