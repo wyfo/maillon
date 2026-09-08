@@ -16,9 +16,6 @@ use crate::{
     },
 };
 
-type WaitListNode<'a, S, L, M, const WAKER_LIST_SIZE: usize> =
-    Node<WaitListRef<'a, S, L, M, WAKER_LIST_SIZE>>;
-
 node_wrapper! {
     pub struct Wait<
         'a,
@@ -26,16 +23,12 @@ node_wrapper! {
         L: Linking = Eager,
         M: Mutex = DefaultMutex,
         const WAKER_LIST_SIZE: usize = DEFAULT_WAKER_LIST_SIZE,
-    >(Node<WaitListRef<'a, S, L, M, WAKER_LIST_SIZE>>);
+    >(pub(super) Node<WaitListRef<'a, S, L, M, WAKER_LIST_SIZE>>);
 }
 
 impl<'a, S: Synchronization, L: Linking, M: Mutex, const WAKER_LIST_SIZE: usize>
     Wait<'a, S, L, M, WAKER_LIST_SIZE>
 {
-    pub(super) fn new(node: WaitListNode<'a, S, L, M, WAKER_LIST_SIZE>) -> Self {
-        Self(node)
-    }
-
     fn poll_wait(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,

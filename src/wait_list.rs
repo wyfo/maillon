@@ -209,7 +209,7 @@ impl<S: Synchronization, L: Linking, M: Mutex, const WAKER_LIST_SIZE: usize>
 
     #[inline]
     pub fn wait(&self) -> Wait<'_, S, L, M, WAKER_LIST_SIZE> {
-        Wait::new(Node::new(WaitListRef { wait_list: self }))
+        Wait(Node::new(WaitListRef { wait_list: self }))
     }
 
     #[inline]

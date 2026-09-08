@@ -13,7 +13,7 @@ mod utils;
 #[cfg(feature = "wait-list")]
 pub mod wait_list;
 
-pub use list::{List, ListRef};
+pub use list::{List, ListRef, LockedList};
 pub use node::{Node, NodeData, NodeState};
 #[cfg(feature = "wait-list")]
 pub use wait_list::WaitList;
