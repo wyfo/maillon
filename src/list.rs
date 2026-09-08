@@ -154,6 +154,20 @@ impl<T, L: Linking, M: Mutex> List<T, usize, L, M> {
     }
 
     #[inline]
+    pub fn get_state(&mut self) -> Option<usize> {
+        self.tail.load_mut().state()
+    }
+
+    #[inline]
+    pub fn try_set_state(&mut self, state: usize) -> bool {
+        if self.get_state().is_none() {
+            return false;
+        }
+        self.tail.store_mut(state.into_tail());
+        true
+    }
+
+    #[inline]
     pub fn compare_exchange_state(
         &self,
         current: usize,
