@@ -5,23 +5,25 @@ use core::{marker::PhantomData, pin::Pin, ptr, ptr::NonNull};
 #[cfg(not(nightly))]
 use crate::unsafe_pinned::UnsafePinned;
 use crate::{
-    List,
-    list::{AsList, Eager, Linking, ListState, LockedList},
+    list::{Linking, ListRef},
     loom::{
         cell::Cell,
         sync::atomic::{AtomicPtr, Ordering, Ordering::*},
     },
-    sync::mutex::{DefaultMutex, Mutex},
 };
 
-pub trait NodeData<LR, S: ListState = (), L: Linking = Eager, M: Mutex = DefaultMutex>:
-    Sized
-{
-    fn new_state_if_last_node_on_drop(self: Pin<&mut Self>, list: &LR) -> S;
+#[expect(type_alias_bounds)]
+type List<L: ListRef> = crate::list::List<L::NodeData, L::ListState, L::Linking, L::Mutex>;
+#[expect(type_alias_bounds)]
+type LockedList<'a, L: ListRef> =
+    crate::list::LockedList<'a, L::NodeData, L::ListState, L::Linking, L::Mutex>;
+
+pub trait NodeData<L: ListRef + ?Sized>: Sized {
+    fn new_state_if_last_node_on_drop(self: Pin<&mut Self>, list: &L) -> L::ListState;
     fn on_drop<'list>(
         self: Pin<&mut Self>,
-        list: &'list LR,
-        locked: Option<LockedList<'list, Self, S, L, M>>,
+        list: &'list L,
+        locked: Option<LockedList<'list, L>>,
         state_updated_on_unlink: bool,
     );
 }
@@ -74,63 +76,30 @@ pub(crate) struct NodeInner<T, L: Linking> {
     pub(crate) access: Cell<()>,
 }
 
-pub enum NodeState<
-    'a,
-    LR: AsList<List<T, S, L, M>>,
-    T: NodeData<LR, S, L, M>,
-    S: ListState,
-    L: Linking,
-    M: Mutex,
-> {
-    Unlinked(NodeUnlinked<'a, LR, T, S, L, M>),
-    Linked(NodeLinked<'a, LR, T, S, L, M>),
+pub enum NodeState<'a, L: ListRef> {
+    Unlinked(NodeUnlinked<'a, L>),
+    Linked(NodeLinked<'a, L>),
 }
 
-pub struct Node<
-    LR: AsList<List<T, S, L, M>>,
-    T: NodeData<LR, S, L, M>,
-    S: ListState = (),
-    L: Linking = Eager,
-    M: Mutex = DefaultMutex,
-> {
-    list: LR,
-    node: UnsafePinned<NodeInner<T, L>>,
-    maybe_linked: Cell<bool>,
-    _state: PhantomData<S>,
-    _sync: PhantomData<(L, M)>,
+pub struct Node<L: ListRef> {
+    list: L,
+    node: UnsafePinned<NodeInner<L::NodeData, L::Linking>>,
+    linked_list: Cell<Option<NonNull<List<L>>>>,
 }
 
-unsafe impl<
-    LR: AsList<List<T, S, L, M>> + Send,
-    T: NodeData<LR, S, L, M> + Send,
-    S: ListState,
-    L: Linking,
-    M: Mutex,
-> Send for Node<LR, T, S, L, M>
-{
-}
-unsafe impl<
-    LR: AsList<List<T, S, L, M>> + Sync,
-    T: NodeData<LR, S, L, M>,
-    S: ListState,
-    L: Linking,
-    M: Mutex,
-> Sync for Node<LR, T, S, L, M>
-{
-}
+unsafe impl<L: ListRef<NodeData: Send> + Send> Send for Node<L> {}
+unsafe impl<L: ListRef + Sync> Sync for Node<L> {}
 
-impl<LR: AsList<List<T, S, L, M>>, T: NodeData<LR, S, L, M>, S: ListState, L: Linking, M: Mutex>
-    Node<LR, T, S, L, M>
-{
-    pub fn new(list: LR) -> Self
+impl<L: ListRef> Node<L> {
+    pub fn new(list: L) -> Self
     where
-        T: Default,
+        L::NodeData: Default,
     {
         Self::with_data(list, Default::default())
     }
 
     #[cfg_attr(loom, const_fn::const_fn(cfg(false)))]
-    pub const fn with_data(list: LR, data: T) -> Self {
+    pub const fn with_data(list: L, data: L::NodeData) -> Self {
         Self {
             list,
             node: UnsafePinned::new(NodeInner {
@@ -139,18 +108,16 @@ impl<LR: AsList<List<T, S, L, M>>, T: NodeData<LR, S, L, M>, S: ListState, L: Li
                 #[cfg(loom)]
                 access: loom::cell::Cell::new(()),
             }),
-            maybe_linked: Cell::new(false),
-            _state: PhantomData,
-            _sync: PhantomData,
+            linked_list: Cell::new(None),
         }
     }
 
     #[inline(always)]
-    pub const fn list(&self) -> &LR {
+    pub const fn list(&self) -> &L {
         &self.list
     }
 
-    fn link(&self) -> NonNull<NodeLink<L>> {
+    fn link(&self) -> NonNull<NodeLink<L::Linking>> {
         NonNull::new(self.node.get()).unwrap().cast()
     }
 
@@ -160,7 +127,12 @@ impl<LR: AsList<List<T, S, L, M>>, T: NodeData<LR, S, L, M>, S: ListState, L: Li
     // Not the negation of is_linked, which is authoritative both ways.
     #[inline(always)]
     pub fn is_maybe_linked(&self) -> bool {
-        self.maybe_linked.get()
+        self.linked_list.get().is_some()
+    }
+
+    #[inline(always)]
+    fn linked_list(&self) -> Option<&List<L>> {
+        Some(unsafe { self.linked_list.get()?.as_ref() })
     }
 
     #[inline(always)]
@@ -169,24 +141,28 @@ impl<LR: AsList<List<T, S, L, M>>, T: NodeData<LR, S, L, M>, S: ListState, L: Li
     }
 
     #[inline(always)]
-    pub fn state(self: Pin<&mut Self>) -> NodeState<'_, LR, T, S, L, M> {
+    pub fn state(self: Pin<&mut Self>) -> NodeState<'_, L> {
         let this = self.into_ref().get_ref();
-        if this.is_maybe_linked() {
+        if let Some(list) = this.linked_list() {
             if this.is_linked() {
-                let locked = this.list.as_list().lock();
+                let locked = list.lock();
                 if this.is_linked() {
-                    return NodeState::Linked(NodeLinked { node: this, locked });
+                    return NodeState::Linked(NodeLinked {
+                        node: this,
+                        locked,
+                        _state: PhantomData,
+                    });
                 }
             }
-            this.maybe_linked.set(false);
+            this.linked_list.set(None);
         }
         NodeState::Unlinked(NodeUnlinked(this))
     }
 
     #[inline]
-    fn unlink<F: FnOnce() -> S>(
+    fn unlink<F: FnOnce() -> L::ListState>(
         &self,
-        locked: &mut LockedList<'_, T, S, L, M>,
+        locked: &mut LockedList<'_, L>,
         new_state_if_last_node: F,
     ) -> bool {
         let (next, tail) =
@@ -197,7 +173,8 @@ impl<LR: AsList<List<T, S, L, M>>, T: NodeData<LR, S, L, M>, S: ListState, L: Li
     #[cold]
     #[inline(never)]
     fn drop_linked(&mut self) {
-        let mut locked = self.list.as_list().lock();
+        let list = unsafe { self.linked_list().unwrap_unchecked() };
+        let mut locked = list.lock();
         let mut node = NodeDropped(self);
         let mut state_updated = false;
         if self.is_linked() {
@@ -208,9 +185,7 @@ impl<LR: AsList<List<T, S, L, M>>, T: NodeData<LR, S, L, M>, S: ListState, L: Li
     }
 }
 
-impl<LR: AsList<List<T, S, L, M>>, T: NodeData<LR, S, L, M>, S: ListState, L: Linking, M: Mutex>
-    Drop for Node<LR, T, S, L, M>
-{
+impl<L: ListRef> Drop for Node<L> {
     #[inline]
     fn drop(&mut self) {
         if self.is_maybe_linked() && self.is_linked() {
@@ -221,74 +196,38 @@ impl<LR: AsList<List<T, S, L, M>>, T: NodeData<LR, S, L, M>, S: ListState, L: Li
     }
 }
 
-pub struct NodeUnlinked<
-    'a,
-    LR: AsList<List<T, S, L, M>>,
-    T: NodeData<LR, S, L, M>,
-    S: ListState = (),
-    L: Linking = Eager,
-    M: Mutex = DefaultMutex,
->(&'a Node<LR, T, S, L, M>);
+pub struct NodeUnlinked<'a, L: ListRef>(&'a Node<L>);
 
-unsafe impl<
-    LR: AsList<List<T, S, L, M>> + Sync,
-    T: NodeData<LR, S, L, M> + Send,
-    S: ListState,
-    L: Linking,
-    M: Mutex,
-> Send for NodeUnlinked<'_, LR, T, S, L, M>
-{
-}
-unsafe impl<
-    LR: AsList<List<T, S, L, M>> + Sync,
-    T: NodeData<LR, S, L, M> + Sync,
-    S: ListState,
-    L: Linking,
-    M: Mutex,
-> Sync for NodeUnlinked<'_, LR, T, S, L, M>
-{
-}
+unsafe impl<L: ListRef<NodeData: Send> + Sync> Send for NodeUnlinked<'_, L> {}
+unsafe impl<L: ListRef<NodeData: Sync> + Sync> Sync for NodeUnlinked<'_, L> {}
 
 node_ref!(
-    NodeUnlinked<
-        'a,
-        LR: AsList<List<T, S, L, M>>,
-        T: NodeData<LR, S, L, M>,
-        S: ListState,
-        L: Linking,
-        M: Mutex,
-    >,
-    T,
-    L,
+    NodeUnlinked<'a, L: ListRef>,
+    L::NodeData,
+    L::Linking,
     self.0.link()
 );
 
-impl<'a, LR: AsList<List<T, S, L, M>>, T: NodeData<LR, S, L, M>, S: ListState, L: Linking, M: Mutex>
-    NodeUnlinked<'a, LR, T, S, L, M>
-{
+impl<'a, L: ListRef> NodeUnlinked<'a, L> {
     #[inline]
-    pub fn list(&self) -> &'a LR {
+    pub fn list(&self) -> &'a L {
         self.0.list()
     }
 }
 
-impl<'a, LR: AsList<List<T, (), L, M>>, T: NodeData<LR, (), L, M>, L: Linking, M: Mutex>
-    NodeUnlinked<'a, LR, T, (), L, M>
-{
+impl<'a, L: ListRef<ListState = ()>> NodeUnlinked<'a, L> {
     #[inline]
     pub fn push_back(self, order: Ordering) {
         let list = self.list().as_list();
         let link = self.0.link();
         let f = None::<fn(()) -> Option<()>>;
-        let on_pushed = || self.0.maybe_linked.set(true);
+        let on_pushed = || self.0.linked_list.set(Some(NonNull::from(list)));
         let _ = unsafe { list.push_back(link, order, Relaxed, f, |_| true, on_pushed) };
     }
 }
 
-impl<'a, LR: AsList<List<T, usize, L, M>>, T: NodeData<LR, usize, L, M>, L: Linking, M: Mutex>
-    NodeUnlinked<'a, LR, T, usize, L, M>
-{
-    pub fn try_push_back_with<P: FnMut(Pin<&mut T>, Option<usize>) -> bool>(
+impl<'a, L: ListRef<ListState = usize>> NodeUnlinked<'a, L> {
+    pub fn try_push_back_with<P: FnMut(Pin<&mut L::NodeData>, Option<usize>) -> bool>(
         self,
         set_order: Ordering,
         fetch_order: Ordering,
@@ -298,15 +237,15 @@ impl<'a, LR: AsList<List<T, usize, L, M>>, T: NodeData<LR, usize, L, M>, L: Link
         let link = self.0.link();
         let f = None::<fn(usize) -> Option<usize>>;
         let on_push_back = |state| on_push(Self(self.0).data_mut(), state);
-        let on_pushed = || self.0.maybe_linked.set(true);
+        let on_pushed = || self.0.linked_list.set(Some(NonNull::from(list)));
         unsafe { list.push_back(link, set_order, fetch_order, f, on_push_back, on_pushed) }
             .unwrap_err()
     }
 
     pub fn try_update_state_or_push_back_with<
-        F: FnMut(Pin<&mut T>, usize) -> Option<usize>,
-        P: FnMut(Pin<&mut T>, Option<usize>) -> bool,
-        U: FnOnce(Pin<&mut T>, usize),
+        F: FnMut(Pin<&mut L::NodeData>, usize) -> Option<usize>,
+        P: FnMut(Pin<&mut L::NodeData>, Option<usize>) -> bool,
+        U: FnOnce(Pin<&mut L::NodeData>, usize),
     >(
         mut self,
         set_order: Ordering,
@@ -319,128 +258,68 @@ impl<'a, LR: AsList<List<T, usize, L, M>>, T: NodeData<LR, usize, L, M>, L: Link
         let link = self.0.link();
         let f = |state| f(Self(self.0).data_mut(), state);
         let on_push = |state| on_push(Self(self.0).data_mut(), state);
-        let on_pushed = || self.0.maybe_linked.set(true);
+        let on_pushed = || self.0.linked_list.set(Some(NonNull::from(list)));
         unsafe { list.push_back(link, set_order, fetch_order, Some(f), on_push, on_pushed) }
             .inspect(|&state| on_state_updated(self.data_mut(), state))
     }
 }
 
-pub struct NodeLinked<
-    'a,
-    LR: AsList<List<T, S, L, M>>,
-    T: NodeData<LR, S, L, M>,
-    S: ListState = (),
-    L: Linking = Eager,
-    M: Mutex = DefaultMutex,
-> {
-    node: &'a Node<LR, T, S, L, M>,
-    locked: LockedList<'a, T, S, L, M>,
+pub struct NodeLinked<'a, L: ListRef, S = <L as ListRef>::ListState> {
+    node: &'a Node<L>,
+    locked: LockedList<'a, L>,
+    _state: PhantomData<S>,
 }
 
-unsafe impl<
-    'a,
-    LR: AsList<List<T, S, L, M>> + Sync,
-    T: NodeData<LR, S, L, M> + Send,
-    S: ListState,
-    L: Linking,
-    M: Mutex,
-> Send for NodeLinked<'a, LR, T, S, L, M>
-where
-    LockedList<'a, T, S, L, M>: Send,
+unsafe impl<'a, L: ListRef<NodeData: Send> + Sync> Send for NodeLinked<'a, L> where
+    LockedList<'a, L>: Send
 {
 }
-unsafe impl<
-    'a,
-    LR: AsList<List<T, S, L, M>> + Sync,
-    T: NodeData<LR, S, L, M> + Sync,
-    S: ListState,
-    L: Linking,
-    M: Mutex,
-> Sync for NodeLinked<'a, LR, T, S, L, M>
-where
-    LockedList<'a, T, S, L, M>: Sync,
+unsafe impl<'a, L: ListRef<NodeData: Sync> + Sync> Sync for NodeLinked<'a, L> where
+    LockedList<'a, L>: Sync
 {
 }
 
 node_ref!(
-    NodeLinked<
-        'a,
-        LR: AsList<List<T, S, L, M>>,
-        T: NodeData<LR, S, L, M>,
-        S: ListState,
-        L: Linking,
-        M: Mutex,
-    >,
-    T,
-    L,
+    NodeLinked<'a, L: ListRef>,
+    L::NodeData,
+    L::Linking,
     self.node.link()
 );
 
-impl<'a, LR: AsList<List<T, S, L, M>>, T: NodeData<LR, S, L, M>, S: ListState, L: Linking, M: Mutex>
-    NodeLinked<'a, LR, T, S, L, M>
-{
+impl<'a, L: ListRef> NodeLinked<'a, L> {
     #[inline]
-    pub fn list(&self) -> &'a LR {
+    pub fn list(&self) -> &'a L {
         self.node.list()
     }
 }
 
-impl<'a, LR: AsList<List<T, (), L, M>>, T: NodeData<LR, (), L, M>, L: Linking, M: Mutex>
-    NodeLinked<'a, LR, T, (), L, M>
-{
+impl<'a, L: ListRef<ListState = ()>> NodeLinked<'a, L, ()> {
     #[inline]
-    #[allow(clippy::type_complexity)]
-    pub fn unlink(
-        mut self,
-    ) -> (
-        NodeUnlinked<'a, LR, T, (), L, M>,
-        LockedList<'a, T, (), L, M>,
-    ) {
+    pub fn unlink(mut self) -> (NodeUnlinked<'a, L>, LockedList<'a, L>) {
         self.node.unlink(&mut self.locked, || ());
-        self.node.maybe_linked.set(false);
+        self.node.linked_list.set(None);
         (NodeUnlinked(self.node), self.locked)
     }
 }
 
-impl<'a, LR: AsList<List<T, usize, L, M>>, T: NodeData<LR, usize, L, M>, L: Linking, M: Mutex>
-    NodeLinked<'a, LR, T, usize, L, M>
-{
+impl<'a, L: ListRef<ListState = usize>> NodeLinked<'a, L, usize> {
     #[inline]
-    #[allow(clippy::type_complexity)]
-    pub fn unlink<F: FnOnce() -> usize>(
+    pub fn unlink<F: FnOnce() -> L::ListState>(
         mut self,
         new_state_if_last_node: F,
-    ) -> (
-        NodeUnlinked<'a, LR, T, usize, L, M>,
-        LockedList<'a, T, usize, L, M>,
-        bool,
-    ) {
+    ) -> (NodeUnlinked<'a, L>, LockedList<'a, L>, bool) {
         let state_updated = self.node.unlink(&mut self.locked, new_state_if_last_node);
-        self.node.maybe_linked.set(false);
+        self.node.linked_list.set(None);
         (NodeUnlinked(self.node), self.locked, state_updated)
     }
 }
 
-struct NodeDropped<
-    'a,
-    LR: AsList<List<T, S, L, M>>,
-    T: NodeData<LR, S, L, M>,
-    S: ListState,
-    L: Linking,
-    M: Mutex,
->(&'a Node<LR, T, S, L, M>);
+struct NodeDropped<'a, L: ListRef>(&'a Node<L>);
 
 node_ref!(
-    NodeDropped<
-        'a,
-        LR: AsList<List<T, S, L, M>>,
-        T: NodeData<LR, S, L, M>,
-        S: ListState,
-        L: Linking,
-        M: Mutex,
-    >,
-    T,
-    L,
+    NodeDropped<'a, L: ListRef>,
+    L::NodeData,
+    L::Linking,
     self.0.link()
 );
 

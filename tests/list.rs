@@ -21,9 +21,9 @@ mod linking;
 mod loom;
 
 type TestList<L> = List<TestData, (), L>;
-type TestNode<'a, L> = Node<&'a TestList<L>, TestData, (), L>;
+type TestNode<'a, L> = Node<&'a TestList<L>>;
 struct TestData(usize);
-impl<'a, L: Linking> NodeData<&'a TestList<L>, (), L> for TestData {
+impl<'a, L: Linking> NodeData<&'a TestList<L>> for TestData {
     fn new_state_if_last_node_on_drop(self: Pin<&mut Self>, _list: &&'a TestList<L>) {}
     fn on_drop<'list>(
         self: Pin<&mut Self>,

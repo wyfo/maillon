@@ -11,9 +11,8 @@ use std::{
 };
 
 use aiq::{
-    List, Node, NodeState, as_list,
+    List, ListRef, Node, NodeData, NodeState,
     list::{Eager, Linking, LockedList},
-    node::NodeData,
     sync::mutex::DefaultMutex,
 };
 use arrayvec::ArrayVec;
@@ -219,9 +218,18 @@ impl Waiter {
 }
 
 struct SemaphoreRef<'a, L: Linking>(&'a Semaphore<L>);
-as_list!(SemaphoreRef<'a, L: Linking>, List<Waiter, usize, L>, &self.0.0);
+impl<L: Linking> ListRef for SemaphoreRef<'_, L> {
+    type NodeData = Waiter;
+    type ListState = usize;
+    type Linking = L;
+    type Mutex = DefaultMutex;
 
-impl<'a, L: Linking> NodeData<SemaphoreRef<'a, L>, usize, L> for Waiter {
+    fn as_list(&self) -> &List<Waiter, usize, L> {
+        &self.0.0
+    }
+}
+
+impl<'a, L: Linking> NodeData<SemaphoreRef<'a, L>> for Waiter {
     fn new_state_if_last_node_on_drop(self: Pin<&mut Self>, _list: &SemaphoreRef<'a, L>) -> usize {
         ((self.permits_total - self.permits_remaining) as usize) << PERMIT_SHIFT
     }
@@ -269,7 +277,7 @@ pub enum TryAcquireError {
 pin_project! {
     struct AcquireFuture<'a, L: Linking> {
         #[pin]
-        node: Node<SemaphoreRef<'a, L>, Waiter, usize, L>
+        node: Node<SemaphoreRef<'a, L>>
     }
 }
 

@@ -1,6 +1,3 @@
-#[cfg(feature = "alloc")]
-extern crate alloc;
-
 use core::{marker::PhantomData, mem::ManuallyDrop, ops::Deref, ptr, ptr::NonNull};
 
 use crate::{
@@ -8,7 +5,7 @@ use crate::{
         AtomicPtrExt,
         sync::atomic::{AtomicPtr, Ordering, Ordering::*, fence},
     },
-    node::{NodeLink, node_ref},
+    node::{NodeData, NodeLink, NodeRef, node_ref},
     sync::mutex::{DefaultMutex, Mutex},
 };
 
@@ -21,8 +18,6 @@ pub use cursor::*;
 pub use drain::*;
 pub use linking::*;
 pub use state::*;
-
-use crate::node::NodeRef;
 
 type MutexGuard<'a, M> = <M as Mutex>::Guard<'a>;
 
@@ -248,6 +243,37 @@ impl<T, L: Linking, M: Mutex> List<T, usize, L, M> {
 impl<T, S: ListState, L: Linking, M: Mutex> Default for List<T, S, L, M> {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+pub trait ListRef {
+    type NodeData: NodeData<Self>;
+    type ListState: ListState;
+    type Linking: Linking;
+    type Mutex: Mutex;
+
+    fn as_list(&self) -> &List<Self::NodeData, Self::ListState, Self::Linking, Self::Mutex>;
+}
+
+impl<T: NodeData<Self>, S: ListState, L: Linking, M: Mutex> ListRef for List<T, S, L, M> {
+    type NodeData = T;
+    type ListState = S;
+    type Linking = L;
+    type Mutex = M;
+
+    fn as_list(&self) -> &Self {
+        self
+    }
+}
+
+impl<T: NodeData<Self>, S: ListState, L: Linking, M: Mutex> ListRef for &List<T, S, L, M> {
+    type NodeData = T;
+    type ListState = S;
+    type Linking = L;
+    type Mutex = M;
+
+    fn as_list(&self) -> &List<T, S, L, M> {
+        self
     }
 }
 
@@ -552,44 +578,4 @@ impl ListGetEnd for GetBack {
     ) -> Option<Self::ListEnd<'locked, 'a, T, S, L, M>> {
         locked.back()
     }
-}
-
-/// # Safety
-///
-/// For a given instance, [`Self::as_list`] must always return a reference to the same list.
-pub unsafe trait AsList<L> {
-    fn as_list(&self) -> &L;
-}
-
-unsafe impl<T, S: ListState, L: Linking, M: Mutex> AsList<Self> for List<T, S, L, M> {
-    fn as_list(&self) -> &Self {
-        self
-    }
-}
-
-unsafe impl<L, R: AsList<L>> AsList<L> for &R {
-    fn as_list(&self) -> &L {
-        (**self).as_list()
-    }
-}
-
-#[cfg(feature = "alloc")]
-unsafe impl<L, R: AsList<L>> AsList<L> for alloc::sync::Arc<R> {
-    fn as_list(&self) -> &L {
-        (**self).as_list()
-    }
-}
-
-#[macro_export]
-macro_rules! as_list {
-    ($ty:ident$(<$($lf:lifetime)? $(,)? $($arg:ident $(: $bound:path)?),* $(,)?>)?, $list:ty, &self $(.$field:tt)+ $(,)?) => {
-        unsafe impl $(<
-            $($lf,)?
-            $($arg $(: $bound)?,)*
-        >)? $crate::list::AsList<$list> for $ty $(<$($lf,)? $($arg,)*>)? {
-            fn as_list(&self) -> &$list {
-                &self $(.$field)+
-            }
-        }
-    };
 }

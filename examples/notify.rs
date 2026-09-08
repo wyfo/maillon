@@ -13,9 +13,9 @@ use std::{
 };
 
 use aiq::{
-    List, Node, NodeState, as_list,
+    List, ListRef, Node, NodeData, NodeState,
     list::{Eager, GetBack, GetFront, Linking, ListEnd, ListGetEnd, LockedList},
-    node::{NodeData, NodeRef},
+    node::NodeRef,
     sync::mutex::DefaultMutex,
 };
 use arrayvec::ArrayVec;
@@ -199,9 +199,18 @@ impl Waiter {
 }
 
 struct NotifyRef<N, L: Linking>(N, PhantomData<L>);
-as_list!(NotifyRef<N: Deref<Target=Notify<L>>, L: Linking>, List<Waiter, usize, L>, &self.0.list);
+impl<N: Deref<Target = Notify<L>>, L: Linking> ListRef for NotifyRef<N, L> {
+    type NodeData = Waiter;
+    type ListState = usize;
+    type Linking = L;
+    type Mutex = DefaultMutex;
 
-impl<N: Deref<Target = Notify<L>>, L: Linking> NodeData<NotifyRef<N, L>, usize, L> for Waiter {
+    fn as_list(&self) -> &List<Waiter, usize, L> {
+        &self.0.list
+    }
+}
+
+impl<N: Deref<Target = Notify<L>>, L: Linking> NodeData<NotifyRef<N, L>> for Waiter {
     fn new_state_if_last_node_on_drop(self: Pin<&mut Self>, list: &NotifyRef<N, L>) -> usize {
         list.0.generation_backup.load(Relaxed)
     }
@@ -250,7 +259,7 @@ impl<N: Deref<Target = Notify<L>>, L: Linking> NodeData<NotifyRef<N, L>, usize, 
 pin_project! {
     struct NotifiedInner<N: Deref<Target = Notify<L>>, L: Linking> {
         #[pin]
-        node: Node<NotifyRef<N, L>, Waiter, usize, L>,
+        node: Node<NotifyRef<N, L>>,
     }
 }
 

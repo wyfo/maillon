@@ -21,12 +21,11 @@ rust-version = "1.95"
 
 [features]
 default = ["std", "wait-list"]
-alloc = []
 atomic-wait = ["dep:atomic-wait"]
 lock_api = ["dep:lock_api"]
 parking_lot = ["dep:parking_lot", "dep:parking_lot_core", "lock_api"]
-pthread = ["dep:libc", "alloc"]
-std = ["alloc"]
+pthread = ["dep:libc"]
+std = []
 wait-list = []
 
 [dependencies]
