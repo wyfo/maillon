@@ -13,10 +13,10 @@ use std::{
 use aiq::{
     List, ListRef, Node, NodeData, NodeState,
     list::{Eager, Linking, LockedList},
+    node_wrapper,
     sync::mutex::DefaultMutex,
 };
 use arrayvec::ArrayVec;
-use pin_project_lite::pin_project;
 
 const CLOSED: usize = 1;
 const PERMIT_SHIFT: usize = 1;
@@ -126,8 +126,7 @@ impl<L: Linking> Semaphore<L> {
     pub async fn acquire_many(&self, permits: u32) -> Result<SemaphorePermit<'_, L>, AcquireError> {
         let acquire = |state| Self::check_acquire_permits(state, permits as _);
         if self.0.try_update_state(Acquire, Relaxed, acquire).is_err() {
-            let node = Node::with_data(SemaphoreRef(self), Waiter::new(permits));
-            AcquireFuture { node }.await?;
+            AcquireFuture(Node::with_data(SemaphoreRef(self), Waiter::new(permits))).await?;
         }
         Ok(SemaphorePermit { sem: self, permits })
     }
@@ -274,19 +273,16 @@ pub enum TryAcquireError {
     NoPermits,
 }
 
-pin_project! {
-    struct AcquireFuture<'a, L: Linking> {
-        #[pin]
-        node: Node<SemaphoreRef<'a, L>>
-    }
+node_wrapper! {
+    struct AcquireFuture<'a, L: Linking>(Node<SemaphoreRef<'a, L>>);
 }
 
-impl<'a, L: Linking> Future for AcquireFuture<'a, L> {
+impl<L: Linking> Future for AcquireFuture<'_, L> {
     type Output = Result<(), AcquireError>;
 
     #[cold]
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        match self.project().node.state() {
+        match self.node_mut().state() {
             NodeState::Unlinked(node) => {
                 if node.permits_remaining == 0 {
                     return Poll::Ready(Ok(()));

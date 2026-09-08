@@ -5,7 +5,7 @@ use core::{marker::PhantomData, pin::Pin, ptr, ptr::NonNull};
 #[cfg(not(nightly))]
 use crate::unsafe_pinned::UnsafePinned;
 use crate::{
-    list::{Linking, ListRef},
+    list::{Linking, ListRef, PrivateLinking},
     loom::{
         cell::Cell,
         sync::atomic::{AtomicPtr, Ordering, Ordering::*},
@@ -386,5 +386,3 @@ macro_rules! node_ref {
     };
 }
 pub(crate) use node_ref;
-
-use crate::list::PrivateLinking;

@@ -8,6 +8,7 @@ use crate::{
     Node, NodeState,
     list::{Eager, Linking},
     loom::sync::atomic::fence,
+    node_wrapper,
     sync::mutex::{DefaultMutex, Mutex},
     wait_list::{
         ClosedError, DEFAULT_WAKER_LIST_SIZE, STATE_CLOSED, STATE_OPEN, WaitListRef,
@@ -18,25 +19,21 @@ use crate::{
 type WaitListNode<'a, S, L, M, const WAKER_LIST_SIZE: usize> =
     Node<WaitListRef<'a, S, L, M, WAKER_LIST_SIZE>>;
 
-pub struct Wait<
-    'a,
-    S: Synchronization = Synchronized,
-    L: Linking = Eager,
-    M: Mutex = DefaultMutex,
-    const WAKER_LIST_SIZE: usize = DEFAULT_WAKER_LIST_SIZE,
-> {
-    node: WaitListNode<'a, S, L, M, WAKER_LIST_SIZE>,
+node_wrapper! {
+    pub struct Wait<
+        'a,
+        S: Synchronization = Synchronized,
+        L: Linking = Eager,
+        M: Mutex = DefaultMutex,
+        const WAKER_LIST_SIZE: usize = DEFAULT_WAKER_LIST_SIZE,
+    >(Node<WaitListRef<'a, S, L, M, WAKER_LIST_SIZE>>);
 }
 
 impl<'a, S: Synchronization, L: Linking, M: Mutex, const WAKER_LIST_SIZE: usize>
     Wait<'a, S, L, M, WAKER_LIST_SIZE>
 {
     pub(super) fn new(node: WaitListNode<'a, S, L, M, WAKER_LIST_SIZE>) -> Self {
-        Self { node }
-    }
-
-    fn project(self: Pin<&mut Self>) -> Pin<&mut WaitListNode<'a, S, L, M, WAKER_LIST_SIZE>> {
-        unsafe { self.map_unchecked_mut(|this| &mut this.node) }
+        Self(node)
     }
 
     fn poll_wait(
@@ -44,7 +41,7 @@ impl<'a, S: Synchronization, L: Linking, M: Mutex, const WAKER_LIST_SIZE: usize>
         cx: &mut Context<'_>,
         ignore_notification: bool,
     ) -> Poll<Result<(), ClosedError>> {
-        match self.project().state() {
+        match self.node_mut().state() {
             NodeState::Unlinked(mut node) => {
                 if node.notification.take().is_some() && !ignore_notification {
                     return Poll::Ready(Ok(()));
@@ -81,7 +78,7 @@ impl<'a, S: Synchronization, L: Linking, M: Mutex, const WAKER_LIST_SIZE: usize>
     #[cold]
     #[inline(never)]
     fn unregister(self: Pin<&mut Self>) {
-        match self.project().state() {
+        match self.node_mut().state() {
             NodeState::Unlinked(mut node) => {
                 node.notification.take();
             }
@@ -108,6 +105,8 @@ impl<S: Synchronization, L: Linking, M: Mutex, const WAKER_LIST_SIZE: usize> Fut
 ///
 /// Typically implemented by `bool` and `Option<T>`. When met, it provides an output that can be
 /// returned by `wait_until`.
+///
+/// [`WaitList::wait_until`]: crate::WaitList::wait_until
 pub trait WakeCondition {
     /// Wake condition output when met.
     type Output;
@@ -200,7 +199,7 @@ impl<
         let (wait, wake_condition) = self.as_mut().project();
         match (wake_condition)(false).try_into_output() {
             Some(res) => {
-                if wait.node.is_maybe_linked() {
+                if wait.node().is_maybe_linked() {
                     wait.unregister();
                 }
                 Poll::Ready(Ok(res))

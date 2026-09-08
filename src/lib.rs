@@ -4,6 +4,7 @@
 
 pub mod list;
 mod loom;
+mod macros;
 pub mod node;
 pub mod sync;
 #[cfg(not(nightly))]

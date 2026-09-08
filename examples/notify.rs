@@ -16,12 +16,12 @@ use aiq::{
     List, ListRef, Node, NodeData, NodeState,
     list::{Eager, GetBack, GetFront, Linking, ListEnd, ListGetEnd, LockedList},
     node::NodeRef,
+    node_wrapper,
     sync::mutex::DefaultMutex,
 };
 use arrayvec::ArrayVec;
 #[cfg(loom)]
 use loom::sync::atomic::{AtomicUsize, fence};
-use pin_project_lite::pin_project;
 
 const STATE_NOTIFIED: usize = 1;
 const GENERATION_INCR: usize = 2;
@@ -162,21 +162,14 @@ impl<L: Linking> Notify<L> {
 
     #[inline]
     pub fn notified(&self) -> Notified<'_, L> {
-        Notified {
-            inner: NotifiedInner {
-                node: Node::with_data(NotifyRef(self, PhantomData), Waiter::new(self.generation())),
-            },
-        }
+        let data = Waiter::new(self.generation());
+        Notified(Node::with_data(NotifyRef(self, PhantomData), data))
     }
 
     #[inline]
     pub fn notified_owned(self: Arc<Self>) -> OwnedNotified<L> {
-        let generation = self.generation();
-        OwnedNotified {
-            inner: NotifiedInner {
-                node: Node::with_data(NotifyRef(self, PhantomData), Waiter::new(generation)),
-            },
-        }
+        let data = Waiter::new(self.generation());
+        OwnedNotified(Node::with_data(NotifyRef(self, PhantomData), data))
     }
 }
 
@@ -256,87 +249,77 @@ impl<N: Deref<Target = Notify<L>>, L: Linking> NodeData<NotifyRef<N, L>> for Wai
     }
 }
 
-pin_project! {
-    struct NotifiedInner<N: Deref<Target = Notify<L>>, L: Linking> {
-        #[pin]
-        node: Node<NotifyRef<N, L>>,
-    }
-}
-
-impl<N: Deref<Target = Notify<L>>, L: Linking> NotifiedInner<N, L> {
-    #[inline(always)]
-    fn poll_notified(self: Pin<&mut Self>, cx: Option<&mut Context<'_>>) -> Poll<()> {
-        match self.project().node.state() {
-            NodeState::Unlinked(mut node) => {
-                if node.notification.is_some() {
-                    node.completed = true;
-                }
-                if node.completed {
-                    return Poll::Ready(());
-                }
-                let notify = &*node.list().0;
-                match node.try_update_state_or_push_back_with(
-                    AcqRel,  // TODO Acquire for successful notification, Release for generation_backup CAS
-                    Acquire, // TODO Acquire for generation
-                    |waiter, state| {
-                        (state == waiter.generation | STATE_NOTIFIED)
-                            .then_some(state & !STATE_NOTIFIED)
-                    },
-                    |mut waiter, _| waiter.completed = true,
-                    |mut waiter, state| {
-                        let completed = match state {
-                            Some(state) => {
-                                // TODO this assertion is just the negation of the condition above
-                                debug_assert!(
-                                    state & STATE_NOTIFIED == 0
-                                        || state & !STATE_NOTIFIED != waiter.generation
-                                );
-                                waiter.generation != state || !notify.store_generation_backup(state)
-                            }
-                            None => waiter.generation != notify.generation_backup.load(Relaxed),
-                        };
-                        if completed {
-                            waiter.completed = true;
-                            return false;
-                        }
-                        if let Some(cx) = cx.as_ref() {
-                            waiter.waker.get_or_insert_with(|| cx.waker().clone());
-                        }
-                        true
-                    },
-                ) {
-                    Ok(_) | Err(false) => Poll::Ready(()),
-                    Err(true) => Poll::Pending,
-                }
+#[inline(always)]
+fn poll_notified<N: Deref<Target = Notify<L>>, L: Linking>(
+    node: Pin<&mut Node<NotifyRef<N, L>>>,
+    cx: Option<&mut Context<'_>>,
+) -> Poll<()> {
+    match node.state() {
+        NodeState::Unlinked(mut node) => {
+            if node.notification.is_some() {
+                node.completed = true;
             }
-            NodeState::Linked(mut node) => {
-                if node.list().0.generation() != node.generation {
-                    // TODO if generation is different, the node must be in a drain list
-                    node.completed = true;
-                    node.unlink(|| unreachable!());
-                    return Poll::Ready(());
-                }
-                if let Some(cx) = cx
-                    && (node.waker.as_ref()).is_none_or(|waker| !waker.will_wake(cx.waker()))
-                {
-                    node.waker = Some(cx.waker().clone());
-                }
-                Poll::Pending
+            if node.completed {
+                return Poll::Ready(());
             }
+            let notify = &*node.list().0;
+            match node.try_update_state_or_push_back_with(
+                AcqRel,  // TODO Acquire for successful notification, Release for generation_backup CAS
+                Acquire, // TODO Acquire for generation
+                |waiter, state| {
+                    (state == waiter.generation | STATE_NOTIFIED).then_some(state & !STATE_NOTIFIED)
+                },
+                |mut waiter, _| waiter.completed = true,
+                |mut waiter, state| {
+                    let completed = match state {
+                        Some(state) => {
+                            // TODO this assertion is just the negation of the condition above
+                            debug_assert!(
+                                state & STATE_NOTIFIED == 0
+                                    || state & !STATE_NOTIFIED != waiter.generation
+                            );
+                            waiter.generation != state || !notify.store_generation_backup(state)
+                        }
+                        None => waiter.generation != notify.generation_backup.load(Relaxed),
+                    };
+                    if completed {
+                        waiter.completed = true;
+                        return false;
+                    }
+                    if let Some(cx) = cx.as_ref() {
+                        waiter.waker.get_or_insert_with(|| cx.waker().clone());
+                    }
+                    true
+                },
+            ) {
+                Ok(_) | Err(false) => Poll::Ready(()),
+                Err(true) => Poll::Pending,
+            }
+        }
+        NodeState::Linked(mut node) => {
+            if node.list().0.generation() != node.generation {
+                // TODO if generation is different, the node must be in a drain list
+                node.completed = true;
+                node.unlink(|| unreachable!());
+                return Poll::Ready(());
+            }
+            if let Some(cx) = cx
+                && (node.waker.as_ref()).is_none_or(|waker| !waker.will_wake(cx.waker()))
+            {
+                node.waker = Some(cx.waker().clone());
+            }
+            Poll::Pending
         }
     }
 }
 
-pin_project! {
-    pub struct Notified<'a, L: Linking = Eager> {
-        #[pin]
-        inner: NotifiedInner<&'a Notify<L>, L>
-    }
+node_wrapper! {
+    pub struct Notified<'a, L: Linking = Eager>(Node<NotifyRef<&'a Notify<L>, L>>);
 }
 
 impl<L: Linking> Notified<'_, L> {
     pub fn enable(self: Pin<&mut Self>) -> bool {
-        self.project().inner.poll_notified(None).is_ready()
+        poll_notified(self.node_mut(), None).is_ready()
     }
 }
 
@@ -344,20 +327,17 @@ impl<L: Linking> Future for Notified<'_, L> {
     type Output = ();
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        self.project().inner.poll_notified(Some(cx))
+        poll_notified(self.node_mut(), Some(cx))
     }
 }
 
-pin_project! {
-    pub struct OwnedNotified<L: Linking = Eager> {
-        #[pin]
-        inner: NotifiedInner<Arc<Notify<L>>, L>
-    }
+node_wrapper! {
+    pub struct OwnedNotified<L: Linking = Eager>(Node<NotifyRef<Arc<Notify<L>>, L>>);
 }
 
 impl<L: Linking> OwnedNotified<L> {
     pub fn enable(self: Pin<&mut Self>) -> bool {
-        self.project().inner.poll_notified(None).is_ready()
+        poll_notified(self.node_mut(), None).is_ready()
     }
 }
 
@@ -365,7 +345,7 @@ impl<L: Linking> Future for OwnedNotified<L> {
     type Output = ();
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        self.project().inner.poll_notified(Some(cx))
+        poll_notified(self.node_mut(), Some(cx))
     }
 }
 
