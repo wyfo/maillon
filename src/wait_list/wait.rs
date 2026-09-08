@@ -67,7 +67,7 @@ impl<'a, S: Synchronization, L: Linking, M: Mutex, const WAKER_LIST_SIZE: usize>
                 }
             }
             NodeState::Linked(mut node) => {
-                if unsafe { !node.waker.as_ref().unwrap_unchecked().will_wake(cx.waker()) } {
+                if node.waker.as_ref().is_none_or(|w| !w.will_wake(cx.waker())) {
                     node.waker = Some(cx.waker().clone());
                 }
                 Poll::Pending
