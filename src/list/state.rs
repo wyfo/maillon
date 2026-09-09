@@ -57,7 +57,7 @@ impl ListState for () {}
 const TAIL_FLAG: usize = 1;
 const STATE_SHIFT: usize = 1;
 
-pub const INTRUSIVE_QUEUE_MAX_STATE: usize = usize::MAX >> STATE_SHIFT;
+pub const LIST_STATE_MAX: usize = usize::MAX >> STATE_SHIFT;
 #[inline(always)]
 pub(super) const fn state_to_ptr<L: Linking>(state: usize) -> *mut Tail<usize, L> {
     #[cold]
@@ -65,7 +65,7 @@ pub(super) const fn state_to_ptr<L: Linking>(state: usize) -> *mut Tail<usize, L
     const fn panic_queue_state_overflow() -> ! {
         panic!("list state overflow")
     }
-    if state > INTRUSIVE_QUEUE_MAX_STATE {
+    if state > LIST_STATE_MAX {
         panic_queue_state_overflow()
     }
     ptr::without_provenance_mut(state << STATE_SHIFT)

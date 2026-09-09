@@ -8,8 +8,8 @@ use std::{
 use aiq::{
     List, Node, NodeState,
     list::{
-        DrainEnd, DrainGetEnd, GetBack, GetFront, INTRUSIVE_QUEUE_MAX_STATE, Linking, ListEnd,
-        ListGetEnd, LockedList,
+        DrainEnd, DrainGetEnd, GetBack, GetFront, LIST_STATE_MAX, Linking, ListEnd, ListGetEnd,
+        LockedList,
     },
     node::{NodeData, NodeRef},
 };
@@ -46,7 +46,7 @@ fn push_node<L: Linking>(list: &TestList<L>, id: usize) -> Pin<Box<TestNode<'_, 
 #[test]
 #[should_panic(expected = "list state overflow")]
 fn state_overflow() {
-    List::<TestData, usize>::with_state(INTRUSIVE_QUEUE_MAX_STATE + 1);
+    List::<TestData, usize>::with_state(LIST_STATE_MAX + 1);
 }
 
 #[rstest]
