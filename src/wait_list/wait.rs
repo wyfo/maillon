@@ -19,25 +19,28 @@ use crate::{
 node_wrapper! {
     pub struct Wait<
         'a,
+        N: Unpin = (),
         S: Synchronization = Synchronized,
         L: Linking = Eager,
         M: Mutex = DefaultMutex,
         const WAKER_LIST_SIZE: usize = DEFAULT_WAKER_LIST_SIZE,
-    >(pub(super) Node<WaitListRef<'a, S, L, M, WAKER_LIST_SIZE>>);
+    >(pub(super) Node<WaitListRef<'a, N, S, L, M, WAKER_LIST_SIZE>>);
 }
 
-impl<'a, S: Synchronization, L: Linking, M: Mutex, const WAKER_LIST_SIZE: usize>
-    Wait<'a, S, L, M, WAKER_LIST_SIZE>
+impl<'a, N: Unpin, S: Synchronization, L: Linking, M: Mutex, const WAKER_LIST_SIZE: usize>
+    Wait<'a, N, S, L, M, WAKER_LIST_SIZE>
 {
     fn poll_wait(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         ignore_notification: bool,
-    ) -> Poll<Result<(), ClosedError>> {
+    ) -> Poll<Result<N, ClosedError>> {
         match self.node_mut().state() {
             NodeState::Unlinked(mut node) => {
-                if node.notification.take().is_some() && !ignore_notification {
-                    return Poll::Ready(Ok(()));
+                if let Some(notification) = node.notification.take()
+                    && !ignore_notification
+                {
+                    return Poll::Ready(Ok(notification.into_inner()));
                 }
                 let set_order = match S::MODE {
                     SyncMode::Synchronized => Acquire,
@@ -83,10 +86,10 @@ impl<'a, S: Synchronization, L: Linking, M: Mutex, const WAKER_LIST_SIZE: usize>
     }
 }
 
-impl<S: Synchronization, L: Linking, M: Mutex, const WAKER_LIST_SIZE: usize> Future
-    for Wait<'_, S, L, M, WAKER_LIST_SIZE>
+impl<N: Unpin, S: Synchronization, L: Linking, M: Mutex, const WAKER_LIST_SIZE: usize> Future
+    for Wait<'_, N, S, L, M, WAKER_LIST_SIZE>
 {
-    type Output = Result<(), ClosedError>;
+    type Output = Result<N, ClosedError>;
 
     #[cold]
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -129,7 +132,7 @@ pub struct WaitUntil<
     M: Mutex = DefaultMutex,
     const WAKER_LIST_SIZE: usize = DEFAULT_WAKER_LIST_SIZE,
 > {
-    wait: Wait<'a, S, L, M, WAKER_LIST_SIZE>,
+    wait: Wait<'a, (), S, L, M, WAKER_LIST_SIZE>,
     wake_condition: F,
 }
 
@@ -143,14 +146,14 @@ impl<
     const WAKER_LIST_SIZE: usize,
 > WaitUntil<'a, F, S, L, M, WAKER_LIST_SIZE>
 {
-    pub(super) fn new(wait: Wait<'a, S, L, M, WAKER_LIST_SIZE>, wake_condition: F) -> Self {
+    pub(super) fn new(wait: Wait<'a, (), S, L, M, WAKER_LIST_SIZE>, wake_condition: F) -> Self {
         Self {
             wait,
             wake_condition,
         }
     }
 
-    fn project(self: Pin<&mut Self>) -> (Pin<&mut Wait<'a, S, L, M, WAKER_LIST_SIZE>>, &mut F) {
+    fn project(self: Pin<&mut Self>) -> (Pin<&mut Wait<'a, (), S, L, M, WAKER_LIST_SIZE>>, &mut F) {
         let this = unsafe { self.get_unchecked_mut() };
         (
             unsafe { Pin::new_unchecked(&mut this.wait) },

@@ -28,42 +28,60 @@ pub const DEFAULT_WAKER_LIST_SIZE: usize = 32;
 const STATE_OPEN: usize = 0;
 const STATE_CLOSED: usize = 1;
 
-#[derive(Default)]
-struct Waiter {
+struct Waiter<N> {
     waker: Option<Waker>,
-    notification: Option<Notification>,
+    notification: Option<Notification<N>>,
+}
+
+impl<N> Default for Waiter<N> {
+    fn default() -> Self {
+        Self {
+            waker: None,
+            notification: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClosedError;
 
-#[derive(Clone, Copy)]
-enum Notification {
-    One,
-    Last,
-    All,
+enum Notification<N> {
+    One(N),
+    Last(N),
+    All(N),
+}
+
+impl<N> Notification<N> {
+    fn into_inner(self) -> N {
+        match self {
+            Self::One(notification) | Self::Last(notification) | Self::All(notification) => {
+                notification
+            }
+        }
+    }
 }
 
 pub struct WaitList<
+    N: Unpin = (),
     S: Synchronization = Synchronized,
     L: Linking = Eager,
     M: Mutex = DefaultMutex,
     const WAKER_LIST_SIZE: usize = DEFAULT_WAKER_LIST_SIZE,
 > {
-    list: List<Waiter, usize, L, M>,
+    list: List<Waiter<N>, usize, L, M>,
     _synchronization: PhantomData<S>,
 }
 
-impl<S: Synchronization, L: Linking, M: Mutex, const WAKER_LIST_SIZE: usize> Default
-    for WaitList<S, L, M, WAKER_LIST_SIZE>
+impl<N: Unpin, S: Synchronization, L: Linking, M: Mutex, const WAKER_LIST_SIZE: usize> Default
+    for WaitList<N, S, L, M, WAKER_LIST_SIZE>
 {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<S: Synchronization, L: Linking, M: Mutex, const WAKER_LIST_SIZE: usize>
-    WaitList<S, L, M, WAKER_LIST_SIZE>
+impl<N: Unpin, S: Synchronization, L: Linking, M: Mutex, const WAKER_LIST_SIZE: usize>
+    WaitList<N, S, L, M, WAKER_LIST_SIZE>
 {
     #[cfg_attr(loom, const_fn::const_fn(cfg(false)))]
     #[inline]
@@ -94,22 +112,22 @@ impl<S: Synchronization, L: Linking, M: Mutex, const WAKER_LIST_SIZE: usize>
             Release,
             Relaxed,
             |_| STATE_CLOSED,
-            |locked| Self::wake_all(locked, STATE_CLOSED, None),
+            |locked| Self::wake_all(locked, STATE_CLOSED, || None),
         );
     }
 
     #[cold]
     #[inline(never)]
-    fn wake_all(
-        locked: LockedList<Waiter, usize, L, M>,
+    fn wake_all<F: FnMut() -> Option<Notification<N>>>(
+        locked: LockedList<Waiter<N>, usize, L, M>,
         state: usize,
-        notification: Option<Notification>,
+        mut notification: F,
     ) {
         let mut wakers = WakerList::<WAKER_LIST_SIZE>::new();
         locked.drain(|| state).for_each(
             &mut wakers,
             |wakers, mut waiter| {
-                if let Some(notification) = notification {
+                if let Some(notification) = notification() {
                     waiter.notification = Some(notification);
                 }
                 if let Some(waker) = waiter.waker.take() {
@@ -122,33 +140,33 @@ impl<S: Synchronization, L: Linking, M: Mutex, const WAKER_LIST_SIZE: usize>
     }
 
     #[inline]
-    pub fn notify_one(&self) {
+    pub fn notify_one_with<F: FnOnce() -> N>(&self, notification: F) {
         if !self.is_empty() {
-            self.wake_single::<GetFront>(Notification::One);
+            self.wake_single::<GetFront, _>(|| Notification::One(notification()));
         }
     }
 
     #[inline]
-    pub fn notify_last(&self) {
+    pub fn notify_last_with<F: FnOnce() -> N>(&self, notification: F) {
         if !self.is_empty() {
-            self.wake_single::<GetBack>(Notification::Last);
+            self.wake_single::<GetBack, _>(|| Notification::Last(notification()));
         }
     }
 
     #[cold]
     #[inline(never)]
-    fn wake_single<E: ListGetEnd>(&self, notification: Notification) {
-        Self::wake_single_locked::<E>(self.list.lock(), notification);
+    fn wake_single<E: ListGetEnd, F: FnOnce() -> Notification<N>>(&self, notification: F) {
+        Self::wake_single_locked::<E, F>(self.list.lock(), notification);
     }
 
-    fn wake_single_locked<E: ListGetEnd>(
-        mut locked: LockedList<Waiter, usize, L, M>,
-        notification: Notification,
+    fn wake_single_locked<E: ListGetEnd, F: FnOnce() -> Notification<N>>(
+        mut locked: LockedList<Waiter<N>, usize, L, M>,
+        notification: F,
     ) {
         let Some(mut waiter) = E::get_end(&mut locked) else {
             return;
         };
-        waiter.data_mut().notification = Some(notification);
+        waiter.data_mut().notification = Some(notification());
         let waker = waiter.data_mut().waker.take();
         waiter.unlink(|| STATE_OPEN);
         drop(locked);
@@ -158,15 +176,15 @@ impl<S: Synchronization, L: Linking, M: Mutex, const WAKER_LIST_SIZE: usize>
     }
 
     #[inline]
-    pub fn notify_many(&self, count: usize) {
+    pub fn notify_many_with<F: FnMut() -> N>(&self, count: usize, notification: F) {
         if !self.is_empty() {
-            self.wake_many(count);
+            self.wake_many(count, notification);
         }
     }
 
     #[cold]
     #[inline(never)]
-    fn wake_many(&self, count: usize) {
+    fn wake_many<F: FnMut() -> N>(&self, count: usize, mut notification: F) {
         let mut wakers = WakerList::<WAKER_LIST_SIZE>::new();
         let mut locked = self.list.lock();
         let mut front = locked.front();
@@ -174,7 +192,7 @@ impl<S: Synchronization, L: Linking, M: Mutex, const WAKER_LIST_SIZE: usize>
             let Some(mut waiter) = front else {
                 break;
             };
-            waiter.notification = Some(Notification::One);
+            waiter.notification = Some(Notification::One(notification()));
             if let Some(waker) = waiter.waker.take() {
                 wakers.push(waker);
             }
@@ -194,22 +212,58 @@ impl<S: Synchronization, L: Linking, M: Mutex, const WAKER_LIST_SIZE: usize>
     }
 
     #[inline]
-    pub fn notify_all(&self) {
+    pub fn notify_all_with<F: FnMut() -> N>(&self, notification: F) {
         if !self.is_empty() {
-            self.notify_all_impl();
+            self.notify_all_impl(notification);
         }
     }
 
     #[cold]
     #[inline(never)]
-    fn notify_all_impl(&self) {
+    fn notify_all_impl<F: FnMut() -> N>(&self, mut notification: F) {
         let locked = self.list.lock();
-        Self::wake_all(locked, STATE_OPEN, Some(Notification::All));
+        Self::wake_all(locked, STATE_OPEN, || {
+            Some(Notification::All(notification()))
+        });
     }
 
     #[inline]
-    pub fn wait(&self) -> Wait<'_, S, L, M, WAKER_LIST_SIZE> {
-        Wait(Node::new(WaitListRef { wait_list: self }))
+    pub fn wait(&self) -> Wait<'_, N, S, L, M, WAKER_LIST_SIZE> {
+        Wait(Node::new(WaitListRef(self)))
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn renotify(&self, notification: Notification<N>) {
+        match notification {
+            Notification::One(notification) => self.notify_one_with(|| notification),
+            Notification::Last(notification) => self.notify_last_with(|| notification),
+            _ => unreachable!(),
+        }
+    }
+}
+
+impl<S: Synchronization, L: Linking, M: Mutex, const WAKER_LIST_SIZE: usize>
+    WaitList<(), S, L, M, WAKER_LIST_SIZE>
+{
+    #[inline]
+    pub fn notify_one(&self) {
+        self.notify_one_with(|| ());
+    }
+
+    #[inline]
+    pub fn notify_last(&self) {
+        self.notify_last_with(|| ());
+    }
+
+    #[inline]
+    pub fn notify_many(&self, count: usize) {
+        self.notify_many_with(count, || ());
+    }
+
+    #[inline]
+    pub fn notify_all(&self) {
+        self.notify_all_with(|| ());
     }
 
     #[inline]
@@ -219,73 +273,70 @@ impl<S: Synchronization, L: Linking, M: Mutex, const WAKER_LIST_SIZE: usize>
     ) -> WaitUntil<'_, F, S, L, M, WAKER_LIST_SIZE> {
         WaitUntil::new(self.wait(), wake_condition)
     }
-
-    #[cold]
-    #[inline(never)]
-    fn renotify(&self, notification: Notification) {
-        match notification {
-            Notification::One => self.notify_one(),
-            Notification::Last => self.notify_last(),
-            _ => unreachable!(),
-        }
-    }
 }
 
-struct WaitListRef<'a, S: Synchronization, L: Linking, M: Mutex, const WAKER_LIST_SIZE: usize> {
-    wait_list: &'a WaitList<S, L, M, WAKER_LIST_SIZE>,
-}
+struct WaitListRef<
+    'a,
+    N: Unpin,
+    S: Synchronization,
+    L: Linking,
+    M: Mutex,
+    const WAKER_LIST_SIZE: usize,
+>(&'a WaitList<N, S, L, M, WAKER_LIST_SIZE>);
 
-impl<S: Synchronization, L: Linking, M: Mutex, const WAKER_LIST_SIZE: usize> ListRef
-    for WaitListRef<'_, S, L, M, WAKER_LIST_SIZE>
+impl<N: Unpin, S: Synchronization, L: Linking, M: Mutex, const WAKER_LIST_SIZE: usize> ListRef
+    for WaitListRef<'_, N, S, L, M, WAKER_LIST_SIZE>
 {
-    type NodeData = Waiter;
+    type NodeData = Waiter<N>;
     type ListState = usize;
     type Linking = L;
     type Mutex = M;
 
-    fn as_list(&self) -> &List<Waiter, usize, L, M> {
-        &self.wait_list.list
+    fn as_list(&self) -> &List<Waiter<N>, usize, L, M> {
+        &self.0.list
     }
 }
 
-impl<'a, S: Synchronization, L: Linking, M: Mutex, const WAKER_LIST_SIZE: usize>
-    NodeData<WaitListRef<'a, S, L, M, WAKER_LIST_SIZE>> for Waiter
+impl<'a, N: Unpin, S: Synchronization, L: Linking, M: Mutex, const WAKER_LIST_SIZE: usize>
+    NodeData<WaitListRef<'a, N, S, L, M, WAKER_LIST_SIZE>> for Waiter<N>
 {
     fn new_state_if_last_node_on_drop(
         self: Pin<&mut Self>,
-        _list: &WaitListRef<'a, S, L, M, WAKER_LIST_SIZE>,
+        _list: &WaitListRef<'a, N, S, L, M, WAKER_LIST_SIZE>,
     ) -> usize {
         STATE_OPEN
     }
 
     fn on_drop<'list>(
         self: Pin<&mut Self>,
-        list: &'list WaitListRef<'a, S, L, M, WAKER_LIST_SIZE>,
+        list: &'list WaitListRef<'a, N, S, L, M, WAKER_LIST_SIZE>,
         locked: Option<LockedList<'list, Self, usize, L, M>>,
         state_updated_on_unlink: bool,
     ) {
-        let Some(notif @ (Notification::One | Notification::Last)) = self.notification else {
+        let Some(notif @ (Notification::One(_) | Notification::Last(_))) =
+            self.get_mut().notification.take()
+        else {
             return;
         };
         if let Some(locked) = locked {
             debug_assert!(!state_updated_on_unlink);
             match notif {
-                Notification::One => {
-                    WaitList::<S, L, M, WAKER_LIST_SIZE>::wake_single_locked::<GetFront>(
+                Notification::One(notification) => {
+                    WaitList::<N, S, L, M, WAKER_LIST_SIZE>::wake_single_locked::<GetFront, _>(
                         locked,
-                        Notification::One,
+                        || Notification::One(notification),
                     );
                 }
-                Notification::Last => {
-                    WaitList::<S, L, M, WAKER_LIST_SIZE>::wake_single_locked::<GetBack>(
+                Notification::Last(notification) => {
+                    WaitList::<N, S, L, M, WAKER_LIST_SIZE>::wake_single_locked::<GetBack, _>(
                         locked,
-                        Notification::Last,
+                        || Notification::Last(notification),
                     );
                 }
                 _ => unreachable!(),
             }
         } else {
-            list.wait_list.renotify(notif);
+            list.0.renotify(notif);
         }
     }
 }
