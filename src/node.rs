@@ -46,9 +46,8 @@ impl<L: Linking> NodeLink<L> {
         }
     }
 
-    #[inline(always)]
-    pub(crate) fn is_linked(&self) -> bool {
-        !self.prev.load(Acquire).is_null()
+    pub(crate) unsafe fn load_prev(&self) -> NonNull<NodeLink<L>> {
+        unsafe { NonNull::new_unchecked(self.prev.load(Relaxed)) }
     }
 
     // TODO takes `NonNull<Self>`, not `&self`: a reference would only carry provenance over the
@@ -137,7 +136,7 @@ impl<L: ListRef> Node<L> {
 
     #[inline(always)]
     pub fn is_linked(&self) -> bool {
-        unsafe { (*self.node.get()).link.is_linked() }
+        unsafe { !(*self.node.get()).link.prev.load(Acquire).is_null() }
     }
 
     #[inline(always)]

@@ -275,7 +275,7 @@ impl<T, S: ListState, L: Linking, M: Mutex> DrainBack<'_, '_, T, S, L, M> {
         let node = unsafe { self.node.as_ref() };
         let mut prev = None;
         if self.drain.head() != Some(self.node) {
-            prev = Some(unsafe { NonNull::new_unchecked(node.prev.load(Relaxed)) });
+            prev = Some(unsafe { node.load_prev() });
             let locked = &self.drain.locked;
             L::wait_next(unsafe { &prev.unwrap().as_ref().next }, &locked.parker);
         } else {

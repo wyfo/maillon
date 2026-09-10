@@ -2,7 +2,6 @@ use core::{pin::Pin, ptr::NonNull};
 
 use crate::{
     list::{Eager, HEAD_MARKER, Linking, ListState, LockedList, NodeLink},
-    loom::sync::atomic::Ordering::Relaxed,
     sync::mutex::{DefaultMutex, Mutex},
 };
 
@@ -74,8 +73,7 @@ impl<'locked, 'a, T, S: ListState, L: Linking, M: Mutex> ListCursor<'locked, 'a,
         self.node = match self.node {
             // TODO no tail acquire needed here, the cursor position always comes from one
             Some(node) => {
-                let prev = unsafe { node.as_ref().prev.load(Relaxed) };
-                (prev.addr() != HEAD_MARKER).then(|| unsafe { NonNull::new_unchecked(prev) })
+                Some(unsafe { node.as_ref().load_prev() }).filter(|p| p.addr().get() != HEAD_MARKER)
             }
             None => self.locked.tail(),
         };

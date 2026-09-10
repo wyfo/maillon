@@ -123,7 +123,8 @@ impl<P: Parker, const SPIN_BEFORE_PARK: usize> private::Linking for Eager<P, SPI
         next.store_mut(ptr.as_ptr());
     }
     fn wait_next(next: &Self::NextPtr, parker: &Self::Parker) {
-        Self::get_next(None, next, NonNull::dangling(), next, parker);
+        let dummy_head = &AtomicPtr::new(ptr::null_mut());
+        Self::get_next(None, next, NonNull::dangling(), dummy_head, parker);
     }
 }
 impl<P: Parker, const SPIN_BEFORE_PARK: usize> Linking for Eager<P, SPIN_BEFORE_PARK> {
@@ -176,23 +177,39 @@ impl private::Linking for Lazy {
         #[cold]
         #[inline(never)]
         fn find_next(
-            node_or_head: NonNull<NodeLink<Lazy>>,
+            node: Option<NonNull<NodeLink<Lazy>>>,
             mut tail: NonNull<NodeLink<Lazy>>,
         ) -> NonNull<NodeLink<Lazy>> {
             loop {
-                let prev = unsafe { NonNull::new_unchecked(tail.as_ref().prev.load(Relaxed)) };
+                let prev = unsafe { tail.as_ref().load_prev() };
                 // TODO not writing the next pointer of the last node is actually a good thing,
                 // because it will surely be overwritten just after (when the node is removed)
                 // and it prevents a segfault because prev can be HEAD_MARKER
-                if prev == node_or_head {
+                if Some(prev) == node {
                     return tail;
+                } else if prev.addr().get() == HEAD_MARKER {
+                    if node.is_none() {
+                        return tail;
+                    } else {
+                        break;
+                    }
                 }
                 unsafe { prev.as_ref().next.set(Some(tail)) }
                 tail = prev;
             }
+            // the node is in a drain cyclic chain
+            let node = unsafe { node.unwrap_unchecked() };
+            let mut prev = unsafe { node.as_ref().load_prev() };
+            loop {
+                let prev_prev = unsafe { prev.as_ref().load_prev() };
+                if prev_prev == node {
+                    return prev;
+                }
+                unsafe { prev_prev.as_ref().next.set(Some(prev)) }
+                prev = prev_prev;
+            }
         }
-        let head = NonNull::new(ptr::without_provenance_mut(HEAD_MARKER));
-        let found = find_next(node.or(head).unwrap(), tail);
+        let found = find_next(node, tail);
         if node.is_none() {
             // The walk ended on `HEAD_MARKER`, which has no `next` to write. Materialise the
             // head here instead: nothing else will, because the caller may drop the front

@@ -357,12 +357,12 @@ impl<'a, T, S: ListState, L: Linking, M: Mutex> LockedList<'a, T, S, L, M> {
         if L::NODES_ACCESS_REQUIRES_TAIL_ACQUIRE && !is_front && !is_back && !is_cursor {
             self.tail();
         }
-        let node = unsafe { node.as_ref() };
+        let node_ref = unsafe { node.as_ref() };
         let prev = if is_front {
             NonNull::new(ptr::without_provenance_mut(HEAD_MARKER)).unwrap()
         } else {
             // TODO safety the node is linked
-            unsafe { NonNull::new_unchecked(node.prev.load(Relaxed)) }
+            unsafe { node_ref.load_prev() }
         };
         let is_head = prev.addr().get() == HEAD_MARKER;
         let prev_next = if is_head {
@@ -378,7 +378,7 @@ impl<'a, T, S: ListState, L: Linking, M: Mutex> LockedList<'a, T, S, L, M> {
         let mut next = if is_back {
             None
         } else {
-            L::load_next(&node.next)
+            L::load_next(&node_ref.next)
         };
         let mut tail = None;
         if next.is_none() {
@@ -388,13 +388,23 @@ impl<'a, T, S: ListState, L: Linking, M: Mutex> LockedList<'a, T, S, L, M> {
             } else {
                 prev.into_tail()
             };
-            let node_ptr = NonNull::from(node).into_tail();
+            let node_ptr = node.into_tail();
             if let Err(t) = (self.tail).compare_exchange(node_ptr, new_tail, Release, Relaxed) {
                 if is_back || L::NODES_ACCESS_REQUIRES_TAIL_ACQUIRE {
                     fence(Acquire);
                 }
-                tail = Some(unsafe { t.ptr().unwrap_unchecked() });
-                next = Some(self.get_next(Some(node.into()), &node.next, tail.unwrap()));
+                let tail = if is_front || is_back || is_cursor {
+                    Some(unsafe { t.ptr().unwrap_unchecked() })
+                } else {
+                    // TODO if the node is currently drained, the tail can be anything
+                    t.ptr()
+                };
+                // TODO is the node is drained, backward iteration can be started from it directly
+                next = Some(self.get_next(
+                    Some(node_ref.into()),
+                    &node_ref.next,
+                    tail.unwrap_or(node),
+                ));
             } else if !is_head {
                 tail = Some(prev);
             }
@@ -403,8 +413,8 @@ impl<'a, T, S: ListState, L: Linking, M: Mutex> LockedList<'a, T, S, L, M> {
             unsafe { next.as_ref().prev.store(prev.as_ptr(), Relaxed) };
             L::update_next(prev_next, Some(next));
         }
-        L::update_next(&node.next, None);
-        node.prev.store(ptr::null_mut(), Release);
+        L::update_next(&node_ref.next, None);
+        node_ref.prev.store(ptr::null_mut(), Release);
         (next, tail)
     }
 }
