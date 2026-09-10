@@ -6,7 +6,6 @@ use core::{
     sync::atomic::Ordering::{self, AcqRel, Acquire, Relaxed, Release, SeqCst},
 };
 
-pub(crate) use self::private::Linking as PrivateLinking;
 use crate::{
     list::{DrainGetEnd, GetBack, GetFront, HEAD_MARKER},
     loom::{AtomicPtrExt, cell::Cell, sync::atomic::AtomicPtr},
@@ -16,9 +15,58 @@ use crate::{
 };
 
 #[allow(private_bounds)]
-pub trait Linking: private::Linking + Send + Sync + 'static {
+pub trait Linking: PrivateLinking + Send + Sync + 'static {
     #[doc(hidden)]
     type PreferredDrainGetEnd: DrainGetEnd;
+}
+
+pub(crate) trait PrivateLinking: Sized {
+    type NextPtr: 'static;
+    type Parker: Send + Sync + 'static;
+    #[cfg(not(loom))]
+    const NEW_NEXT: Self::NextPtr;
+    #[cfg(not(loom))]
+    const NEW_PARKER: Self::Parker;
+    fn new_next(ptr: Option<NonNull<NodeLink<Self>>>) -> Self::NextPtr;
+    #[cfg(loom)]
+    fn new_parker() -> Self::Parker;
+    /// Whether [`get_next`](Self::get_next) dereferences its `tail` argument, so a caller
+    /// passing a value it read `Relaxed` must acquire the tail first.
+    ///
+    /// `false` where node publication rides the `next` chain: `get_next` acquires
+    /// `node.next` itself and the tail is not the synchronisation channel. `true` where
+    /// publication rides the tail's release sequence and `get_next` walks `prev` backwards
+    /// from `tail` — there, using an unacquired tail races the enqueuer's non-atomic write
+    /// of its own `prev`.
+    const NODES_ACCESS_REQUIRES_TAIL_ACQUIRE: bool;
+    /// The ordering of `push_back`'s tail CAS: the caller's request raised to this
+    /// variant's floor. The argument is a *minimum*, so a request stronger than the floor
+    /// on another axis is honoured on top of it.
+    fn push_back_set_order(set_order: Ordering) -> Ordering;
+    fn store_next(
+        prev_next: NonNull<Self::NextPtr>,
+        node: NonNull<NodeLink<Self>>,
+        parker: &Self::Parker,
+    );
+    fn load_next(next: &Self::NextPtr) -> Option<NonNull<NodeLink<Self>>>;
+    /// Returns the successor of `node`, or the front of the list when `node` is `None`.
+    ///
+    /// `next` is the slot holding that successor — `node.next`, or `head_ptr` itself when
+    /// `node` is `None`. `head_ptr` is the head slot of the list (or of the drain) being
+    /// walked; a variant that materialises links lazily writes it when the walk reaches
+    /// the front, since no `remove` will do it if the front is never unlinked.
+    fn get_next(
+        node: Option<NonNull<NodeLink<Self>>>,
+        next: &Self::NextPtr,
+        tail: NonNull<NodeLink<Self>>,
+        parker: &Self::Parker,
+    ) -> NonNull<NodeLink<Self>>;
+    fn update_next(next: &Self::NextPtr, ptr: Option<NonNull<NodeLink<Self>>>);
+    fn update_next_mut(next: &mut Self::NextPtr, ptr: Option<NonNull<NodeLink<Self>>>) {
+        Self::update_next(next, ptr);
+    }
+    fn wait_next(next: &Self::NextPtr, parker: &Self::Parker) -> Option<NonNull<NodeLink<Self>>>;
+    fn drain_get_head(sentinel: &mut NodeLink<Self>) -> Option<NonNull<NodeLink<Self>>>;
 }
 
 const PARKED_TAG: usize = 1;
@@ -28,7 +76,7 @@ pub struct Eager<
     P: Parker = DefaultParker,
     const SPIN_BEFORE_PARK: usize = DEFAULT_SPIN_BEFORE_PARK,
 >(PhantomData<P>);
-impl<P: Parker, const SPIN_BEFORE_PARK: usize> private::Linking for Eager<P, SPIN_BEFORE_PARK> {
+impl<P: Parker, const SPIN_BEFORE_PARK: usize> PrivateLinking for Eager<P, SPIN_BEFORE_PARK> {
     type NextPtr = AtomicPtr<NodeLink<Self>>;
     type Parker = P;
     #[allow(clippy::declare_interior_mutable_const)]
@@ -131,7 +179,7 @@ impl<P: Parker, const SPIN_BEFORE_PARK: usize> Linking for Eager<P, SPIN_BEFORE_
 
 #[derive(Debug)]
 pub struct Lazy;
-impl private::Linking for Lazy {
+impl PrivateLinking for Lazy {
     type NextPtr = Cell<Option<NonNull<NodeLink<Self>>>>;
     type Parker = ();
     #[allow(clippy::declare_interior_mutable_const)]
@@ -231,63 +279,4 @@ impl private::Linking for Lazy {
 }
 impl Linking for Lazy {
     type PreferredDrainGetEnd = GetBack;
-}
-
-mod private {
-    use core::{ptr::NonNull, sync::atomic::Ordering};
-
-    use crate::node::NodeLink;
-
-    pub(crate) trait Linking: Sized {
-        type NextPtr: 'static;
-        type Parker: Send + Sync + 'static;
-        #[cfg(not(loom))]
-        const NEW_NEXT: Self::NextPtr;
-        #[cfg(not(loom))]
-        const NEW_PARKER: Self::Parker;
-        fn new_next(ptr: Option<NonNull<NodeLink<Self>>>) -> Self::NextPtr;
-        #[cfg(loom)]
-        fn new_parker() -> Self::Parker;
-        /// Whether [`get_next`](Self::get_next) dereferences its `tail` argument, so a caller
-        /// passing a value it read `Relaxed` must acquire the tail first.
-        ///
-        /// `false` where node publication rides the `next` chain: `get_next` acquires
-        /// `node.next` itself and the tail is not the synchronisation channel. `true` where
-        /// publication rides the tail's release sequence and `get_next` walks `prev` backwards
-        /// from `tail` — there, using an unacquired tail races the enqueuer's non-atomic write
-        /// of its own `prev`.
-        const NODES_ACCESS_REQUIRES_TAIL_ACQUIRE: bool;
-        /// The ordering of `push_back`'s tail CAS: the caller's request raised to this
-        /// variant's floor. The argument is a *minimum*, so a request stronger than the floor
-        /// on another axis is honoured on top of it.
-        fn push_back_set_order(set_order: Ordering) -> Ordering;
-
-        fn store_next(
-            prev_next: NonNull<Self::NextPtr>,
-            node: NonNull<NodeLink<Self>>,
-            parker: &Self::Parker,
-        );
-        fn load_next(next: &Self::NextPtr) -> Option<NonNull<NodeLink<Self>>>;
-        /// Returns the successor of `node`, or the front of the list when `node` is `None`.
-        ///
-        /// `next` is the slot holding that successor — `node.next`, or `head_ptr` itself when
-        /// `node` is `None`. `head_ptr` is the head slot of the list (or of the drain) being
-        /// walked; a variant that materialises links lazily writes it when the walk reaches
-        /// the front, since no `remove` will do it if the front is never unlinked.
-        fn get_next(
-            node: Option<NonNull<NodeLink<Self>>>,
-            next: &Self::NextPtr,
-            tail: NonNull<NodeLink<Self>>,
-            parker: &Self::Parker,
-        ) -> NonNull<NodeLink<Self>>;
-        fn update_next(next: &Self::NextPtr, ptr: Option<NonNull<NodeLink<Self>>>);
-        fn update_next_mut(next: &mut Self::NextPtr, ptr: Option<NonNull<NodeLink<Self>>>) {
-            Self::update_next(next, ptr);
-        }
-        fn wait_next(
-            next: &Self::NextPtr,
-            parker: &Self::Parker,
-        ) -> Option<NonNull<NodeLink<Self>>>;
-        fn drain_get_head(sentinel: &mut NodeLink<Self>) -> Option<NonNull<NodeLink<Self>>>;
-    }
 }
