@@ -6,7 +6,6 @@ use core::{
 };
 
 use crate::{
-    List,
     list::{Eager, GetBack, GetFront, IntoTail, Linking, ListState, LockedList, NodeLink, TailExt},
     loom::{
         AtomicPtrExt,
@@ -21,7 +20,6 @@ use crate::{
 // always returning None
 pub struct Drain<'a, T, S: ListState = (), L: Linking = Eager, M: Mutex + 'a = DefaultMutex> {
     sentinel_node: NodeLink<L>,
-    queue: &'a List<T, S, L, M>,
     locked: ManuallyDrop<LockedList<'a, T, S, L, M>>,
 }
 
@@ -33,7 +31,7 @@ impl<'a, T, S: ListState, L: Linking, M: Mutex> Drain<'a, T, S, L, M> {
         let mut head = None;
         let mut tail = None;
         if let Some(t) = locked.tail() {
-            head = Some(locked.get_next(None, &locked.queue.head, t));
+            head = Some(locked.get_next(None, &locked.list.head, t));
             L::update_next(&locked.head, None);
             // TODO
             // `Release` is for the `head` store just above: it must not sink past the swap.
@@ -59,7 +57,6 @@ impl<'a, T, S: ListState, L: Linking, M: Mutex> Drain<'a, T, S, L, M> {
                 prev: AtomicPtr::new(tail.as_ptr()),
                 next: L::new_next(head),
             },
-            queue: locked.queue,
             locked: ManuallyDrop::new(locked),
         }
     }
@@ -111,9 +108,9 @@ impl<'a, T, S: ListState, L: Linking, M: Mutex> Drain<'a, T, S, L, M> {
             let tail = unsafe { this.tail().unwrap_unchecked() };
             unsafe { L::update_next(&tail.as_ref().next, NonNull::new(sentinel_ptr)) };
         }
-        drop(unsafe { ManuallyDrop::take(&mut this.locked) });
+        let list = unsafe { ManuallyDrop::take(&mut this.locked) }.unlock();
         let _guard = defer(|| {
-            this.locked = ManuallyDrop::new(this.queue.lock());
+            this.locked = ManuallyDrop::new(list.lock());
             if this.head().as_ptr() == sentinel_ptr {
                 debug_assert_eq!(this.head(), this.tail());
                 this.set_head(None);

@@ -5,12 +5,12 @@ use crate::{list::Linking, node::NodeLink};
 pub(super) struct Tail<S, L>(PhantomData<(S, L)>);
 
 #[expect(private_bounds)]
-pub trait ListState: QueueStatePrivate + Debug + Copy + PartialEq + Send + Sync + 'static {}
+pub trait ListState: ListStatePrivate + Debug + Copy + PartialEq + Send + Sync + 'static {}
 
 /// # Safety
 ///
 /// Implementation must be bijective.
-pub(super) unsafe trait QueueStatePrivate: Sized {
+pub(super) unsafe trait ListStatePrivate: Sized {
     fn tail_to_enum<L: Linking>(tail: *mut Tail<Self, L>) -> StateOrPtr<Self, L>;
     fn enum_to_tail<L: Linking>(state_or_ptr: StateOrPtr<Self, L>) -> *mut Tail<Self, L>;
     fn tail_to_state_or<L: Linking>(tail: *mut Tail<Self, L>, default: Self) -> Self;
@@ -37,7 +37,7 @@ impl<S, L: Linking> StateOrPtr<S, L> {
     }
 }
 
-unsafe impl QueueStatePrivate for () {
+unsafe impl ListStatePrivate for () {
     #[inline(always)]
     fn tail_to_enum<L: Linking>(tail: *mut Tail<Self, L>) -> StateOrPtr<Self, L> {
         NonNull::new(tail.cast()).map_or(StateOrPtr::State(()), StateOrPtr::Ptr)
@@ -62,16 +62,16 @@ pub const LIST_STATE_MAX: usize = usize::MAX >> STATE_SHIFT;
 pub(super) const fn state_to_ptr<L: Linking>(state: usize) -> *mut Tail<usize, L> {
     #[cold]
     #[inline(never)]
-    const fn panic_queue_state_overflow() -> ! {
+    const fn panic_list_state_overflow() -> ! {
         panic!("list state overflow")
     }
     if state > LIST_STATE_MAX {
-        panic_queue_state_overflow()
+        panic_list_state_overflow()
     }
     ptr::without_provenance_mut(state << STATE_SHIFT)
 }
 
-unsafe impl QueueStatePrivate for usize {
+unsafe impl ListStatePrivate for usize {
     #[inline(always)]
     fn tail_to_enum<L: Linking>(tail: *mut Tail<Self, L>) -> StateOrPtr<Self, L> {
         if tail.addr() & TAIL_FLAG != 0 {

@@ -79,7 +79,7 @@ impl<T, S: ListState, L: Linking, M: Mutex> List<T, S, L, M> {
     #[inline]
     pub fn lock(&self) -> LockedList<'_, T, S, L, M> {
         LockedList {
-            queue: self,
+            list: self,
             guard: ManuallyDrop::new(self.mutex.lock()),
             _not_send: PhantomData,
         }
@@ -292,7 +292,7 @@ impl<T: NodeData<Self>, S: ListState, L: Linking, M: Mutex> ListRef for &List<T,
 }
 
 pub struct LockedList<'a, T, S: ListState = (), L: Linking = Eager, M: Mutex = DefaultMutex> {
-    queue: &'a List<T, S, L, M>,
+    list: &'a List<T, S, L, M>,
     guard: ManuallyDrop<MutexGuard<'a, M>>,
     _not_send: PhantomData<*mut ()>,
 }
@@ -316,7 +316,7 @@ impl<'a, T, S: ListState, L: Linking, M: Mutex> LockedList<'a, T, S, L, M> {
     where
         L: Linking,
     {
-        let node = self.get_next(None, &self.queue.head, self.tail()?);
+        let node = self.get_next(None, &self.head, self.tail()?);
         Some(ListFront { node, locked: self })
     }
 
@@ -337,7 +337,7 @@ impl<'a, T, S: ListState, L: Linking, M: Mutex> LockedList<'a, T, S, L, M> {
     }
 
     pub fn unlock(self) -> &'a List<T, S, L, M> {
-        self.queue
+        self.list
     }
 
     #[allow(clippy::type_complexity)]
@@ -438,7 +438,7 @@ impl<'a, T, L: Linking, M: Mutex> LockedList<'a, T, usize, L, M> {
 impl<T, S: ListState, L: Linking, M: Mutex> Drop for LockedList<'_, T, S, L, M> {
     #[inline]
     fn drop(&mut self) {
-        unsafe { self.queue.mutex.unlock(ManuallyDrop::take(&mut self.guard)) };
+        unsafe { self.list.mutex.unlock(ManuallyDrop::take(&mut self.guard)) };
     }
 }
 
@@ -446,7 +446,7 @@ impl<T, S: ListState, L: Linking, M: Mutex> Deref for LockedList<'_, T, S, L, M>
     type Target = List<T, S, L, M>;
 
     fn deref(&self) -> &Self::Target {
-        self.queue
+        self.list
     }
 }
 
