@@ -8,7 +8,7 @@ use aiq::{
     WaitList,
     list::Linking,
     wait_list::{
-        ClosedError,
+        ClosedError, DEFAULT_WAKER_LIST_SIZE,
         synchronization::{Sequential, Synchronization, Synchronized, Unsynchronized},
         wait::WakeCondition,
     },
@@ -20,8 +20,6 @@ use rstest::rstest;
 
 mod linking;
 mod loom;
-
-const WAKE_LIST_SIZE: usize = 32;
 
 struct SyncMode<S: Synchronization> {
     _sync: PhantomData<S>,
@@ -291,11 +289,11 @@ fn notify_all_poll_consistency<S: Synchronization, L: Linking>(
 fn notify_all_is_atomic<S: Synchronization, L: Linking>(
     #[values(SYNC, SEQ, UNSYNC)] _sync: SyncMode<S>,
     #[values(EAGER, LAZY)] _linking: LinkingMode<L>,
-    #[values(0, WAKE_LIST_SIZE)] tested_fut_index: usize,
+    #[values(0, DEFAULT_WAKER_LIST_SIZE)] tested_fut_index: usize,
 ) {
     model(move || {
         let list = WaitList::<&'static str, S, L>::new();
-        let mut futs = (0..WAKE_LIST_SIZE + 1)
+        let mut futs = (0..DEFAULT_WAKER_LIST_SIZE + 1)
             .map(|_| list.wait().boxed())
             .collect::<Vec<_>>();
         for fut in &mut futs {
@@ -372,10 +370,10 @@ fn notify_many_cancel_race<S: Synchronization, L: Linking>(
     #[values(SYNC, SEQ, UNSYNC)] _sync: SyncMode<S>,
     #[values(EAGER, LAZY)] _linking: LinkingMode<L>,
 ) {
-    const COUNT: usize = WAKE_LIST_SIZE + 1;
+    const COUNT: usize = DEFAULT_WAKER_LIST_SIZE + 1;
     model(move || {
         let list = WaitList::<(), S, L>::new();
-        let mut waits = (0..WAKE_LIST_SIZE + 4)
+        let mut waits = (0..DEFAULT_WAKER_LIST_SIZE + 4)
             .map(|_| list.wait().boxed())
             .collect::<Vec<_>>();
         for wait in &mut waits {
@@ -515,5 +513,51 @@ fn wait_until_notified_completion<S: Synchronization, L: Linking>(
         assert_ready!(wait).unwrap();
         drop(wait);
         assert_pending!(other);
+    });
+}
+
+#[rstest]
+fn notify_all_cancel_during_drain<S: Synchronization, L: Linking>(
+    #[values(SYNC, SEQ, UNSYNC)] _sync: SyncMode<S>,
+    #[values(EAGER, LAZY)] _linking: LinkingMode<L>,
+    #[values(0, DEFAULT_WAKER_LIST_SIZE)] cancelled_index: usize,
+) {
+    model(move || {
+        let list = WaitList::<(), S, L>::new();
+        let mut futs = (0..DEFAULT_WAKER_LIST_SIZE + 2)
+            .map(|_| list.wait().boxed())
+            .collect::<Vec<_>>();
+        for fut in &mut futs {
+            assert_pending!(fut);
+        }
+        let cancelled = futs.remove(cancelled_index);
+        thread::scope(|s| {
+            s.spawn(|| list.notify_all());
+            s.spawn(move || drop(cancelled));
+        });
+        for fut in &mut futs {
+            assert_ready!(fut, Ok(()));
+        }
+    });
+}
+
+#[rstest]
+fn notify_all_push_during_drain<S: Synchronization, L: Linking>(
+    #[values(SYNC, SEQ, UNSYNC)] _sync: SyncMode<S>,
+    #[values(EAGER, LAZY)] _linking: LinkingMode<L>,
+) {
+    model(|| {
+        let list = WaitList::<(), S, L>::new();
+        let mut wait = list.wait().boxed();
+        assert_pending!(wait);
+        thread::scope(|s| {
+            s.spawn(|| list.notify_all());
+            s.spawn(|| {
+                let mut pushed = list.wait().boxed();
+                assert_pending!(pushed);
+                drop(pushed);
+            });
+        });
+        assert_ready!(wait, Ok(()));
     });
 }

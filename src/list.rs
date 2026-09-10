@@ -308,7 +308,7 @@ impl<'a, T, S: ListState, L: Linking, M: Mutex> LockedList<'a, T, S, L, M> {
         next: &L::NextPtr,
         tail: NonNull<NodeLink<L>>,
     ) -> NonNull<NodeLink<L>> {
-        L::get_next(node, next, tail, &self.head, &self.parker)
+        L::get_next(node, next, tail, &self.parker)
     }
 
     #[inline]
@@ -400,11 +400,7 @@ impl<'a, T, S: ListState, L: Linking, M: Mutex> LockedList<'a, T, S, L, M> {
                     t.ptr()
                 };
                 // TODO is the node is drained, backward iteration can be started from it directly
-                next = Some(self.get_next(
-                    Some(node_ref.into()),
-                    &node_ref.next,
-                    tail.unwrap_or(node),
-                ));
+                next = Some(self.get_next(Some(node), &node_ref.next, tail.unwrap_or(node)));
             } else if !is_head {
                 tail = Some(prev);
             }
@@ -413,8 +409,7 @@ impl<'a, T, S: ListState, L: Linking, M: Mutex> LockedList<'a, T, S, L, M> {
             unsafe { next.as_ref().prev.store(prev.as_ptr(), Relaxed) };
             L::update_next(prev_next, Some(next));
         }
-        L::update_next(&node_ref.next, None);
-        node_ref.prev.store(ptr::null_mut(), Release);
+        node_ref.unlink();
         (next, tail)
     }
 }

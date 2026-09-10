@@ -6,7 +6,10 @@ use core::{
 };
 
 use crate::{
-    list::{Eager, GetBack, GetFront, IntoTail, Linking, ListState, LockedList, NodeLink, TailExt},
+    list::{
+        Eager, GetBack, GetFront, HEAD_MARKER, IntoTail, Linking, ListState, LockedList, NodeLink,
+        TailExt,
+    },
     loom::{
         AtomicPtrExt,
         sync::atomic::{AtomicPtr, Ordering::*},
@@ -30,8 +33,8 @@ impl<'a, T, S: ListState, L: Linking, M: Mutex> Drain<'a, T, S, L, M> {
     ) -> Self {
         let mut head = None;
         let mut tail = None;
-        if let Some(t) = locked.tail() {
-            head = Some(locked.get_next(None, &locked.list.head, t));
+        if locked.tail().is_some() {
+            head = L::wait_next(&locked.list.head, &locked.parker);
             L::update_next(&locked.head, None);
             // TODO
             // `Release` is for the `head` store just above: it must not sink past the swap.
@@ -62,7 +65,7 @@ impl<'a, T, S: ListState, L: Linking, M: Mutex> Drain<'a, T, S, L, M> {
     }
 
     fn head(&mut self) -> Option<NonNull<NodeLink<L>>> {
-        L::load_next_mut(&mut self.sentinel_node.next)
+        L::drain_get_head(&mut self.sentinel_node)
     }
 
     fn tail(&mut self) -> Option<NonNull<NodeLink<L>>> {
@@ -111,7 +114,7 @@ impl<'a, T, S: ListState, L: Linking, M: Mutex> Drain<'a, T, S, L, M> {
         let list = unsafe { ManuallyDrop::take(&mut this.locked) }.unlock();
         let _guard = defer(|| {
             this.locked = ManuallyDrop::new(list.lock());
-            if this.head().as_ptr() == sentinel_ptr {
+            if this.tail().as_ptr() == sentinel_ptr {
                 debug_assert_eq!(this.head(), this.tail());
                 this.set_head(None);
                 this.set_tail(None);
@@ -160,10 +163,9 @@ impl<'a, T, S: ListState, L: Linking, M: Mutex> Drain<'a, T, S, L, M> {
     #[cold]
     #[inline(never)]
     fn unlink_all(&mut self) {
-        while let Some(node) = self.head()
-            && node != (&self.sentinel_node).into()
-        {
-            DrainFront { node, drain: self }.unlink();
+        let mut end = L::PreferredDrainGetEnd::get_end(unsafe { Pin::new_unchecked(self) });
+        while let Some(node) = end {
+            end = node.unlink();
         }
     }
 }
@@ -219,13 +221,12 @@ impl<T, S: ListState, L: Linking, M: Mutex> DrainFront<'_, '_, T, S, L, M> {
         let tail = unsafe { self.drain.tail().unwrap_unchecked() };
         if tail != self.node {
             let locked = &self.drain.locked;
-            next = Some(locked.get_next(Some(node.into()), &node.next, tail));
+            next = Some(locked.get_next(Some(self.node), &node.next, tail));
         } else {
             self.drain.set_tail(None);
         }
         self.drain.set_head(next);
-        L::update_next(&node.next, None);
-        node.prev.store(ptr::null_mut(), Release);
+        node.unlink();
         Some(Self {
             node: next?,
             drain: self.drain,
@@ -270,18 +271,18 @@ impl<'drain, 'a, T, S: ListState, L: Linking, M: Mutex> DrainEnd<'drain, 'a, T, 
 impl<T, S: ListState, L: Linking, M: Mutex> DrainBack<'_, '_, T, S, L, M> {
     pub fn unlink(self) -> Option<Self> {
         let node = unsafe { self.node.as_ref() };
-        let mut prev = None;
-        if self.drain.head() != Some(self.node) {
-            prev = Some(unsafe { node.load_prev() });
+        let mut prev = Some(unsafe { node.load_prev() });
+        if prev.as_ptr().addr() == HEAD_MARKER
+            || prev.as_ptr() == ptr::from_mut(&mut self.drain.sentinel_node)
+        {
+            prev = None;
+            self.drain.set_head(None);
+        } else {
             let locked = &self.drain.locked;
             L::wait_next(unsafe { &prev.unwrap().as_ref().next }, &locked.parker);
-        } else {
-            // TODO setting the head is required as the head is checked in many places
-            self.drain.set_head(None);
         }
         self.drain.set_tail(prev);
-        L::update_next(&node.next, None);
-        node.prev.store(ptr::null_mut(), Release);
+        node.unlink();
         Some(Self {
             node: prev?,
             drain: self.drain,

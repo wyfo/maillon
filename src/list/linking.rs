@@ -74,14 +74,10 @@ impl<P: Parker, const SPIN_BEFORE_PARK: usize> private::Linking for Eager<P, SPI
     fn load_next(next: &Self::NextPtr) -> Option<NonNull<NodeLink<Self>>> {
         NonNull::new(next.load(Acquire))
     }
-    fn load_next_mut(next: &mut Self::NextPtr) -> Option<NonNull<NodeLink<Self>>> {
-        NonNull::new(next.load_mut())
-    }
     fn get_next(
         _node: Option<NonNull<NodeLink<Self>>>,
         next: &Self::NextPtr,
         _tail: NonNull<NodeLink<Self>>,
-        _head_ptr: &Self::NextPtr,
         parker: &Self::Parker,
     ) -> NonNull<NodeLink<Self>> {
         if let Some(next) = Self::load_next(next) {
@@ -122,9 +118,11 @@ impl<P: Parker, const SPIN_BEFORE_PARK: usize> private::Linking for Eager<P, SPI
     fn update_next_mut(next: &mut Self::NextPtr, ptr: Option<NonNull<NodeLink<Self>>>) {
         next.store_mut(ptr.as_ptr());
     }
-    fn wait_next(next: &Self::NextPtr, parker: &Self::Parker) {
-        let dummy_head = &AtomicPtr::new(ptr::null_mut());
-        Self::get_next(None, next, NonNull::dangling(), dummy_head, parker);
+    fn wait_next(next: &Self::NextPtr, parker: &Self::Parker) -> Option<NonNull<NodeLink<Self>>> {
+        Some(Self::get_next(None, next, NonNull::dangling(), parker))
+    }
+    fn drain_get_head(sentinel: &mut NodeLink<Self>) -> Option<NonNull<NodeLink<Self>>> {
+        NonNull::new(sentinel.next.load_mut())
     }
 }
 impl<P: Parker, const SPIN_BEFORE_PARK: usize> Linking for Eager<P, SPIN_BEFORE_PARK> {
@@ -167,7 +165,6 @@ impl private::Linking for Lazy {
         node: Option<NonNull<NodeLink<Self>>>,
         next: &Self::NextPtr,
         tail: NonNull<NodeLink<Self>>,
-        head_ptr: &Self::NextPtr,
         _parker: &Self::Parker,
     ) -> NonNull<NodeLink<Self>> {
         debug_assert_ne!(node, Some(tail));
@@ -211,18 +208,26 @@ impl private::Linking for Lazy {
         }
         let found = find_next(node, tail);
         if node.is_none() {
-            // The walk ended on `HEAD_MARKER`, which has no `next` to write. Materialise the
-            // head here instead: nothing else will, because the caller may drop the front
-            // cursor without unlinking it — `Semaphore::add_permits_locked` does exactly that
-            // when the front waiter still needs more permits than are available.
-            head_ptr.set(Some(found));
+            // TODO If the node is None, the next pointer is assumed to be the head
+            // it's better to materialized the head because the front might not be unlinked
+            // so the head will be reused after
+            next.set(Some(found));
         }
         found
     }
     fn update_next(next: &Self::NextPtr, ptr: Option<NonNull<NodeLink<Self>>>) {
         next.set(ptr);
     }
-    fn wait_next(_next: &Self::NextPtr, _parker: &Self::Parker) {}
+    fn wait_next(_next: &Self::NextPtr, _parker: &Self::Parker) -> Option<NonNull<NodeLink<Self>>> {
+        None
+    }
+    fn drain_get_head(sentinel: &mut NodeLink<Self>) -> Option<NonNull<NodeLink<Self>>> {
+        if let Some(head) = sentinel.next.get() {
+            return Some(head);
+        }
+        let tail = NonNull::new(sentinel.prev.load(Relaxed))?;
+        Some(Self::get_next(None, &sentinel.next, tail, &()))
+    }
 }
 impl Linking for Lazy {
     type PreferredDrainGetEnd = GetBack;
@@ -263,9 +268,6 @@ mod private {
             parker: &Self::Parker,
         );
         fn load_next(next: &Self::NextPtr) -> Option<NonNull<NodeLink<Self>>>;
-        fn load_next_mut(next: &mut Self::NextPtr) -> Option<NonNull<NodeLink<Self>>> {
-            Self::load_next(next)
-        }
         /// Returns the successor of `node`, or the front of the list when `node` is `None`.
         ///
         /// `next` is the slot holding that successor — `node.next`, or `head_ptr` itself when
@@ -276,13 +278,16 @@ mod private {
             node: Option<NonNull<NodeLink<Self>>>,
             next: &Self::NextPtr,
             tail: NonNull<NodeLink<Self>>,
-            head_ptr: &Self::NextPtr,
             parker: &Self::Parker,
         ) -> NonNull<NodeLink<Self>>;
         fn update_next(next: &Self::NextPtr, ptr: Option<NonNull<NodeLink<Self>>>);
         fn update_next_mut(next: &mut Self::NextPtr, ptr: Option<NonNull<NodeLink<Self>>>) {
             Self::update_next(next, ptr);
         }
-        fn wait_next(next: &Self::NextPtr, parker: &Self::Parker);
+        fn wait_next(
+            next: &Self::NextPtr,
+            parker: &Self::Parker,
+        ) -> Option<NonNull<NodeLink<Self>>>;
+        fn drain_get_head(sentinel: &mut NodeLink<Self>) -> Option<NonNull<NodeLink<Self>>>;
     }
 }

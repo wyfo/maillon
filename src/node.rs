@@ -50,6 +50,11 @@ impl<L: Linking> NodeLink<L> {
         unsafe { NonNull::new_unchecked(self.prev.load(Relaxed)) }
     }
 
+    pub(crate) fn unlink(&self) {
+        L::update_next(&self.next, None);
+        self.prev.store(ptr::null_mut(), Release);
+    }
+
     // TODO takes `NonNull<Self>`, not `&self`: a reference would only carry provenance over the
     // link, not over the whole `NodeInner`
     #[inline(always)]
