@@ -68,7 +68,7 @@ pub struct WaitList<
     M: Mutex = DefaultMutex,
     const WAKER_LIST_SIZE: usize = DEFAULT_WAKER_LIST_SIZE,
 > {
-    list: List<Waiter<N>, usize, L, M>,
+    list: List<Waiter<N>, usize, (), L, M>,
     _synchronization: PhantomData<S>,
 }
 
@@ -119,14 +119,14 @@ impl<N: Unpin, S: Synchronization, L: Linking, M: Mutex, const WAKER_LIST_SIZE: 
     #[cold]
     #[inline(never)]
     fn wake_all<F: FnMut() -> Option<Notification<N>>>(
-        locked: LockedList<Waiter<N>, usize, L, M>,
+        locked: LockedList<Waiter<N>, usize, (), L, M>,
         state: usize,
         mut notification: F,
     ) {
         let mut wakers = WakerList::<WAKER_LIST_SIZE>::new();
         locked.drain(|| state).for_each(
             &mut wakers,
-            |wakers, mut waiter| {
+            |wakers, mut waiter, _| {
                 if let Some(notification) = notification() {
                     waiter.notification = Some(notification);
                 }
@@ -160,7 +160,7 @@ impl<N: Unpin, S: Synchronization, L: Linking, M: Mutex, const WAKER_LIST_SIZE: 
     }
 
     fn wake_single_locked<E: ListGetEnd, F: FnOnce() -> Notification<N>>(
-        mut locked: LockedList<Waiter<N>, usize, L, M>,
+        mut locked: LockedList<Waiter<N>, usize, (), L, M>,
         notification: F,
     ) {
         let Some(mut waiter) = E::get_end(&mut locked) else {
@@ -289,10 +289,11 @@ impl<N: Unpin, S: Synchronization, L: Linking, M: Mutex, const WAKER_LIST_SIZE: 
 {
     type NodeData = Waiter<N>;
     type ListState = usize;
+    type ListData = ();
     type Linking = L;
     type Mutex = M;
 
-    fn as_list(&self) -> &List<Waiter<N>, usize, L, M> {
+    fn as_list(&self) -> &List<Waiter<N>, usize, (), L, M> {
         &self.0.list
     }
 }
@@ -310,7 +311,7 @@ impl<'a, N: Unpin, S: Synchronization, L: Linking, M: Mutex, const WAKER_LIST_SI
     fn on_drop<'list>(
         self: Pin<&mut Self>,
         list: &'list WaitListRef<'a, N, S, L, M, WAKER_LIST_SIZE>,
-        locked: Option<LockedList<'list, Self, usize, L, M>>,
+        locked: Option<LockedList<'list, Self, usize, (), L, M>>,
         state_updated_on_unlink: bool,
     ) {
         let Some(notif @ (Notification::One(_) | Notification::Last(_))) =

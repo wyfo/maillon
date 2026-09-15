@@ -20,7 +20,7 @@ use rstest::rstest;
 mod linking;
 mod loom;
 
-type TestList<L> = List<TestData, (), L>;
+type TestList<L> = List<TestData, (), (), L>;
 type TestNode<'a, L> = Node<&'a TestList<L>>;
 struct TestData(usize);
 impl<'a, L: Linking> NodeData<&'a TestList<L>> for TestData {
@@ -28,7 +28,7 @@ impl<'a, L: Linking> NodeData<&'a TestList<L>> for TestData {
     fn on_drop<'list>(
         self: Pin<&mut Self>,
         _list: &'list &'a TestList<L>,
-        _locked: Option<LockedList<'list, Self, (), L>>,
+        _locked: Option<LockedList<'list, Self, (), (), L>>,
         _state_updated_on_unlink: bool,
     ) {
     }

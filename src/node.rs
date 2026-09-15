@@ -13,10 +13,11 @@ use crate::{
 };
 
 #[expect(type_alias_bounds)]
-type List<L: ListRef> = crate::list::List<L::NodeData, L::ListState, L::Linking, L::Mutex>;
+type List<L: ListRef> =
+    crate::list::List<L::NodeData, L::ListState, L::ListData, L::Linking, L::Mutex>;
 #[expect(type_alias_bounds)]
 type LockedList<'a, L: ListRef> =
-    crate::list::LockedList<'a, L::NodeData, L::ListState, L::Linking, L::Mutex>;
+    crate::list::LockedList<'a, L::NodeData, L::ListState, L::ListData, L::Linking, L::Mutex>;
 
 pub trait NodeData<L: ListRef + ?Sized>: Sized {
     fn new_state_if_last_node_on_drop(self: Pin<&mut Self>, list: &L) -> L::ListState;
@@ -207,9 +208,8 @@ unsafe impl<L: ListRef<NodeData: Sync> + Sync> Sync for NodeUnlinked<'_, L> {}
 
 node_ref!(
     NodeUnlinked<'a, L: ListRef>,
-    L::NodeData,
-    L::Linking,
-    self.0.link()
+    (L::NodeData, L::Linking),
+    (self.0.link())
 );
 
 impl<'a, L: ListRef> NodeUnlinked<'a, L> {
@@ -285,9 +285,9 @@ unsafe impl<'a, L: ListRef<NodeData: Sync> + Sync> Sync for NodeLinked<'a, L> wh
 
 node_ref!(
     NodeLinked<'a, L: ListRef>,
-    L::NodeData,
-    L::Linking,
-    self.node.link()
+    (L::NodeData, L::Linking, L::ListData),
+    (self.node.link()),
+    (self.locked)
 );
 
 impl<'a, L: ListRef> NodeLinked<'a, L> {
@@ -322,39 +322,94 @@ struct NodeDropped<'a, L: ListRef>(&'a Node<L>);
 
 node_ref!(
     NodeDropped<'a, L: ListRef>,
-    L::NodeData,
-    L::Linking,
-    self.0.link()
+    (L::NodeData, L::Linking),
+    (self.0.link())
 );
 
-pub(crate) mod private {
-    use core::ptr::NonNull;
+pub(crate) trait PrivateNodeRef<T> {
+    type Linking: Linking;
 
-    use crate::{list::Linking, node::NodeLink};
+    fn node(&self) -> NonNull<NodeLink<Self::Linking>>;
 
-    pub(crate) trait NodeRef {
-        type Linking: Linking;
-
-        fn node(&self) -> NonNull<NodeLink<Self::Linking>>;
+    #[inline(always)]
+    fn data_ptr(&self) -> *mut T {
+        NodeLink::data_ptr(self.node())
     }
 }
 
 #[expect(private_bounds)]
-pub trait NodeRef<T>: private::NodeRef {
+pub trait NodeRef<T>: PrivateNodeRef<T> {
     #[inline]
     fn data(&self) -> &T {
-        unsafe { &*NodeLink::data_ptr(self.node()) }
+        unsafe { &*self.data_ptr() }
     }
 
     #[inline]
     fn data_mut(&mut self) -> Pin<&mut T> {
-        unsafe { Pin::new_unchecked(&mut *NodeLink::data_ptr(self.node())) }
+        unsafe { Pin::new_unchecked(&mut *self.data_ptr()) }
+    }
+}
+
+pub(crate) trait PrivateLinkedNodeRef<T, D>: PrivateNodeRef<T> {
+    fn list_data_ptr(&self) -> *mut D;
+}
+
+#[expect(private_bounds)]
+pub trait LinkedNodeRef<T, D>: NodeRef<T> + PrivateLinkedNodeRef<T, D> {
+    #[inline]
+    fn list_data(&self) -> &D {
+        unsafe { &*self.list_data_ptr() }
+    }
+
+    #[inline]
+    fn list_data_mut(&mut self) -> &mut D {
+        unsafe { &mut *self.list_data_ptr() }
+    }
+
+    #[inline]
+    fn split_data(&mut self) -> (Pin<&mut T>, &mut D) {
+        unsafe {
+            (
+                Pin::new_unchecked(&mut *self.data_ptr()),
+                &mut *self.list_data_ptr(),
+            )
+        }
     }
 }
 
 macro_rules! node_ref {
-    ($ty:ident<$($lf:lifetime,)* $($arg:ident $(:$bound:path)?),* $(,)?>, $data:ty, $linking:ty, self.$($node_path:tt)*) => {
-        impl<$($lf,)* $($arg $(:$bound)?),*> crate::node::private::NodeRef
+    (
+        $ty:ident<$($lf:lifetime,)* $($arg:ident $(:$bound:path)?),* $(,)?>,
+        ($data:ty, $linking:ty, $list_data:ty),
+        (self.$($node_path:tt)*),
+        (self.$($locked_path:tt)*)
+    ) => {
+        crate::node::node_ref!(
+            $ty<$($lf,)* $($arg $(:$bound)?),*>,
+            ($data, $linking),
+            (self.$($node_path)*)
+        );
+
+        impl<$($lf,)* $($arg $(:$bound)?),*> crate::node::PrivateLinkedNodeRef<$data, $list_data>
+            for $ty<$($lf,)* $($arg),*>
+        {
+            #[inline(always)]
+            fn list_data_ptr(&self) -> *mut $list_data {
+                self.$($locked_path)*.data_ptr()
+            }
+        }
+
+        impl<$($lf,)* $($arg $(:$bound)?),*> crate::node::LinkedNodeRef<$data, $list_data>
+            for $ty<$($lf,)* $($arg),*>
+        {
+        }
+    };
+    (
+        $ty:ident<$($lf:lifetime,)* $($arg:ident $(:$bound:path)?),* $(,)?>,
+        ($data:ty, $linking:ty),
+        (self.$($node_path:tt)*)
+    ) => {
+        impl<$($lf,)* $($arg $(:$bound)?),*> crate::node::PrivateNodeRef<$data>
             for $ty<$($lf,)* $($arg),*>
         {
             type Linking = $linking;

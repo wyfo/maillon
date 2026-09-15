@@ -10,39 +10,55 @@ pub struct ListCursor<
     'a,
     T,
     S: ListState = (),
+    D = (),
     L: Linking = Eager,
     M: Mutex = DefaultMutex,
 > {
     node: Option<NonNull<NodeLink<L>>>,
-    locked: &'a mut LockedList<'locked, T, S, L, M>,
+    locked: &'a mut LockedList<'locked, T, S, D, L, M>,
 }
 
-unsafe impl<'locked, T: Send, S: ListState, L: Linking, M: Mutex> Send
-    for ListCursor<'locked, '_, T, S, L, M>
+unsafe impl<'locked, T: Send, S: ListState, D, L: Linking, M: Mutex> Send
+    for ListCursor<'locked, '_, T, S, D, L, M>
 where
-    LockedList<'locked, T, S, L, M>: Send,
+    LockedList<'locked, T, S, D, L, M>: Send,
 {
 }
-unsafe impl<'locked, T: Sync, S: ListState, L: Linking, M: Mutex> Sync
-    for ListCursor<'locked, '_, T, S, L, M>
+unsafe impl<'locked, T: Sync, S: ListState, D, L: Linking, M: Mutex> Sync
+    for ListCursor<'locked, '_, T, S, D, L, M>
 where
-    LockedList<'locked, T, S, L, M>: Sync,
+    LockedList<'locked, T, S, D, L, M>: Sync,
 {
 }
 
-impl<'locked, 'a, T, S: ListState, L: Linking, M: Mutex> ListCursor<'locked, 'a, T, S, L, M> {
+impl<'locked, 'a, T, S: ListState, D, L: Linking, M: Mutex> ListCursor<'locked, 'a, T, S, D, L, M> {
     #[inline]
     pub(super) fn new(
         node: Option<NonNull<NodeLink<L>>>,
-        locked: &'a mut LockedList<'locked, T, S, L, M>,
+        locked: &'a mut LockedList<'locked, T, S, D, L, M>,
     ) -> Self {
         Self { node, locked }
     }
 
     #[inline]
     pub fn current(&mut self) -> Option<Pin<&mut T>> {
-        let node = self.node?;
-        Some(unsafe { Pin::new_unchecked(&mut *NodeLink::data_ptr::<T>(node)) })
+        Some(unsafe { Pin::new_unchecked(&mut *NodeLink::data_ptr::<T>(self.node?)) })
+    }
+
+    #[inline]
+    pub fn list_data(&self) -> &D {
+        self.locked.data()
+    }
+
+    #[inline]
+    pub fn list_data_mut(&mut self) -> &mut D {
+        self.locked.data_mut()
+    }
+
+    #[inline]
+    pub fn split_current_data(&mut self) -> Option<(Pin<&mut T>, &mut D)> {
+        let current = unsafe { Pin::new_unchecked(&mut *NodeLink::data_ptr::<T>(self.node?)) };
+        Some((current, self.locked.data_mut()))
     }
 
     #[inline]
@@ -89,14 +105,14 @@ impl<'locked, 'a, T, S: ListState, L: Linking, M: Mutex> ListCursor<'locked, 'a,
     }
 }
 
-impl<T, L: Linking, M: Mutex> ListCursor<'_, '_, T, (), L, M> {
+impl<T, D, L: Linking, M: Mutex> ListCursor<'_, '_, T, (), D, L, M> {
     #[inline]
     pub fn remove_current(&mut self) -> bool {
         self.remove_current_impl(|| ()).is_some()
     }
 }
 
-impl<T, L: Linking, M: Mutex> ListCursor<'_, '_, T, usize, L, M> {
+impl<T, D, L: Linking, M: Mutex> ListCursor<'_, '_, T, usize, D, L, M> {
     #[inline]
     pub fn remove_current<F: FnOnce() -> usize>(
         &mut self,

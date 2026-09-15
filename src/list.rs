@@ -1,11 +1,13 @@
-use core::{marker::PhantomData, mem::ManuallyDrop, ops::Deref, ptr, ptr::NonNull};
+use core::{
+    cell::UnsafeCell, marker::PhantomData, mem::ManuallyDrop, ops::Deref, ptr, ptr::NonNull,
+};
 
 use crate::{
     loom::{
         AtomicPtrExt,
         sync::atomic::{AtomicPtr, Ordering, Ordering::*, fence},
     },
-    node::{NodeData, NodeLink, NodeRef, node_ref},
+    node::{LinkedNodeRef, NodeData, NodeLink, node_ref},
     sync::mutex::{DefaultMutex, Mutex},
 };
 
@@ -23,20 +25,32 @@ type MutexGuard<'a, M> = <M as Mutex>::Guard<'a>;
 
 const HEAD_MARKER: usize = 1;
 
-pub struct List<T, S: ListState = (), L: Linking = Eager, M: Mutex = DefaultMutex> {
+pub struct List<T, S: ListState = (), D = (), L: Linking = Eager, M: Mutex = DefaultMutex> {
     tail: AtomicPtr<Tail<S, L>>,
     head: L::NextPtr,
     mutex: M,
     parker: L::Parker,
+    data: UnsafeCell<D>,
+    // TODO same trick as `NodeInner::access`
+    #[cfg(loom)]
+    data_access: crate::loom::cell::Cell<()>,
     _node_data: PhantomData<T>,
 }
 
-unsafe impl<T: Send, S: ListState, L: Linking, M: Mutex> Send for List<T, S, L, M> {}
-unsafe impl<T: Send, S: ListState, L: Linking, M: Mutex> Sync for List<T, S, L, M> {}
+unsafe impl<T: Send, S: ListState, D: Send, L: Linking, M: Mutex> Send for List<T, S, D, L, M> {}
+unsafe impl<T: Send, S: ListState, D: Send, L: Linking, M: Mutex> Sync for List<T, S, D, L, M> {}
 
-impl<T, S: ListState, L: Linking, M: Mutex> List<T, S, L, M> {
+impl<T, S: ListState, L: Linking, M: Mutex> List<T, S, (), L, M> {
     #[cfg_attr(loom, const_fn::const_fn(cfg(false)))]
-    const fn new_impl(tail: *mut Tail<S, L>) -> Self {
+    #[inline]
+    pub const fn new() -> Self {
+        Self::new_impl(ptr::null_mut(), ())
+    }
+}
+
+impl<T, S: ListState, D, L: Linking, M: Mutex> List<T, S, D, L, M> {
+    #[cfg_attr(loom, const_fn::const_fn(cfg(false)))]
+    const fn new_impl(tail: *mut Tail<S, L>, data: D) -> Self {
         Self {
             tail: AtomicPtr::new(tail),
             #[cfg(not(loom))]
@@ -51,14 +65,27 @@ impl<T, S: ListState, L: Linking, M: Mutex> List<T, S, L, M> {
             parker: L::NEW_PARKER,
             #[cfg(loom)]
             parker: L::new_parker(),
+            data: UnsafeCell::new(data),
+            #[cfg(loom)]
+            data_access: crate::loom::cell::Cell::new(()),
             _node_data: PhantomData,
         }
     }
 
     #[cfg_attr(loom, const_fn::const_fn(cfg(false)))]
     #[inline]
-    pub const fn new() -> Self {
-        Self::new_impl(ptr::null_mut())
+    pub const fn with_data(data: D) -> Self {
+        Self::new_impl(ptr::null_mut(), data)
+    }
+
+    #[inline]
+    pub const fn data_mut(&mut self) -> &mut D {
+        self.data.get_mut()
+    }
+
+    #[inline]
+    pub fn into_data(self) -> D {
+        self.data.into_inner()
     }
 
     #[inline(always)]
@@ -77,7 +104,7 @@ impl<T, S: ListState, L: Linking, M: Mutex> List<T, S, L, M> {
     }
 
     #[inline]
-    pub fn lock(&self) -> LockedList<'_, T, S, L, M> {
+    pub fn lock(&self) -> LockedList<'_, T, S, D, L, M> {
         LockedList {
             list: self,
             guard: ManuallyDrop::new(self.mutex.lock()),
@@ -131,11 +158,19 @@ impl<T, S: ListState, L: Linking, M: Mutex> List<T, S, L, M> {
     }
 }
 
-impl<T, L: Linking, M: Mutex> List<T, usize, L, M> {
+impl<T, L: Linking, M: Mutex> List<T, usize, (), L, M> {
     #[cfg_attr(loom, const_fn::const_fn(cfg(false)))]
     #[inline]
     pub const fn with_state(state: usize) -> Self {
-        Self::new_impl(state_to_ptr(state))
+        Self::new_impl(state_to_ptr(state), ())
+    }
+}
+
+impl<T, D, L: Linking, M: Mutex> List<T, usize, D, L, M> {
+    #[cfg_attr(loom, const_fn::const_fn(cfg(false)))]
+    #[inline]
+    pub const fn with_state_and_data(state: usize, data: D) -> Self {
+        Self::new_impl(state_to_ptr(state), data)
     }
 
     #[inline]
@@ -208,7 +243,7 @@ impl<T, L: Linking, M: Mutex> List<T, usize, L, M> {
         set_order: Ordering,
         fetch_order: Ordering,
         mut f: F,
-    ) -> Result<usize, LockedList<'_, T, usize, L, M>> {
+    ) -> Result<usize, LockedList<'_, T, usize, D, L, M>> {
         if let Ok(s) = self.try_update_state(set_order, fetch_order, |s| Some(f(s))) {
             return Ok(s);
         }
@@ -221,7 +256,7 @@ impl<T, L: Linking, M: Mutex> List<T, usize, L, M> {
     pub fn update_state_or_lock_with<
         'a,
         F: FnMut(usize) -> usize,
-        G: FnOnce(LockedList<'a, T, usize, L, M>),
+        G: FnOnce(LockedList<'a, T, usize, D, L, M>),
     >(
         &'a self,
         set_order: Ordering,
@@ -239,7 +274,7 @@ impl<T, L: Linking, M: Mutex> List<T, usize, L, M> {
     fn update_state_or_lock_with_cold<
         'a,
         F: FnMut(usize) -> usize,
-        G: FnOnce(LockedList<'a, T, usize, L, M>),
+        G: FnOnce(LockedList<'a, T, usize, D, L, M>),
     >(
         &'a self,
         set_order: Ordering,
@@ -254,24 +289,29 @@ impl<T, L: Linking, M: Mutex> List<T, usize, L, M> {
     }
 }
 
-impl<T, S: ListState, L: Linking, M: Mutex> Default for List<T, S, L, M> {
+impl<T, S: ListState, D: Default, L: Linking, M: Mutex> Default for List<T, S, D, L, M> {
     fn default() -> Self {
-        Self::new()
+        Self::with_data(D::default())
     }
 }
 
 pub trait ListRef {
     type NodeData: NodeData<Self>;
     type ListState: ListState;
+    type ListData;
     type Linking: Linking;
     type Mutex: Mutex;
 
-    fn as_list(&self) -> &List<Self::NodeData, Self::ListState, Self::Linking, Self::Mutex>;
+    #[allow(clippy::type_complexity)]
+    fn as_list(
+        &self,
+    ) -> &List<Self::NodeData, Self::ListState, Self::ListData, Self::Linking, Self::Mutex>;
 }
 
-impl<T: NodeData<Self>, S: ListState, L: Linking, M: Mutex> ListRef for List<T, S, L, M> {
+impl<T: NodeData<Self>, S: ListState, D, L: Linking, M: Mutex> ListRef for List<T, S, D, L, M> {
     type NodeData = T;
     type ListState = S;
+    type ListData = D;
     type Linking = L;
     type Mutex = M;
 
@@ -280,26 +320,31 @@ impl<T: NodeData<Self>, S: ListState, L: Linking, M: Mutex> ListRef for List<T, 
     }
 }
 
-impl<T: NodeData<Self>, S: ListState, L: Linking, M: Mutex> ListRef for &List<T, S, L, M> {
+impl<T: NodeData<Self>, S: ListState, D, L: Linking, M: Mutex> ListRef for &List<T, S, D, L, M> {
     type NodeData = T;
     type ListState = S;
+    type ListData = D;
     type Linking = L;
     type Mutex = M;
 
-    fn as_list(&self) -> &List<T, S, L, M> {
+    fn as_list(&self) -> &List<T, S, D, L, M> {
         self
     }
 }
 
-pub struct LockedList<'a, T, S: ListState = (), L: Linking = Eager, M: Mutex = DefaultMutex> {
-    list: &'a List<T, S, L, M>,
+pub struct LockedList<'a, T, S: ListState = (), D = (), L: Linking = Eager, M: Mutex = DefaultMutex>
+{
+    list: &'a List<T, S, D, L, M>,
     guard: ManuallyDrop<MutexGuard<'a, M>>,
     _not_send: PhantomData<*mut ()>,
 }
 
-unsafe impl<'a, T: Send, S: ListState, L: Linking, M: Mutex> Sync for LockedList<'a, T, S, L, M> {}
+unsafe impl<'a, T: Send, S: ListState, D: Sync, L: Linking, M: Mutex> Sync
+    for LockedList<'a, T, S, D, L, M>
+{
+}
 
-impl<'a, T, S: ListState, L: Linking, M: Mutex> LockedList<'a, T, S, L, M> {
+impl<'a, T, S: ListState, D, L: Linking, M: Mutex> LockedList<'a, T, S, D, L, M> {
     /// [`Linking::get_next`] with the list's head slot and parker filled in.
     #[inline(always)]
     fn get_next(
@@ -312,7 +357,7 @@ impl<'a, T, S: ListState, L: Linking, M: Mutex> LockedList<'a, T, S, L, M> {
     }
 
     #[inline]
-    pub fn front(&mut self) -> Option<ListFront<'a, '_, T, S, L, M>>
+    pub fn front(&mut self) -> Option<ListFront<'a, '_, T, S, D, L, M>>
     where
         L: Linking,
     {
@@ -321,23 +366,41 @@ impl<'a, T, S: ListState, L: Linking, M: Mutex> LockedList<'a, T, S, L, M> {
     }
 
     #[inline]
-    pub fn back(&mut self) -> Option<ListBack<'a, '_, T, S, L, M>> {
+    pub fn back(&mut self) -> Option<ListBack<'a, '_, T, S, D, L, M>> {
         let node = self.tail()?;
         Some(ListBack { node, locked: self })
     }
 
     #[inline]
-    pub fn cursor_front(&mut self) -> ListCursor<'a, '_, T, S, L, M> {
+    pub fn cursor_front(&mut self) -> ListCursor<'a, '_, T, S, D, L, M> {
         ListCursor::new(self.front().map(|f| f.node), self)
     }
 
     #[inline]
-    pub fn cursor_back(&mut self) -> ListCursor<'a, '_, T, S, L, M> {
+    pub fn cursor_back(&mut self) -> ListCursor<'a, '_, T, S, D, L, M> {
         ListCursor::new(self.back().map(|t| t.node), self)
     }
 
-    pub fn unlock(self) -> &'a List<T, S, L, M> {
+    pub fn unlock(self) -> &'a List<T, S, D, L, M> {
         self.list
+    }
+
+    // TODO same trick as `NodeLink::data_ptr` for loom
+    #[inline(always)]
+    pub(crate) fn data_ptr(&self) -> *mut D {
+        #[cfg(loom)]
+        self.list.data_access.set(());
+        self.list.data.get()
+    }
+
+    #[inline]
+    pub fn data(&self) -> &D {
+        unsafe { &*self.data_ptr() }
+    }
+
+    #[inline]
+    pub fn data_mut(&mut self) -> &mut D {
+        unsafe { &mut *self.data_ptr() }
     }
 
     #[allow(clippy::type_complexity)]
@@ -414,64 +477,78 @@ impl<'a, T, S: ListState, L: Linking, M: Mutex> LockedList<'a, T, S, L, M> {
     }
 }
 
-impl<'a, T, L: Linking, M: Mutex> LockedList<'a, T, (), L, M> {
+impl<'a, T, D, L: Linking, M: Mutex> LockedList<'a, T, (), D, L, M> {
     #[inline]
-    pub fn drain(self) -> Drain<'a, T, (), L, M> {
+    pub fn drain(self) -> Drain<'a, T, (), D, L, M> {
         Drain::new(self, || ())
     }
 }
 
-impl<'a, T, L: Linking, M: Mutex> LockedList<'a, T, usize, L, M> {
+impl<'a, T, D, L: Linking, M: Mutex> LockedList<'a, T, usize, D, L, M> {
     pub fn drain<F: FnOnce() -> usize>(
         self,
         new_state_if_not_empty: F,
-    ) -> Drain<'a, T, usize, L, M> {
+    ) -> Drain<'a, T, usize, D, L, M> {
         Drain::new(self, new_state_if_not_empty)
     }
 }
 
-impl<T, S: ListState, L: Linking, M: Mutex> Drop for LockedList<'_, T, S, L, M> {
+impl<T, S: ListState, D, L: Linking, M: Mutex> Drop for LockedList<'_, T, S, D, L, M> {
     #[inline]
     fn drop(&mut self) {
         unsafe { self.list.mutex.unlock(ManuallyDrop::take(&mut self.guard)) };
     }
 }
 
-impl<T, S: ListState, L: Linking, M: Mutex> Deref for LockedList<'_, T, S, L, M> {
-    type Target = List<T, S, L, M>;
+impl<T, S: ListState, D, L: Linking, M: Mutex> Deref for LockedList<'_, T, S, D, L, M> {
+    type Target = List<T, S, D, L, M>;
 
     fn deref(&self) -> &Self::Target {
         self.list
     }
 }
 
-pub trait ListEnd<'locked, 'a, T, S: ListState = (), L: Linking = Eager, M: Mutex = DefaultMutex>:
-    NodeRef<T> + Sized
+pub trait ListEnd<
+    'locked,
+    'a,
+    T,
+    S: ListState = (),
+    D = (),
+    L: Linking = Eager,
+    M: Mutex = DefaultMutex,
+>: LinkedNodeRef<T, D> + Sized
 {
     fn unlink<F: FnOnce() -> S>(self, new_state_if_last_node: F) -> Option<Self>;
 }
 
-pub struct ListFront<'locked, 'a, T, S: ListState = (), L: Linking = Eager, M: Mutex = DefaultMutex>
-{
+pub struct ListFront<
+    'locked,
+    'a,
+    T,
+    S: ListState = (),
+    D = (),
+    L: Linking = Eager,
+    M: Mutex = DefaultMutex,
+> {
     node: NonNull<NodeLink<L>>,
-    locked: &'a mut LockedList<'locked, T, S, L, M>,
+    locked: &'a mut LockedList<'locked, T, S, D, L, M>,
 }
 
-unsafe impl<'locked, T: Send, S: ListState, L: Linking, M: Mutex> Send
-    for ListFront<'locked, '_, T, S, L, M>
+unsafe impl<'locked, T: Send, S: ListState, D, L: Linking, M: Mutex> Send
+    for ListFront<'locked, '_, T, S, D, L, M>
 where
-    LockedList<'locked, T, S, L, M>: Send,
+    LockedList<'locked, T, S, D, L, M>: Send,
 {
 }
-unsafe impl<'locked, T: Sync, S: ListState, L: Linking, M: Mutex> Sync
-    for ListFront<'locked, '_, T, S, L, M>
+unsafe impl<'locked, T: Sync, S: ListState, D, L: Linking, M: Mutex> Sync
+    for ListFront<'locked, '_, T, S, D, L, M>
 where
-    LockedList<'locked, T, S, L, M>: Sync,
+    LockedList<'locked, T, S, D, L, M>: Sync,
 {
 }
 
-impl<'locked, 'a, T, S: ListState, L: Linking, M: Mutex> ListEnd<'locked, 'a, T, S, L, M>
-    for ListFront<'locked, 'a, T, S, L, M>
+impl<'locked, 'a, T, S: ListState, D, L: Linking, M: Mutex> ListEnd<'locked, 'a, T, S, D, L, M>
+    for ListFront<'locked, 'a, T, S, D, L, M>
 {
     #[inline]
     fn unlink<F: FnOnce() -> S>(self, new_state_if_last_node: F) -> Option<Self> {
@@ -484,46 +561,53 @@ impl<'locked, 'a, T, S: ListState, L: Linking, M: Mutex> ListEnd<'locked, 'a, T,
     }
 }
 
-impl<T, L: Linking, M: Mutex> ListFront<'_, '_, T, (), L, M> {
+impl<T, D, L: Linking, M: Mutex> ListFront<'_, '_, T, (), D, L, M> {
     pub fn unlink(self) -> Option<Self> {
         ListEnd::unlink(self, || ())
     }
 }
 
-impl<T, L: Linking, M: Mutex> ListFront<'_, '_, T, usize, L, M> {
+impl<T, D, L: Linking, M: Mutex> ListFront<'_, '_, T, usize, D, L, M> {
     pub fn unlink<F: FnOnce() -> usize>(self, new_state_if_last_node: F) -> Option<Self> {
         ListEnd::unlink(self, new_state_if_last_node)
     }
 }
 
 node_ref!(
-    ListFront<'locked, 'a, T, S: ListState, L: Linking, M: Mutex>,
-    T,
-    L,
-    self.node
+    ListFront<'locked, 'a, T, S: ListState, D, L: Linking, M: Mutex>,
+    (T, L, D),
+    (self.node),
+    (self.locked)
 );
 
-pub struct ListBack<'locked, 'a, T, S: ListState = (), L: Linking = Eager, M: Mutex = DefaultMutex>
-{
+pub struct ListBack<
+    'locked,
+    'a,
+    T,
+    S: ListState = (),
+    D = (),
+    L: Linking = Eager,
+    M: Mutex = DefaultMutex,
+> {
     node: NonNull<NodeLink<L>>,
-    locked: &'a mut LockedList<'locked, T, S, L, M>,
+    locked: &'a mut LockedList<'locked, T, S, D, L, M>,
 }
 
-unsafe impl<'locked, T: Send, S: ListState, L: Linking, M: Mutex> Send
-    for ListBack<'locked, '_, T, S, L, M>
+unsafe impl<'locked, T: Send, S: ListState, D, L: Linking, M: Mutex> Send
+    for ListBack<'locked, '_, T, S, D, L, M>
 where
-    LockedList<'locked, T, S, L, M>: Send,
+    LockedList<'locked, T, S, D, L, M>: Send,
 {
 }
-unsafe impl<'locked, T: Sync, S: ListState, L: Linking, M: Mutex> Sync
-    for ListBack<'locked, '_, T, S, L, M>
+unsafe impl<'locked, T: Sync, S: ListState, D, L: Linking, M: Mutex> Sync
+    for ListBack<'locked, '_, T, S, D, L, M>
 where
-    LockedList<'locked, T, S, L, M>: Sync,
+    LockedList<'locked, T, S, D, L, M>: Sync,
 {
 }
 
-impl<'locked, 'a, T, S: ListState, L: Linking, M: Mutex> ListEnd<'locked, 'a, T, S, L, M>
-    for ListBack<'locked, 'a, T, S, L, M>
+impl<'locked, 'a, T, S: ListState, D, L: Linking, M: Mutex> ListEnd<'locked, 'a, T, S, D, L, M>
+    for ListBack<'locked, 'a, T, S, D, L, M>
 {
     #[inline]
     fn unlink<F: FnOnce() -> S>(self, new_state_if_last_node: F) -> Option<Self> {
@@ -536,65 +620,68 @@ impl<'locked, 'a, T, S: ListState, L: Linking, M: Mutex> ListEnd<'locked, 'a, T,
     }
 }
 
-impl<T, L: Linking, M: Mutex> ListBack<'_, '_, T, (), L, M> {
+impl<T, D, L: Linking, M: Mutex> ListBack<'_, '_, T, (), D, L, M> {
     pub fn unlink(self) -> Option<Self> {
         ListEnd::unlink(self, || ())
     }
 }
 
-impl<T, L: Linking, M: Mutex> ListBack<'_, '_, T, usize, L, M> {
+impl<T, D, L: Linking, M: Mutex> ListBack<'_, '_, T, usize, D, L, M> {
     pub fn unlink<F: FnOnce() -> usize>(self, new_state_if_last_node: F) -> Option<Self> {
         ListEnd::unlink(self, new_state_if_last_node)
     }
 }
 
 node_ref!(
-    ListBack<'locked, 'a, T, S: ListState, L: Linking, M: Mutex>,
-    T,
-    L,
-    self.node
+    ListBack<'locked, 'a, T, S: ListState, D, L: Linking, M: Mutex>,
+    (T, L, D),
+    (self.node),
+    (self.locked)
 );
 
 pub struct GetFront;
 pub struct GetBack;
 
 pub trait ListGetEnd {
-    type ListEnd<'locked, 'a, T, S: ListState, L: Linking, M: Mutex>: ListEnd<'locked, 'a, T, S, L, M>
+    type ListEnd<'locked, 'a, T, S: ListState, D, L: Linking, M: Mutex>: ListEnd<'locked, 'a, T, S, D, L, M>
     where
         'locked: 'a,
-        T: 'locked;
+        T: 'locked,
+        D: 'locked;
 
-    fn get_end<'locked, 'a, T, S: ListState, L: Linking, M: Mutex>(
-        locked: &'a mut LockedList<'locked, T, S, L, M>,
-    ) -> Option<Self::ListEnd<'locked, 'a, T, S, L, M>>;
+    fn get_end<'locked, 'a, T, S: ListState, D, L: Linking, M: Mutex>(
+        locked: &'a mut LockedList<'locked, T, S, D, L, M>,
+    ) -> Option<Self::ListEnd<'locked, 'a, T, S, D, L, M>>;
 }
 
 impl ListGetEnd for GetFront {
-    type ListEnd<'locked, 'a, T, S: ListState, L: Linking, M: Mutex>
-        = ListFront<'locked, 'a, T, S, L, M>
+    type ListEnd<'locked, 'a, T, S: ListState, D, L: Linking, M: Mutex>
+        = ListFront<'locked, 'a, T, S, D, L, M>
     where
         'locked: 'a,
-        T: 'locked;
+        T: 'locked,
+        D: 'locked;
 
     #[inline]
-    fn get_end<'locked, 'a, T, S: ListState, L: Linking, M: Mutex>(
-        locked: &'a mut LockedList<'locked, T, S, L, M>,
-    ) -> Option<Self::ListEnd<'locked, 'a, T, S, L, M>> {
+    fn get_end<'locked, 'a, T, S: ListState, D, L: Linking, M: Mutex>(
+        locked: &'a mut LockedList<'locked, T, S, D, L, M>,
+    ) -> Option<Self::ListEnd<'locked, 'a, T, S, D, L, M>> {
         locked.front()
     }
 }
 
 impl ListGetEnd for GetBack {
-    type ListEnd<'locked, 'a, T, S: ListState, L: Linking, M: Mutex>
-        = ListBack<'locked, 'a, T, S, L, M>
+    type ListEnd<'locked, 'a, T, S: ListState, D, L: Linking, M: Mutex>
+        = ListBack<'locked, 'a, T, S, D, L, M>
     where
         'locked: 'a,
-        T: 'locked;
+        T: 'locked,
+        D: 'locked;
 
     #[inline]
-    fn get_end<'locked, 'a, T, S: ListState, L: Linking, M: Mutex>(
-        locked: &'a mut LockedList<'locked, T, S, L, M>,
-    ) -> Option<Self::ListEnd<'locked, 'a, T, S, L, M>> {
+    fn get_end<'locked, 'a, T, S: ListState, D, L: Linking, M: Mutex>(
+        locked: &'a mut LockedList<'locked, T, S, D, L, M>,
+    ) -> Option<Self::ListEnd<'locked, 'a, T, S, D, L, M>> {
         locked.back()
     }
 }

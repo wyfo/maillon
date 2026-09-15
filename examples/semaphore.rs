@@ -21,7 +21,7 @@ use arrayvec::ArrayVec;
 const CLOSED: usize = 1;
 const PERMIT_SHIFT: usize = 1;
 
-pub struct Semaphore<L: Linking = Eager>(List<Waiter, usize, L>);
+pub struct Semaphore<L: Linking = Eager>(List<Waiter, usize, (), L>);
 
 impl<L: Linking> Default for Semaphore<L> {
     fn default() -> Self {
@@ -71,7 +71,7 @@ impl<L: Linking> Semaphore<L> {
     fn add_permits_locked<'a>(
         &'a self,
         mut permits: usize,
-        mut locked: LockedList<'a, Waiter, usize, L>,
+        mut locked: LockedList<'a, Waiter, usize, (), L>,
     ) {
         assert!(!locked.is_empty(Relaxed));
         let mut wakers = ArrayVec::<Waker, 32>::new();
@@ -183,7 +183,7 @@ impl<L: Linking> Semaphore<L> {
             let mut wakers = ArrayVec::<Waker, 32>::new();
             locked.drain(|| CLOSED).for_each(
                 &mut wakers,
-                |wakers, mut waiter| {
+                |wakers, mut waiter, _| {
                     wakers.push(waiter.waker.take().unwrap());
                     wakers.is_full()
                 },
@@ -220,10 +220,11 @@ struct SemaphoreRef<'a, L: Linking>(&'a Semaphore<L>);
 impl<L: Linking> ListRef for SemaphoreRef<'_, L> {
     type NodeData = Waiter;
     type ListState = usize;
+    type ListData = ();
     type Linking = L;
     type Mutex = DefaultMutex;
 
-    fn as_list(&self) -> &List<Waiter, usize, L> {
+    fn as_list(&self) -> &List<Waiter, usize, (), L> {
         &self.0.0
     }
 }
@@ -237,7 +238,7 @@ impl<'a, L: Linking> NodeData<SemaphoreRef<'a, L>> for Waiter {
     fn on_drop<'list>(
         self: Pin<&mut Self>,
         list: &'list SemaphoreRef<'a, L>,
-        locked: Option<LockedList<'list, Self, usize, L, DefaultMutex>>,
+        locked: Option<LockedList<'list, Self, usize, (), L>>,
         state_updated_on_unlink: bool,
     ) {
         if state_updated_on_unlink || self.permits_remaining == 0 {

@@ -34,7 +34,7 @@ enum Notification {
 }
 
 pub struct Notify<L: Linking = Eager> {
-    list: List<Waiter, usize, L>,
+    list: List<Waiter, usize, (), L>,
     generation_backup: AtomicUsize,
 }
 
@@ -67,7 +67,7 @@ impl<L: Linking> Notify<L> {
     fn wake_single<'a, E: ListGetEnd>(
         &'a self,
         notification: Notification,
-        mut locked: LockedList<'a, Waiter, usize, L>,
+        mut locked: LockedList<'a, Waiter, usize, (), L>,
     ) {
         let mut waiter = E::get_end(&mut locked).unwrap();
         waiter.data_mut().notification = Some(notification);
@@ -89,13 +89,13 @@ impl<L: Linking> Notify<L> {
         self.notify_single::<GetBack>(Notification::Last);
     }
 
-    fn wake_waiters<'a>(&'a self, locked: LockedList<'a, Waiter, usize, L>) {
+    fn wake_waiters<'a>(&'a self, locked: LockedList<'a, Waiter, usize, (), L>) {
         let mut wakers = ArrayVec::<Waker, 32>::new();
         let next_generation =
             || (self.generation_backup.load(Relaxed)).wrapping_add(GENERATION_INCR);
         locked.drain(next_generation).for_each(
             &mut wakers,
-            |wakers, mut waiter| {
+            |wakers, mut waiter, _| {
                 waiter.notification = Some(Notification::All);
                 if let Some(waker) = waiter.waker.take() {
                     wakers.push(waker);
@@ -195,10 +195,11 @@ struct NotifyRef<N, L: Linking>(N, PhantomData<L>);
 impl<N: Deref<Target = Notify<L>>, L: Linking> ListRef for NotifyRef<N, L> {
     type NodeData = Waiter;
     type ListState = usize;
+    type ListData = ();
     type Linking = L;
     type Mutex = DefaultMutex;
 
-    fn as_list(&self) -> &List<Waiter, usize, L> {
+    fn as_list(&self) -> &List<Waiter, usize, (), L> {
         &self.0.list
     }
 }
@@ -212,7 +213,7 @@ impl<N: Deref<Target = Notify<L>>, L: Linking> NodeData<NotifyRef<N, L>> for Wai
     fn on_drop<'list>(
         self: Pin<&mut Self>,
         list: &'list NotifyRef<N, L>,
-        locked: Option<LockedList<'list, Self, usize, L, DefaultMutex>>,
+        locked: Option<LockedList<'list, Self, usize, (), L>>,
         state_updated_on_unlink: bool,
     ) {
         if let Some(locked) = locked {
