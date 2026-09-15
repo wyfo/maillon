@@ -80,7 +80,7 @@ impl<'a, N: Unpin, S: Synchronization, L: Linking, M: Mutex, const WAKER_LIST_SI
             }
             NodeState::Linked(node) => {
                 debug_assert!(node.notification.is_none());
-                node.unlink(|| STATE_OPEN);
+                node.unlink(|_, _| STATE_OPEN);
             }
         }
     }

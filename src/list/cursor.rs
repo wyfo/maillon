@@ -96,7 +96,10 @@ impl<'locked, 'a, T, S: ListState, D, L: Linking, M: Mutex> ListCursor<'locked, 
     }
 
     #[inline]
-    fn remove_current_impl<F: FnOnce() -> S>(&mut self, new_state_if_last_node: F) -> Option<bool> {
+    fn remove_current_impl<F: FnOnce(Pin<&mut T>, &mut D) -> S>(
+        &mut self,
+        new_state_if_last_node: F,
+    ) -> Option<bool> {
         let node = self.node?;
         let (next, tail) =
             unsafe { (self.locked).remove(node, new_state_if_last_node, false, false, true) };
@@ -108,13 +111,13 @@ impl<'locked, 'a, T, S: ListState, D, L: Linking, M: Mutex> ListCursor<'locked, 
 impl<T, D, L: Linking, M: Mutex> ListCursor<'_, '_, T, (), D, L, M> {
     #[inline]
     pub fn remove_current(&mut self) -> bool {
-        self.remove_current_impl(|| ()).is_some()
+        self.remove_current_impl(|_, _| ()).is_some()
     }
 }
 
 impl<T, D, L: Linking, M: Mutex> ListCursor<'_, '_, T, usize, D, L, M> {
     #[inline]
-    pub fn remove_current<F: FnOnce() -> usize>(
+    pub fn remove_current<F: FnOnce(Pin<&mut T>, &mut D) -> usize>(
         &mut self,
         new_state_if_last_node: F,
     ) -> Option<bool> {

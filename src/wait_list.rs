@@ -124,7 +124,7 @@ impl<N: Unpin, S: Synchronization, L: Linking, M: Mutex, const WAKER_LIST_SIZE: 
         mut notification: F,
     ) {
         let mut wakers = WakerList::<WAKER_LIST_SIZE>::new();
-        locked.drain(|| state).for_each(
+        locked.drain(|_| state).for_each(
             &mut wakers,
             |wakers, mut waiter, _| {
                 if let Some(notification) = notification() {
@@ -168,7 +168,7 @@ impl<N: Unpin, S: Synchronization, L: Linking, M: Mutex, const WAKER_LIST_SIZE: 
         };
         waiter.data_mut().notification = Some(notification());
         let waker = waiter.data_mut().waker.take();
-        waiter.unlink(|| STATE_OPEN);
+        waiter.unlink(|_, _| STATE_OPEN);
         drop(locked);
         if let Some(waker) = waker {
             waker.wake();
@@ -196,7 +196,7 @@ impl<N: Unpin, S: Synchronization, L: Linking, M: Mutex, const WAKER_LIST_SIZE: 
             if let Some(waker) = waiter.waker.take() {
                 wakers.push(waker);
             }
-            front = waiter.unlink(|| STATE_OPEN);
+            front = waiter.unlink(|_, _| STATE_OPEN);
             if wakers.is_full() {
                 let list = locked.unlock();
                 wakers.wake_all();
@@ -304,6 +304,7 @@ impl<'a, N: Unpin, S: Synchronization, L: Linking, M: Mutex, const WAKER_LIST_SI
     fn new_state_if_last_node_on_drop(
         self: Pin<&mut Self>,
         _list: &WaitListRef<'a, N, S, L, M, WAKER_LIST_SIZE>,
+        _list_data: &mut (),
     ) -> usize {
         STATE_OPEN
     }

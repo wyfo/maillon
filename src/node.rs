@@ -20,7 +20,11 @@ type LockedList<'a, L: ListRef> =
     crate::list::LockedList<'a, L::NodeData, L::ListState, L::ListData, L::Linking, L::Mutex>;
 
 pub trait NodeData<L: ListRef + ?Sized>: Sized {
-    fn new_state_if_last_node_on_drop(self: Pin<&mut Self>, list: &L) -> L::ListState;
+    fn new_state_if_last_node_on_drop(
+        self: Pin<&mut Self>,
+        list: &L,
+        list_data: &mut L::ListData,
+    ) -> L::ListState;
     fn on_drop<'list>(
         self: Pin<&mut Self>,
         list: &'list L,
@@ -165,7 +169,7 @@ impl<L: ListRef> Node<L> {
     }
 
     #[inline]
-    fn unlink<F: FnOnce() -> L::ListState>(
+    fn unlink<F: FnOnce(Pin<&mut L::NodeData>, &mut L::ListData) -> L::ListState>(
         &self,
         locked: &mut LockedList<'_, L>,
         new_state_if_last_node: F,
@@ -180,13 +184,14 @@ impl<L: ListRef> Node<L> {
     fn drop_linked(&mut self) {
         let list = unsafe { self.linked_list().unwrap_unchecked() };
         let mut locked = list.lock();
-        let mut node = NodeDropped(self);
         let mut state_updated = false;
         if self.is_linked() {
-            let new_state = || node.data_mut().new_state_if_last_node_on_drop(&self.list);
-            state_updated = self.unlink(&mut locked, new_state);
+            state_updated = self.unlink(&mut locked, |data, list_data| {
+                data.new_state_if_last_node_on_drop(&self.list, list_data)
+            });
         }
-        (node.data_mut()).on_drop(&self.list, Some(locked), state_updated);
+        let data = unsafe { Pin::new_unchecked(&mut *NodeLink::data_ptr(self.link())) };
+        L::NodeData::on_drop(data, &self.list, Some(locked), state_updated);
     }
 }
 
@@ -196,7 +201,8 @@ impl<L: ListRef> Drop for Node<L> {
         if self.is_maybe_linked() && self.is_linked() {
             self.drop_linked();
         } else {
-            (NodeDropped(self).data_mut()).on_drop(&self.list, None, false);
+            let data = unsafe { Pin::new_unchecked(&mut *NodeLink::data_ptr(self.link())) };
+            L::NodeData::on_drop(data, &self.list, None, false);
         }
     }
 }
@@ -300,7 +306,7 @@ impl<'a, L: ListRef> NodeLinked<'a, L> {
 impl<'a, L: ListRef<ListState = ()>> NodeLinked<'a, L, ()> {
     #[inline]
     pub fn unlink(mut self) -> (NodeUnlinked<'a, L>, LockedList<'a, L>) {
-        self.node.unlink(&mut self.locked, || ());
+        self.node.unlink(&mut self.locked, |_, _| ());
         self.node.linked_list.set(None);
         (NodeUnlinked(self.node), self.locked)
     }
@@ -308,7 +314,7 @@ impl<'a, L: ListRef<ListState = ()>> NodeLinked<'a, L, ()> {
 
 impl<'a, L: ListRef<ListState = usize>> NodeLinked<'a, L, usize> {
     #[inline]
-    pub fn unlink<F: FnOnce() -> L::ListState>(
+    pub fn unlink<F: FnOnce(Pin<&mut L::NodeData>, &mut L::ListData) -> L::ListState>(
         mut self,
         new_state_if_last_node: F,
     ) -> (NodeUnlinked<'a, L>, LockedList<'a, L>, bool) {
@@ -317,14 +323,6 @@ impl<'a, L: ListRef<ListState = usize>> NodeLinked<'a, L, usize> {
         (NodeUnlinked(self.node), self.locked, state_updated)
     }
 }
-
-struct NodeDropped<'a, L: ListRef>(&'a Node<L>);
-
-node_ref!(
-    NodeDropped<'a, L: ListRef>,
-    (L::NodeData, L::Linking),
-    (self.0.link())
-);
 
 pub(crate) trait PrivateNodeRef<T> {
     type Linking: Linking;

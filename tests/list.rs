@@ -24,7 +24,12 @@ type TestList<L> = List<TestData, (), (), L>;
 type TestNode<'a, L> = Node<&'a TestList<L>>;
 struct TestData(usize);
 impl<'a, L: Linking> NodeData<&'a TestList<L>> for TestData {
-    fn new_state_if_last_node_on_drop(self: Pin<&mut Self>, _list: &&'a TestList<L>) {}
+    fn new_state_if_last_node_on_drop(
+        self: Pin<&mut Self>,
+        _list: &&'a TestList<L>,
+        _list_data: &mut (),
+    ) {
+    }
     fn on_drop<'list>(
         self: Pin<&mut Self>,
         _list: &'list &'a TestList<L>,
@@ -87,7 +92,7 @@ fn remove_many<L: Linking, E: ListGetEnd>(
             let node = end.expect("cursor should reach every node");
             assert_eq!(node.data().0, id);
             assert!(nodes[id - 1].is_linked());
-            end = node.unlink(|| ());
+            end = node.unlink(|_, _| ());
             assert!(!nodes[id - 1].is_linked());
         }
         assert!(end.is_none());

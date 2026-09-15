@@ -84,7 +84,7 @@ impl<L: Linking> Semaphore<L> {
             permits -= waiter.permits_remaining as usize;
             waiter.permits_remaining = 0;
             wakers.push(waiter.waker.take().unwrap());
-            match waiter.unlink(|| permits << PERMIT_SHIFT) {
+            match waiter.unlink(|_, _| permits << PERMIT_SHIFT) {
                 Some(w) if permits > 0 => waiter = w,
                 _ => break,
             }
@@ -181,7 +181,7 @@ impl<L: Linking> Semaphore<L> {
         if let Err(locked) = (self.0).update_state_or_lock(Release, Relaxed, |state| state | CLOSED)
         {
             let mut wakers = ArrayVec::<Waker, 32>::new();
-            locked.drain(|| CLOSED).for_each(
+            locked.drain(|_| CLOSED).for_each(
                 &mut wakers,
                 |wakers, mut waiter, _| {
                     wakers.push(waiter.waker.take().unwrap());
@@ -230,7 +230,11 @@ impl<L: Linking> ListRef for SemaphoreRef<'_, L> {
 }
 
 impl<'a, L: Linking> NodeData<SemaphoreRef<'a, L>> for Waiter {
-    fn new_state_if_last_node_on_drop(self: Pin<&mut Self>, _list: &SemaphoreRef<'a, L>) -> usize {
+    fn new_state_if_last_node_on_drop(
+        self: Pin<&mut Self>,
+        _list: &SemaphoreRef<'a, L>,
+        _list_data: &mut (),
+    ) -> usize {
         ((self.permits_total - self.permits_remaining) as usize) << PERMIT_SHIFT
     }
 

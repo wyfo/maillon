@@ -12,6 +12,7 @@
 /// #     fn new_state_if_last_node_on_drop(
 /// #         self: Pin<&mut Self>,
 /// #         _list: &&List<MyNodeData>,
+/// #         _list_data: &mut (),
 /// #     ) -> () {
 /// #         todo!()
 /// #     }
@@ -53,6 +54,7 @@
 /// #     fn new_state_if_last_node_on_drop(
 /// #         self: Pin<&mut Self>,
 /// #         _list: &&List<MyNodeData>,
+/// #         _list_data: &mut (),
 /// #     ) -> () {
 /// #         todo!()
 /// #     }

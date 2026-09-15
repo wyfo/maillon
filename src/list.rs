@@ -1,5 +1,6 @@
 use core::{
-    cell::UnsafeCell, marker::PhantomData, mem::ManuallyDrop, ops::Deref, ptr, ptr::NonNull,
+    cell::UnsafeCell, marker::PhantomData, mem::ManuallyDrop, ops::Deref, pin::Pin, ptr,
+    ptr::NonNull,
 };
 
 use crate::{
@@ -405,7 +406,7 @@ impl<'a, T, S: ListState, D, L: Linking, M: Mutex> LockedList<'a, T, S, D, L, M>
 
     #[allow(clippy::type_complexity)]
     #[inline(always)]
-    pub(crate) unsafe fn remove<F: FnOnce() -> S>(
+    pub(crate) unsafe fn remove<F: FnOnce(Pin<&mut T>, &mut D) -> S>(
         &mut self,
         node: NonNull<NodeLink<L>>,
         new_state_if_last_node: F,
@@ -447,7 +448,10 @@ impl<'a, T, S: ListState, D, L: Linking, M: Mutex> LockedList<'a, T, S, D, L, M>
         if next.is_none() {
             L::update_next(prev_next, None);
             let new_tail = if is_head {
-                new_state_if_last_node().into_tail()
+                // TODO raw pointers: `prev_next` may borrow `self.head`
+                let data = unsafe { Pin::new_unchecked(&mut *NodeLink::data_ptr::<T>(node)) };
+                let list_data = unsafe { &mut *self.data_ptr() };
+                new_state_if_last_node(data, list_data).into_tail()
             } else {
                 prev.into_tail()
             };
@@ -480,12 +484,12 @@ impl<'a, T, S: ListState, D, L: Linking, M: Mutex> LockedList<'a, T, S, D, L, M>
 impl<'a, T, D, L: Linking, M: Mutex> LockedList<'a, T, (), D, L, M> {
     #[inline]
     pub fn drain(self) -> Drain<'a, T, (), D, L, M> {
-        Drain::new(self, || ())
+        Drain::new(self, |_| ())
     }
 }
 
 impl<'a, T, D, L: Linking, M: Mutex> LockedList<'a, T, usize, D, L, M> {
-    pub fn drain<F: FnOnce() -> usize>(
+    pub fn drain<F: FnOnce(&mut D) -> usize>(
         self,
         new_state_if_not_empty: F,
     ) -> Drain<'a, T, usize, D, L, M> {
@@ -518,7 +522,8 @@ pub trait ListEnd<
     M: Mutex = DefaultMutex,
 >: LinkedNodeRef<T, D> + Sized
 {
-    fn unlink<F: FnOnce() -> S>(self, new_state_if_last_node: F) -> Option<Self>;
+    fn unlink<F: FnOnce(Pin<&mut T>, &mut D) -> S>(self, new_state_if_last_node: F)
+    -> Option<Self>;
 }
 
 pub struct ListFront<
@@ -551,7 +556,10 @@ impl<'locked, 'a, T, S: ListState, D, L: Linking, M: Mutex> ListEnd<'locked, 'a,
     for ListFront<'locked, 'a, T, S, D, L, M>
 {
     #[inline]
-    fn unlink<F: FnOnce() -> S>(self, new_state_if_last_node: F) -> Option<Self> {
+    fn unlink<F: FnOnce(Pin<&mut T>, &mut D) -> S>(
+        self,
+        new_state_if_last_node: F,
+    ) -> Option<Self> {
         let (next, _) =
             unsafe { (self.locked).remove(self.node, new_state_if_last_node, true, false, false) };
         Some(Self {
@@ -563,12 +571,15 @@ impl<'locked, 'a, T, S: ListState, D, L: Linking, M: Mutex> ListEnd<'locked, 'a,
 
 impl<T, D, L: Linking, M: Mutex> ListFront<'_, '_, T, (), D, L, M> {
     pub fn unlink(self) -> Option<Self> {
-        ListEnd::unlink(self, || ())
+        ListEnd::unlink(self, |_, _| ())
     }
 }
 
 impl<T, D, L: Linking, M: Mutex> ListFront<'_, '_, T, usize, D, L, M> {
-    pub fn unlink<F: FnOnce() -> usize>(self, new_state_if_last_node: F) -> Option<Self> {
+    pub fn unlink<F: FnOnce(Pin<&mut T>, &mut D) -> usize>(
+        self,
+        new_state_if_last_node: F,
+    ) -> Option<Self> {
         ListEnd::unlink(self, new_state_if_last_node)
     }
 }
@@ -610,7 +621,10 @@ impl<'locked, 'a, T, S: ListState, D, L: Linking, M: Mutex> ListEnd<'locked, 'a,
     for ListBack<'locked, 'a, T, S, D, L, M>
 {
     #[inline]
-    fn unlink<F: FnOnce() -> S>(self, new_state_if_last_node: F) -> Option<Self> {
+    fn unlink<F: FnOnce(Pin<&mut T>, &mut D) -> S>(
+        self,
+        new_state_if_last_node: F,
+    ) -> Option<Self> {
         let (_, tail) =
             unsafe { (self.locked).remove(self.node, new_state_if_last_node, false, true, false) };
         Some(Self {
@@ -622,12 +636,15 @@ impl<'locked, 'a, T, S: ListState, D, L: Linking, M: Mutex> ListEnd<'locked, 'a,
 
 impl<T, D, L: Linking, M: Mutex> ListBack<'_, '_, T, (), D, L, M> {
     pub fn unlink(self) -> Option<Self> {
-        ListEnd::unlink(self, || ())
+        ListEnd::unlink(self, |_, _| ())
     }
 }
 
 impl<T, D, L: Linking, M: Mutex> ListBack<'_, '_, T, usize, D, L, M> {
-    pub fn unlink<F: FnOnce() -> usize>(self, new_state_if_last_node: F) -> Option<Self> {
+    pub fn unlink<F: FnOnce(Pin<&mut T>, &mut D) -> usize>(
+        self,
+        new_state_if_last_node: F,
+    ) -> Option<Self> {
         ListEnd::unlink(self, new_state_if_last_node)
     }
 }

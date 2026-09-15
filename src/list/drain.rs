@@ -28,8 +28,8 @@ pub struct Drain<'a, T, S: ListState = (), D = (), L: Linking = Eager, M: Mutex 
 }
 
 impl<'a, T, S: ListState, D, L: Linking, M: Mutex> Drain<'a, T, S, D, L, M> {
-    pub(super) fn new<F: FnOnce() -> S>(
-        locked: LockedList<'a, T, S, D, L, M>,
+    pub(super) fn new<F: FnOnce(&mut D) -> S>(
+        mut locked: LockedList<'a, T, S, D, L, M>,
         new_state_if_not_empty: F,
     ) -> Self {
         let mut head = None;
@@ -53,7 +53,7 @@ impl<'a, T, S: ListState, D, L: Linking, M: Mutex> Drain<'a, T, S, D, L, M> {
             // and coherence-ordered-before applies to any modification whatever its ordering
             // (https://github.com/rust-lang/miri/issues/5104, fixed by #5111), so the tail's
             // own modification order settles who wins.
-            let new_tail = new_state_if_not_empty().into_tail();
+            let new_tail = new_state_if_not_empty(locked.data_mut()).into_tail();
             tail = Some(unsafe { locked.tail.swap(new_tail, AcqRel).ptr().unwrap_unchecked() });
         }
         Self {

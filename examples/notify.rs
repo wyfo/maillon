@@ -72,7 +72,7 @@ impl<L: Linking> Notify<L> {
         let mut waiter = E::get_end(&mut locked).unwrap();
         waiter.data_mut().notification = Some(notification);
         let waker = waiter.data_mut().waker.take();
-        waiter.unlink(|| self.generation_backup.load(Relaxed));
+        waiter.unlink(|_, _| self.generation_backup.load(Relaxed));
         drop(locked);
         if let Some(waker) = waker {
             waker.wake();
@@ -91,19 +91,19 @@ impl<L: Linking> Notify<L> {
 
     fn wake_waiters<'a>(&'a self, locked: LockedList<'a, Waiter, usize, (), L>) {
         let mut wakers = ArrayVec::<Waker, 32>::new();
-        let next_generation =
-            || (self.generation_backup.load(Relaxed)).wrapping_add(GENERATION_INCR);
-        locked.drain(next_generation).for_each(
-            &mut wakers,
-            |wakers, mut waiter, _| {
-                waiter.notification = Some(Notification::All);
-                if let Some(waker) = waiter.waker.take() {
-                    wakers.push(waker);
-                }
-                wakers.is_full()
-            },
-            |wakers| wakers.drain(..).for_each(Waker::wake),
-        );
+        locked
+            .drain(|_| (self.generation_backup.load(Relaxed)).wrapping_add(GENERATION_INCR))
+            .for_each(
+                &mut wakers,
+                |wakers, mut waiter, _| {
+                    waiter.notification = Some(Notification::All);
+                    if let Some(waker) = waiter.waker.take() {
+                        wakers.push(waker);
+                    }
+                    wakers.is_full()
+                },
+                |wakers| wakers.drain(..).for_each(Waker::wake),
+            );
     }
 
     pub fn notify_waiters(&self) {
@@ -205,7 +205,11 @@ impl<N: Deref<Target = Notify<L>>, L: Linking> ListRef for NotifyRef<N, L> {
 }
 
 impl<N: Deref<Target = Notify<L>>, L: Linking> NodeData<NotifyRef<N, L>> for Waiter {
-    fn new_state_if_last_node_on_drop(self: Pin<&mut Self>, list: &NotifyRef<N, L>) -> usize {
+    fn new_state_if_last_node_on_drop(
+        self: Pin<&mut Self>,
+        list: &NotifyRef<N, L>,
+        _list_data: &mut (),
+    ) -> usize {
         list.0.generation_backup.load(Relaxed)
     }
 
@@ -301,7 +305,7 @@ fn poll_notified<N: Deref<Target = Notify<L>>, L: Linking>(
             if node.list().0.generation() != node.generation {
                 // TODO if generation is different, the node must be in a drain list
                 node.completed = true;
-                node.unlink(|| unreachable!());
+                node.unlink(|_, _| unreachable!());
                 return Poll::Ready(());
             }
             if let Some(cx) = cx
