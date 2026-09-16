@@ -1,10 +1,13 @@
-use core::{cell::UnsafeCell, marker::PhantomData, mem::ManuallyDrop, pin::Pin, ptr, ptr::NonNull};
+use core::{cell::UnsafeCell, marker::PhantomData, mem::ManuallyDrop, pin::Pin, ptr::NonNull};
 
+#[allow(unused_imports)]
+use crate::msrv::StrictProvenance;
 use crate::{
     loom::{
         AtomicPtrExt,
         sync::atomic::{AtomicPtr, Ordering, Ordering::*, fence},
     },
+    msrv::ptr,
     node::{LinkedNodeRef, NodeData, NodeLink, NodeRef, NodeUnlinked, PrivateNodeRef, node_ref},
     sync::mutex::{DefaultMutex, Mutex},
     utils::abort_on_unwind,
@@ -78,7 +81,7 @@ impl<T, S: ListState, D, L: Linking, M: Mutex> List<T, S, D, L, M> {
     }
 
     #[inline]
-    pub const fn data_mut(&mut self) -> &mut D {
+    pub fn data_mut(&mut self) -> &mut D {
         self.data.get_mut()
     }
 
@@ -110,6 +113,7 @@ impl<T, S: ListState, D, L: Linking, M: Mutex> List<T, S, D, L, M> {
     }
 
     #[inline]
+    #[allow(clippy::incompatible_msrv, unstable_name_collisions)]
     pub fn is_empty_rmw(&self, order: Ordering) -> bool {
         self.tail.fetch_byte_add(0, order).ptr().is_none()
     }
@@ -123,6 +127,7 @@ impl<T, S: ListState, D, L: Linking, M: Mutex> List<T, S, D, L, M> {
         }
     }
 
+    #[allow(clippy::incompatible_msrv, unstable_name_collisions)]
     pub(crate) fn push_back<LR>(
         &self,
         mut node: NodeUnlinked<'_, LR>,
@@ -140,21 +145,21 @@ impl<T, S: ListState, D, L: Linking, M: Mutex> List<T, S, D, L, M> {
         let set_order = L::push_back_set_order(set_order);
         let mut tail = self.tail.load(fetch_order);
         let prev = loop {
-            let (new_tail, prev) = match S::tail_to_enum(tail) {
-                StateOrPtr::State(state)
-                    if let Some(f) = f.as_mut()
-                        && let Some(new_state) = f(node.data_mut(), state) =>
-                {
-                    (new_state.into_tail(), ptr::null_mut())
-                }
-                state_or_ptr if !on_push(node.data_mut(), state_or_ptr.state()) => {
+            let state_or_ptr = S::tail_to_enum(tail);
+            let new_state =
+                (state_or_ptr.state()).and_then(|state| f.as_mut()?(node.data_mut(), state));
+            let (new_tail, prev) = match new_state {
+                Some(new_state) => (new_state.into_tail(), ptr::null_mut()),
+                None if !on_push(node.data_mut(), state_or_ptr.state()) => {
                     unsafe { link.as_mut().prev.store_mut(ptr::null_mut()) };
                     return Err(false);
                 }
-                StateOrPtr::State(_) => {
-                    (link.into_tail(), ptr::without_provenance_mut(HEAD_MARKER))
-                }
-                StateOrPtr::Ptr(prev) => (link.into_tail(), prev.as_ptr()),
+                None => match state_or_ptr {
+                    StateOrPtr::State(_) => {
+                        (link.into_tail(), ptr::without_provenance_mut(HEAD_MARKER))
+                    }
+                    StateOrPtr::Ptr(prev) => (link.into_tail(), prev.as_ptr()),
+                },
             };
             unsafe { link.as_mut().prev.store_mut(prev) };
             if L::SERIALIZED {
@@ -169,7 +174,7 @@ impl<T, S: ListState, D, L: Linking, M: Mutex> List<T, S, D, L, M> {
         let prev_next = match prev.addr() {
             0 if f.is_some() => return Ok(unsafe { tail.state().unwrap_unchecked() }),
             HEAD_MARKER => NonNull::from(&self.head),
-            _ => unsafe { NonNull::new_unchecked((&raw const (*prev).next).cast_mut()) },
+            _ => unsafe { NonNull::new_unchecked(ptr::addr_of!((*prev).next).cast_mut()) },
         };
         L::store_next(prev_next, link, &self.parker);
         node.set_linked(self);
@@ -198,6 +203,7 @@ impl<T, D, L: Linking, M: Mutex> List<T, usize, D, L, M> {
     }
 
     #[inline]
+    #[allow(clippy::incompatible_msrv, unstable_name_collisions)]
     pub fn load_state_rmw(&self, order: Ordering) -> Option<usize> {
         self.tail.fetch_byte_add(0, order).state()
     }
@@ -288,10 +294,10 @@ impl<T, D, L: Linking, M: Mutex> List<T, usize, D, L, M> {
         fetch_order: Ordering,
         mut f: F,
     ) -> Result<usize, LockedList<'_, T, usize, D, L, M>> {
-        if !L::SERIALIZED
-            && let Ok(s) = self.try_update_state_atomic(set_order, fetch_order, |s| Some(f(s)))
-        {
-            return Ok(s);
+        if !L::SERIALIZED {
+            if let Ok(s) = self.try_update_state_atomic(set_order, fetch_order, |s| Some(f(s))) {
+                return Ok(s);
+            }
         }
         let mut locked = self.lock();
         locked
@@ -477,6 +483,7 @@ impl<'a, T, S: ListState, D, L: Linking, M: Mutex> LockedList<'a, T, S, D, L, M>
 
     #[allow(clippy::type_complexity)]
     #[inline(always)]
+    #[allow(clippy::incompatible_msrv, unstable_name_collisions)]
     pub(crate) unsafe fn remove<F: FnOnce(Pin<&mut T>, &mut D) -> S>(
         &mut self,
         link: NonNull<NodeLink<L>>,
@@ -571,6 +578,7 @@ impl<'a, T, S: ListState, D, M: Mutex> LockedList<'a, T, S, D, Serialized, M> {
 
     // TODO safety: `prev` is `HEAD_MARKER` or a linked node, `next` is `prev`'s successor
     #[inline(always)]
+    #[allow(clippy::incompatible_msrv, unstable_name_collisions)]
     pub(super) unsafe fn insert_between<LR>(
         &mut self,
         node: NodeUnlinked<'_, LR>,

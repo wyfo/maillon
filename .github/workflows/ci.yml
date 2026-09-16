@@ -25,6 +25,17 @@ jobs:
         env:
           RUSTDOCFLAGS: "-Dwarnings"
 
+  msrv:
+    name: check msrv
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.70"
+      - run: cargo +1.70 check
+      - run: cargo +1.70 check --no-default-features
+
   loom:
     needs: test
     runs-on: ubuntu-latest

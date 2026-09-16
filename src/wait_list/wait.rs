@@ -1,9 +1,12 @@
 use core::{
+    future::Future,
     pin::Pin,
     sync::atomic::Ordering::{Acquire, Relaxed, SeqCst},
     task::{Context, Poll},
 };
 
+#[allow(unused_imports)]
+use crate::msrv::OptionExt;
 use crate::{
     Node, NodeState,
     list::{AtomicEager, Linking},
@@ -30,6 +33,7 @@ node_wrapper! {
 impl<'a, N: Unpin, S: Synchronization, L: Linking, M: Mutex, const WAKER_BATCH_SIZE: usize>
     Wait<'a, N, S, L, M, WAKER_BATCH_SIZE>
 {
+    #[allow(clippy::incompatible_msrv)]
     fn poll_wait(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -37,8 +41,8 @@ impl<'a, N: Unpin, S: Synchronization, L: Linking, M: Mutex, const WAKER_BATCH_S
     ) -> Poll<Result<N, ClosedError>> {
         match self.node_mut().state() {
             NodeState::Unlinked(mut node) => {
-                if let Some(notification) = node.notification.take()
-                    && !ignore_notification
+                if let Some(notification) =
+                    node.notification.take().filter(|_| !ignore_notification)
                 {
                     return Poll::Ready(Ok(notification.into_inner()));
                 }

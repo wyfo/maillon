@@ -1,24 +1,32 @@
-use core::{fmt::Debug, marker::PhantomData, ptr, ptr::NonNull};
+use core::{fmt::Debug, ptr::NonNull};
 
-use crate::{list::Linking, node::NodeLink};
+#[allow(unused_imports)]
+use crate::msrv::StrictProvenance;
+use crate::{list::Linking, msrv::ptr, node::NodeLink};
 
-pub(super) struct Tail<S, L>(PhantomData<(S, L)>);
+mod private {
+    use core::{marker::PhantomData, ptr::NonNull};
 
-#[expect(private_bounds)]
+    use crate::{list::Linking, node::NodeLink};
+
+    pub struct Tail<S, L>(PhantomData<(S, L)>);
+
+    /// # Safety
+    ///
+    /// Implementation must be bijective.
+    pub unsafe trait ListStatePrivate: Sized {
+        fn tail_to_enum<L: Linking>(tail: *mut Tail<Self, L>) -> StateOrPtr<Self, L>;
+        fn enum_to_tail<L: Linking>(state_or_ptr: StateOrPtr<Self, L>) -> *mut Tail<Self, L>;
+    }
+
+    pub enum StateOrPtr<S, L: Linking> {
+        State(S),
+        Ptr(NonNull<NodeLink<L>>),
+    }
+}
+pub(super) use private::{ListStatePrivate, StateOrPtr, Tail};
+
 pub trait ListState: ListStatePrivate + Debug + Copy + PartialEq + Send + Sync + 'static {}
-
-/// # Safety
-///
-/// Implementation must be bijective.
-pub(super) unsafe trait ListStatePrivate: Sized {
-    fn tail_to_enum<L: Linking>(tail: *mut Tail<Self, L>) -> StateOrPtr<Self, L>;
-    fn enum_to_tail<L: Linking>(state_or_ptr: StateOrPtr<Self, L>) -> *mut Tail<Self, L>;
-}
-
-pub(super) enum StateOrPtr<S, L: Linking> {
-    State(S),
-    Ptr(NonNull<NodeLink<L>>),
-}
 
 impl<S: Copy, L: Linking> Clone for StateOrPtr<S, L> {
     fn clone(&self) -> Self {
@@ -70,6 +78,7 @@ pub(super) const fn state_to_ptr<L: Linking>(state: usize) -> *mut Tail<usize, L
 
 unsafe impl ListStatePrivate for usize {
     #[inline(always)]
+    #[allow(clippy::incompatible_msrv, unstable_name_collisions)]
     fn tail_to_enum<L: Linking>(tail: *mut Tail<Self, L>) -> StateOrPtr<Self, L> {
         if tail.addr() & TAIL_FLAG != 0 {
             let ptr = tail.map_addr(|addr| addr & !TAIL_FLAG).cast();
@@ -79,6 +88,7 @@ unsafe impl ListStatePrivate for usize {
         }
     }
     #[inline(always)]
+    #[allow(clippy::incompatible_msrv, unstable_name_collisions)]
     fn enum_to_tail<L: Linking>(state_or_ptr: StateOrPtr<Self, L>) -> *mut Tail<Self, L> {
         match state_or_ptr {
             StateOrPtr::State(state) => state_to_ptr(state),

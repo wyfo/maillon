@@ -2,20 +2,22 @@
 use core::pin::UnsafePinned;
 use core::{marker::PhantomData, pin::Pin, ptr, ptr::NonNull};
 
+#[allow(unused_imports)]
+use crate::msrv::ResultExt;
 #[cfg(not(nightly))]
 use crate::unsafe_pinned::UnsafePinned;
 use crate::{
-    list::{Linking, ListRef, PrivateLinking},
+    list::{Linking, ListRef},
     loom::{
         cell::Cell,
         sync::atomic::{AtomicPtr, Ordering, Ordering::*},
     },
 };
 
-#[expect(type_alias_bounds)]
+#[allow(type_alias_bounds)]
 type List<L: ListRef> =
     crate::list::List<L::NodeData, L::ListState, L::ListData, L::Linking, L::Mutex>;
-#[expect(type_alias_bounds)]
+#[allow(type_alias_bounds)]
 type LockedList<'a, L: ListRef> =
     crate::list::LockedList<'a, L::NodeData, L::ListState, L::ListData, L::Linking, L::Mutex>;
 
@@ -33,11 +35,36 @@ pub trait NodeData<L: ListRef + ?Sized>: Sized {
     );
 }
 
-#[repr(align(4))]
-pub(crate) struct NodeLink<L: PrivateLinking> {
-    pub(crate) prev: AtomicPtr<NodeLink<L>>,
-    pub(crate) next: L::NextPtr,
+mod private {
+    use core::ptr::NonNull;
+
+    use crate::{
+        list::{Linking, PrivateLinking},
+        loom::sync::atomic::AtomicPtr,
+    };
+
+    #[repr(align(4))]
+    pub struct NodeLink<L: PrivateLinking> {
+        pub(crate) prev: AtomicPtr<NodeLink<L>>,
+        pub(crate) next: L::NextPtr,
+    }
+
+    pub trait PrivateNodeRef<T> {
+        type Linking: Linking;
+
+        fn link(&self) -> NonNull<NodeLink<Self::Linking>>;
+
+        #[inline(always)]
+        fn data_ptr(&self) -> *mut T {
+            NodeLink::data_ptr(self.link())
+        }
+    }
+
+    pub trait PrivateLinkedNodeRef<T, D>: PrivateNodeRef<T> {
+        fn list_data_ptr(&self) -> *mut D;
+    }
 }
+pub(crate) use private::{NodeLink, PrivateLinkedNodeRef, PrivateNodeRef};
 
 impl<L: Linking> NodeLink<L> {
     #[cfg_attr(loom, const_fn::const_fn(cfg(false)))]
@@ -69,7 +96,7 @@ impl<L: Linking> NodeLink<L> {
         unsafe {
             (*inner).access.set(());
         }
-        unsafe { &raw mut (*inner).data }
+        unsafe { ptr::addr_of_mut!((*inner).data) }
     }
 }
 
@@ -96,7 +123,7 @@ pub struct Node<L: ListRef> {
     linked_list: Cell<Option<NonNull<List<L>>>>,
 }
 
-unsafe impl<L: ListRef<NodeData: Send> + Send> Send for Node<L> {}
+unsafe impl<L: ListRef + Send> Send for Node<L> where L::NodeData: Send {}
 unsafe impl<L: ListRef + Sync> Sync for Node<L> {}
 
 impl<L: ListRef> Node<L> {
@@ -209,8 +236,8 @@ impl<L: ListRef> Drop for Node<L> {
 
 pub struct NodeUnlinked<'a, L: ListRef>(&'a Node<L>);
 
-unsafe impl<L: ListRef<NodeData: Send> + Sync> Send for NodeUnlinked<'_, L> {}
-unsafe impl<L: ListRef<NodeData: Sync> + Sync> Sync for NodeUnlinked<'_, L> {}
+unsafe impl<L: ListRef + Sync> Send for NodeUnlinked<'_, L> where L::NodeData: Send {}
+unsafe impl<L: ListRef + Sync> Sync for NodeUnlinked<'_, L> where L::NodeData: Sync {}
 
 node_ref!(
     NodeUnlinked<'a, L: ListRef>,
@@ -253,6 +280,7 @@ impl<'a, L: ListRef<ListState = usize>> NodeUnlinked<'a, L> {
             .unwrap_err()
     }
 
+    #[allow(clippy::incompatible_msrv, unstable_name_collisions)]
     pub fn try_update_state_or_push_back_with<
         F: FnMut(Pin<&mut L::NodeData>, usize) -> Option<usize>,
         P: FnMut(Pin<&mut L::NodeData>, Option<usize>) -> bool,
@@ -278,12 +306,17 @@ pub struct NodeLinked<'a, L: ListRef, S = <L as ListRef>::ListState> {
     _state: PhantomData<S>,
 }
 
-unsafe impl<'a, L: ListRef<NodeData: Send> + Sync> Send for NodeLinked<'a, L> where
-    LockedList<'a, L>: Send
+unsafe impl<'a, L: ListRef + Sync> Send for NodeLinked<'a, L>
+where
+    L::NodeData: Send,
+    LockedList<'a, L>: Send,
 {
 }
-unsafe impl<'a, L: ListRef<NodeData: Sync> + Sync> Sync for NodeLinked<'a, L> where
-    LockedList<'a, L>: Sync
+#[allow(renamed_and_removed_lints, suspicious_auto_trait_impls)]
+unsafe impl<'a, L: ListRef + Sync> Sync for NodeLinked<'a, L>
+where
+    L::NodeData: Sync,
+    LockedList<'a, L>: Sync,
 {
 }
 
@@ -322,18 +355,6 @@ impl<'a, L: ListRef<ListState = usize>> NodeLinked<'a, L, usize> {
     }
 }
 
-pub(crate) trait PrivateNodeRef<T> {
-    type Linking: Linking;
-
-    fn link(&self) -> NonNull<NodeLink<Self::Linking>>;
-
-    #[inline(always)]
-    fn data_ptr(&self) -> *mut T {
-        NodeLink::data_ptr(self.link())
-    }
-}
-
-#[expect(private_bounds)]
 pub trait NodeRef<T>: PrivateNodeRef<T> {
     #[inline]
     fn data(&self) -> &T {
@@ -346,11 +367,6 @@ pub trait NodeRef<T>: PrivateNodeRef<T> {
     }
 }
 
-pub(crate) trait PrivateLinkedNodeRef<T, D>: PrivateNodeRef<T> {
-    fn list_data_ptr(&self) -> *mut D;
-}
-
-#[expect(private_bounds)]
 pub trait LinkedNodeRef<T, D>: NodeRef<T> + PrivateLinkedNodeRef<T, D> {
     #[inline]
     fn list_data(&self) -> &D {

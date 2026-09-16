@@ -92,7 +92,11 @@ unsafe impl Sync for PthreadMutex {}
 
 impl PthreadMutex {
     fn raw(&self) -> *mut libc::pthread_mutex_t {
-        unsafe { UnsafeCell::raw_get(&raw const (*self.0.get_or_init(RawMutex::init).as_ptr()).0) }
+        unsafe {
+            UnsafeCell::raw_get(ptr::addr_of!(
+                (*self.0.get_or_init(RawMutex::init).as_ptr()).0
+            ))
+        }
     }
 }
 
@@ -137,7 +141,9 @@ unsafe impl Sync for PthreadCondVar {}
 impl PthreadCondVar {
     fn raw(&self) -> *mut libc::pthread_cond_t {
         unsafe {
-            UnsafeCell::raw_get(&raw const (*self.0.get_or_init(RawCondvar::init).as_ptr()).0)
+            UnsafeCell::raw_get(ptr::addr_of!(
+                (*self.0.get_or_init(RawCondvar::init).as_ptr()).0
+            ))
         }
     }
 }

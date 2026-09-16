@@ -3,7 +3,7 @@
 /// # Example
 ///
 /// ```
-/// # use core::{pin::Pin, task::{Context, Poll}};
+/// # use core::{future::Future, pin::Pin, task::{Context, Poll}};
 /// use aiq::{List, Node, NodeState, node_wrapper};
 ///
 /// struct MyNodeData {/* ... */}
@@ -45,7 +45,7 @@
 /// This snippet roughly expands to the following code:
 ///
 /// ```
-/// # use core::{pin::Pin, task::{Context, Poll}};
+/// # use core::{future::Future, pin::Pin, task::{Context, Poll}};
 /// use aiq::{List, Node, NodeState, node_wrapper};
 ///
 /// struct MyNodeData {/* ... */}

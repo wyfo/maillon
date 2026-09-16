@@ -5,6 +5,8 @@ use core::{
     task::Waker,
 };
 
+#[allow(unused_imports)]
+use crate::msrv::OptionExt;
 use crate::{
     List, ListRef, Node, NodeData,
     list::{AtomicEager, GetBack, GetFront, Linking, ListEnd, ListGetEnd, LockedList},
@@ -99,6 +101,7 @@ impl<N: Unpin, S: Synchronization, L: Linking, M: Mutex, const WAKER_BATCH_SIZE:
         }
     }
 
+    #[allow(clippy::incompatible_msrv)]
     pub fn is_closed(&self) -> bool {
         self.list
             .load_state(Acquire)

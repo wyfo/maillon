@@ -50,17 +50,23 @@ use core::fmt::Debug;
 /// [`WaitList`]: crate::wait_list::WaitList
 /// [`wait`]: crate::wait_list::WaitList::wait
 /// [`wait_until`]: crate::wait_list::WaitList::wait_until
-#[allow(private_bounds)]
 pub trait Synchronization:
-    private::Synchronization + Send + Sync + Debug + Sized + 'static
+    private::PrivateSynchronization + Send + Sync + Debug + Sized + 'static
 {
 }
 
-pub(crate) enum SyncMode {
-    Synchronized,
-    Sequential,
-    Unsynchronized,
+mod private {
+    pub trait PrivateSynchronization {
+        const MODE: SyncMode;
+    }
+
+    pub enum SyncMode {
+        Synchronized,
+        Sequential,
+        Unsynchronized,
+    }
 }
+pub(crate) use private::SyncMode;
 
 /// `notify_xxx` synchronizes with [`wait`].
 ///
@@ -76,9 +82,8 @@ pub(crate) enum SyncMode {
 #[derive(Debug)]
 pub struct Synchronized;
 impl Synchronization for Synchronized {}
-impl private::Synchronization for Synchronized {
+impl private::PrivateSynchronization for Synchronized {
     const MODE: SyncMode = SyncMode::Synchronized;
-    type Released = bool;
 }
 
 /// `WaitList` uses `SeqCst` ordering internally.
@@ -90,9 +95,8 @@ impl private::Synchronization for Synchronized {
 #[derive(Debug)]
 pub struct Sequential;
 impl Synchronization for Sequential {}
-impl private::Synchronization for Sequential {
+impl private::PrivateSynchronization for Sequential {
     const MODE: SyncMode = SyncMode::Sequential;
-    type Released = Unreleased;
 }
 
 /// `WaitList` relies on external synchronization between `notify_xxx` and [`wait`]
@@ -109,32 +113,6 @@ impl private::Synchronization for Sequential {
 #[derive(Debug)]
 pub struct Unsynchronized;
 impl Synchronization for Unsynchronized {}
-impl private::Synchronization for Unsynchronized {
+impl private::PrivateSynchronization for Unsynchronized {
     const MODE: SyncMode = SyncMode::Unsynchronized;
-    type Released = Unreleased;
-}
-
-#[derive(Debug)]
-pub(crate) struct Unreleased;
-impl From<bool> for Unreleased {
-    fn from(value: bool) -> Self {
-        debug_assert!(!value);
-        Self
-    }
-}
-impl From<Unreleased> for bool {
-    fn from(_value: Unreleased) -> Self {
-        unreachable!()
-    }
-}
-
-mod private {
-    use core::{fmt::Debug, panic::UnwindSafe};
-
-    use super::SyncMode;
-
-    pub(crate) trait Synchronization {
-        const MODE: SyncMode;
-        type Released: From<bool> + Into<bool> + Send + Sync + Debug + UnwindSafe;
-    }
 }

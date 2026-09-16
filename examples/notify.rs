@@ -2,6 +2,7 @@
 #[cfg(not(loom))]
 use std::sync::atomic::{AtomicUsize, fence};
 use std::{
+    future::Future,
     marker::PhantomData,
     ops::Deref,
     pin::Pin,
@@ -304,10 +305,10 @@ fn poll_notified<N: Deref<Target = Notify<L>>, L: Linking>(
                 node.unlink(|_, _| unreachable!());
                 return Poll::Ready(());
             }
-            if let Some(cx) = cx
-                && (node.waker.as_ref()).is_none_or(|waker| !waker.will_wake(cx.waker()))
-            {
-                node.waker = Some(cx.waker().clone());
+            if let Some(cx) = cx {
+                if !matches!(&node.waker, Some(waker) if waker.will_wake(cx.waker())) {
+                    node.waker = Some(cx.waker().clone());
+                }
             }
             Poll::Pending
         }

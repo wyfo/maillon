@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 use std::{
     cmp::min,
+    future::Future,
     mem,
     pin::Pin,
     sync::{
@@ -188,9 +189,7 @@ impl<L: Linking> Semaphore<L> {
 
     #[inline]
     pub fn is_closed(&self) -> bool {
-        self.0
-            .load_state(Acquire)
-            .is_some_and(|state| state & CLOSED != 0)
+        matches!(self.0.load_state(Acquire), Some(state) if state & CLOSED != 0)
     }
 }
 
@@ -294,7 +293,7 @@ impl<L: Linking> Future for AcquireFuture<'_, L> {
                     },
                     |mut waiter, _| waiter.permits_remaining = 0,
                     |mut waiter, state| {
-                        if state.is_some_and(|s| s & CLOSED != 0) {
+                        if matches!(state, Some(s) if s & CLOSED != 0) {
                             return false;
                         }
                         waiter.permits_remaining =

@@ -5,7 +5,7 @@ mod semaphore;
 mod linking;
 
 use std::{
-    future::poll_fn,
+    future::{Future, poll_fn},
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering::SeqCst},

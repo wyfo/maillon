@@ -1,11 +1,14 @@
-use core::{pin::Pin, ptr, ptr::NonNull};
+use core::{pin::Pin, ptr::NonNull};
 
+#[allow(unused_imports)]
+use crate::msrv::StrictProvenance;
 use crate::{
     list::{
         AtomicEager, HEAD_MARKER, Linking, ListRef, ListState, LockedList, NodeLink,
         PrivateLinking, Serialized,
     },
     loom::sync::atomic::Ordering,
+    msrv::ptr,
     node::NodeUnlinked,
     sync::mutex::{DefaultMutex, Mutex},
 };
@@ -90,6 +93,7 @@ impl<'locked, 'a, T, S: ListState, D, L: Linking, M: Mutex> ListCursor<'locked, 
     }
 
     #[inline]
+    #[allow(clippy::incompatible_msrv, unstable_name_collisions)]
     pub fn move_prev(&mut self) {
         self.node = match self.node {
             // TODO no tail acquire needed here, the cursor position always comes from one

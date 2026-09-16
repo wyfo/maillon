@@ -1,8 +1,13 @@
-use core::{mem::ManuallyDrop, ptr};
+use core::mem::ManuallyDrop;
 
 use parking_lot_core::{DEFAULT_PARK_TOKEN, DEFAULT_UNPARK_TOKEN};
 
-use crate::sync::{condvar::CondVar, mutex::Mutex, parker::Parker};
+#[allow(unused_imports)]
+use crate::msrv::StrictProvenance;
+use crate::{
+    msrv::ptr,
+    sync::{condvar::CondVar, mutex::Mutex, parker::Parker},
+};
 
 // TODO repass on all comments
 /// A [`Parker`] built directly on `parking_lot_core`, which is what
@@ -25,8 +30,9 @@ pub struct ParkingLotParker(
 
 impl ParkingLotParker {
     #[inline]
+    #[allow(clippy::incompatible_msrv, unstable_name_collisions)]
     fn key(&self) -> usize {
-        ptr::from_ref(self) as usize
+        ptr::from_ref(self).addr()
     }
 }
 

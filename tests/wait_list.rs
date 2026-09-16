@@ -1,4 +1,5 @@
 use std::{
+    future::Future,
     marker::PhantomData,
     sync::atomic::Ordering::{Acquire, Relaxed, Release, SeqCst},
     task::{Context, Poll, Waker},

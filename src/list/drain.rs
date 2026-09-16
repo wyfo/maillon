@@ -1,11 +1,7 @@
-use core::{
-    mem::ManuallyDrop,
-    pin::{Pin, pin},
-    ptr,
-    ptr::NonNull,
-    task::Waker,
-};
+use core::{mem::ManuallyDrop, pin::Pin, ptr::NonNull, task::Waker};
 
+#[allow(unused_imports)]
+use crate::msrv::StrictProvenance;
 use crate::{
     list::{
         AtomicEager, GetBack, GetFront, HEAD_MARKER, IntoTail, Linking, ListState, LockedList,
@@ -15,6 +11,7 @@ use crate::{
         AtomicPtrExt,
         sync::atomic::{AtomicPtr, Ordering::*},
     },
+    msrv::ptr,
     node::{LinkedNodeRef, node_ref},
     sync::mutex::{DefaultMutex, Mutex},
     utils::{OptionNonNullExt, defer},
@@ -156,7 +153,8 @@ impl<'a, T, S: ListState, D, L: Linking, M: Mutex> Drain<'a, T, S, D, L, M> {
         mut on_unlock: impl FnMut(&mut H),
     ) {
         {
-            let mut this = pin!(self);
+            let mut moved_self = self;
+            let mut this = unsafe { Pin::new_unchecked(&mut moved_self) };
             let mut end = E::get_end(this.as_mut());
             while let Some(mut node) = end {
                 let (data, list_data) = node.split_data();
@@ -343,6 +341,7 @@ impl<'drain, 'a, T, S: ListState, D, L: Linking, M: Mutex> DrainEnd<'drain, 'a, 
 }
 
 impl<T, S: ListState, D, L: Linking, M: Mutex> DrainBack<'_, '_, T, S, D, L, M> {
+    #[allow(clippy::incompatible_msrv, unstable_name_collisions)]
     pub fn unlink(self) -> Option<Self> {
         let node = unsafe { self.node.as_ref() };
         let mut prev = Some(unsafe { node.load_prev() });

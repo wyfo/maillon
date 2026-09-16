@@ -6,8 +6,10 @@ pub struct WakerBatch<const SIZE: usize> {
 }
 
 impl<const SIZE: usize> WakerBatch<SIZE> {
+    const SIZE_CHECK: () = assert!(SIZE > 0, "WakerBatch size must be greater than 0");
+
     pub fn new() -> Self {
-        const { assert!(SIZE > 0, "WakerBatch size must be greater than 0") };
+        let () = Self::SIZE_CHECK;
         Self {
             wakers: array::from_fn(|_| MaybeUninit::uninit()),
             len: 0,
@@ -15,8 +17,10 @@ impl<const SIZE: usize> WakerBatch<SIZE> {
     }
 
     pub fn push(&mut self, waker: Waker) {
-        assert!(!self.is_full(), "WakerBatch is full");
-        self.wakers[self.len].write(waker);
+        self.wakers
+            .get_mut(self.len)
+            .expect("WakerBatch is full")
+            .write(waker);
         self.len += 1;
     }
 
