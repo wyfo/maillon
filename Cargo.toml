@@ -39,10 +39,8 @@ parking_lot_core = { version = "0.9", optional = true }
 libc = { version = "0.2", optional = true }
 
 [dev-dependencies]
-arrayvec = "0.7.6"
 criterion = "0.8.2"
 futures = "0.3.32"
-pin-project-lite = "0.2.16"
 rstest = "0.26.1"
 tokio = { version = "1.49.0", features = ["full"] }
 tokio-test = "0.4.5"

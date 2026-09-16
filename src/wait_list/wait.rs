@@ -11,7 +11,7 @@ use crate::{
     node_wrapper,
     sync::mutex::{DefaultMutex, Mutex},
     wait_list::{
-        ClosedError, DEFAULT_WAKER_LIST_SIZE, STATE_CLOSED, STATE_OPEN, WaitListRef,
+        ClosedError, DEFAULT_WAKER_BATCH_SIZE, STATE_CLOSED, STATE_OPEN, WaitListRef,
         synchronization::{SyncMode, Synchronization, Synchronized},
     },
 };
@@ -23,12 +23,12 @@ node_wrapper! {
         S: Synchronization = Synchronized,
         L: Linking = AtomicEager,
         M: Mutex = DefaultMutex,
-        const WAKER_LIST_SIZE: usize = DEFAULT_WAKER_LIST_SIZE,
-    >(pub(super) Node<WaitListRef<'a, N, S, L, M, WAKER_LIST_SIZE>>);
+        const WAKER_BATCH_SIZE: usize = DEFAULT_WAKER_BATCH_SIZE,
+    >(pub(super) Node<WaitListRef<'a, N, S, L, M, WAKER_BATCH_SIZE>>);
 }
 
-impl<'a, N: Unpin, S: Synchronization, L: Linking, M: Mutex, const WAKER_LIST_SIZE: usize>
-    Wait<'a, N, S, L, M, WAKER_LIST_SIZE>
+impl<'a, N: Unpin, S: Synchronization, L: Linking, M: Mutex, const WAKER_BATCH_SIZE: usize>
+    Wait<'a, N, S, L, M, WAKER_BATCH_SIZE>
 {
     fn poll_wait(
         self: Pin<&mut Self>,
@@ -86,8 +86,8 @@ impl<'a, N: Unpin, S: Synchronization, L: Linking, M: Mutex, const WAKER_LIST_SI
     }
 }
 
-impl<N: Unpin, S: Synchronization, L: Linking, M: Mutex, const WAKER_LIST_SIZE: usize> Future
-    for Wait<'_, N, S, L, M, WAKER_LIST_SIZE>
+impl<N: Unpin, S: Synchronization, L: Linking, M: Mutex, const WAKER_BATCH_SIZE: usize> Future
+    for Wait<'_, N, S, L, M, WAKER_BATCH_SIZE>
 {
     type Output = Result<N, ClosedError>;
 
@@ -130,9 +130,9 @@ pub struct WaitUntil<
     S: Synchronization = Synchronized,
     L: Linking = AtomicEager,
     M: Mutex = DefaultMutex,
-    const WAKER_LIST_SIZE: usize = DEFAULT_WAKER_LIST_SIZE,
+    const WAKER_BATCH_SIZE: usize = DEFAULT_WAKER_BATCH_SIZE,
 > {
-    wait: Wait<'a, (), S, L, M, WAKER_LIST_SIZE>,
+    wait: Wait<'a, (), S, L, M, WAKER_BATCH_SIZE>,
     wake_condition: F,
 }
 
@@ -143,17 +143,19 @@ impl<
     S: Synchronization,
     L: Linking,
     M: Mutex,
-    const WAKER_LIST_SIZE: usize,
-> WaitUntil<'a, F, S, L, M, WAKER_LIST_SIZE>
+    const WAKER_BATCH_SIZE: usize,
+> WaitUntil<'a, F, S, L, M, WAKER_BATCH_SIZE>
 {
-    pub(super) fn new(wait: Wait<'a, (), S, L, M, WAKER_LIST_SIZE>, wake_condition: F) -> Self {
+    pub(super) fn new(wait: Wait<'a, (), S, L, M, WAKER_BATCH_SIZE>, wake_condition: F) -> Self {
         Self {
             wait,
             wake_condition,
         }
     }
 
-    fn project(self: Pin<&mut Self>) -> (Pin<&mut Wait<'a, (), S, L, M, WAKER_LIST_SIZE>>, &mut F) {
+    fn project(
+        self: Pin<&mut Self>,
+    ) -> (Pin<&mut Wait<'a, (), S, L, M, WAKER_BATCH_SIZE>>, &mut F) {
         let this = unsafe { self.get_unchecked_mut() };
         (
             unsafe { Pin::new_unchecked(&mut this.wait) },
@@ -185,8 +187,8 @@ impl<
     S: Synchronization,
     L: Linking,
     M: Mutex,
-    const WAKER_LIST_SIZE: usize,
-> Future for WaitUntil<'_, F, S, L, M, WAKER_LIST_SIZE>
+    const WAKER_BATCH_SIZE: usize,
+> Future for WaitUntil<'_, F, S, L, M, WAKER_BATCH_SIZE>
 {
     type Output = Result<W::Output, ClosedError>;
 

@@ -3,6 +3,7 @@ use core::{
     pin::{Pin, pin},
     ptr,
     ptr::NonNull,
+    task::Waker,
 };
 
 use crate::{
@@ -17,6 +18,7 @@ use crate::{
     node::{LinkedNodeRef, node_ref},
     sync::mutex::{DefaultMutex, Mutex},
     utils::{OptionNonNullExt, defer},
+    waker_batch::WakerBatch,
 };
 
 // TODO it should be possible to accept L: Linking, but it currently breaks everything with head
@@ -176,6 +178,22 @@ impl<'a, T, S: ListState, D, L: Linking, M: Mutex> Drain<'a, T, S, D, L, M> {
         on_unlock(helper);
     }
 
+    fn wake_all_impl<E: DrainGetEnd, const WAKER_BATCH_SIZE: usize>(
+        self,
+        mut f: impl FnMut(Pin<&mut T>, &mut D) -> Option<Waker>,
+    ) {
+        self.for_each_impl::<E, _>(
+            &mut WakerBatch::<WAKER_BATCH_SIZE>::new(),
+            |wakers, node_data, list_data| {
+                if let Some(waker) = f(node_data, list_data) {
+                    wakers.push(waker);
+                }
+                wakers.is_full()
+            },
+            |wakers| wakers.wake_all(),
+        );
+    }
+
     pub fn for_each<H, N: FnMut(&mut H, Pin<&mut T>, &mut D) -> bool, U: FnMut(&mut H)>(
         self,
         helper: &mut H,
@@ -183,6 +201,16 @@ impl<'a, T, S: ListState, D, L: Linking, M: Mutex> Drain<'a, T, S, D, L, M> {
         on_unlock: U,
     ) {
         self.for_each_impl::<L::PreferredDrainGetEnd, _>(helper, on_next, on_unlock);
+    }
+
+    pub fn wake_all<
+        const WAKER_BATCH_SIZE: usize,
+        F: FnMut(Pin<&mut T>, &mut D) -> Option<Waker>,
+    >(
+        self,
+        f: F,
+    ) {
+        self.wake_all_impl::<L::PreferredDrainGetEnd, WAKER_BATCH_SIZE>(f);
     }
 
     #[cold]
@@ -354,7 +382,7 @@ pub trait DrainGetEnd: Sized {
         drain: Pin<&'a mut Drain<'drain, T, S, D, L, M>>,
     ) -> Option<Self::DrainEnd<'drain, 'a, T, S, D, L, M>>;
 
-    fn for_each_from<
+    fn for_each<
         T,
         S: ListState,
         D,
@@ -370,6 +398,21 @@ pub trait DrainGetEnd: Sized {
         on_unlock: U,
     ) {
         drain.for_each_impl::<Self, _>(helper, on_next, on_unlock);
+    }
+
+    fn wake_all<
+        const WAKER_BATCH_SIZE: usize,
+        T,
+        S: ListState,
+        D,
+        L: Linking,
+        M: Mutex,
+        F: FnMut(Pin<&mut T>, &mut D) -> Option<Waker>,
+    >(
+        drain: Drain<'_, T, S, D, L, M>,
+        f: F,
+    ) {
+        drain.wake_all_impl::<Self, WAKER_BATCH_SIZE>(f);
     }
 }
 

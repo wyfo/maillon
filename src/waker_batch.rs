@@ -1,25 +1,26 @@
-use core::{array, mem, mem::MaybeUninit, task::Waker};
+use core::{array, fmt, mem, mem::MaybeUninit, task::Waker};
 
-pub(super) struct WakerList<const N: usize> {
-    wakers: [MaybeUninit<Waker>; N],
+pub struct WakerBatch<const SIZE: usize> {
+    wakers: [MaybeUninit<Waker>; SIZE],
     len: usize,
 }
 
-impl<const N: usize> WakerList<N> {
-    pub(super) fn new() -> Self {
-        const { assert!(N > 0, "WAKER_LIST_SIZE must be greater than 0") };
+impl<const SIZE: usize> WakerBatch<SIZE> {
+    pub fn new() -> Self {
+        const { assert!(SIZE > 0, "WakerBatch size must be greater than 0") };
         Self {
             wakers: array::from_fn(|_| MaybeUninit::uninit()),
             len: 0,
         }
     }
 
-    pub(super) fn push(&mut self, waker: Waker) {
+    pub fn push(&mut self, waker: Waker) {
+        assert!(!self.is_full(), "WakerBatch is full");
         self.wakers[self.len].write(waker);
         self.len += 1;
     }
 
-    pub(super) fn is_full(&self) -> bool {
+    pub fn is_full(&self) -> bool {
         self.len == self.wakers.len()
     }
 
@@ -41,13 +42,26 @@ impl<const N: usize> WakerList<N> {
         }
     }
 
-    pub(super) fn wake_all(&mut self) {
+    pub fn wake_all(&mut self) {
         self.drain_with(Waker::wake);
     }
 }
 
-impl<const N: usize> Drop for WakerList<N> {
+impl<const SIZE: usize> Drop for WakerBatch<SIZE> {
     fn drop(&mut self) {
         self.drain_with(drop);
+    }
+}
+
+impl<const SIZE: usize> Default for WakerBatch<SIZE> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<const SIZE: usize> fmt::Debug for WakerBatch<SIZE> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (_, wakers, _) = unsafe { self.wakers[..self.len].align_to::<Waker>() };
+        f.debug_tuple("WakerBatch").field(&wakers).finish()
     }
 }

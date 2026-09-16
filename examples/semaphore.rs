@@ -11,15 +11,15 @@ use std::{
 };
 
 use aiq::{
-    List, ListRef, Node, NodeData, NodeState,
+    List, ListRef, Node, NodeData, NodeState, WakerBatch,
     list::{AtomicEager, Linking, LockedList},
     node_wrapper,
     sync::mutex::DefaultMutex,
 };
-use arrayvec::ArrayVec;
 
 const CLOSED: usize = 1;
 const PERMIT_SHIFT: usize = 1;
+const WAKER_BATCH_SIZE: usize = 32;
 
 pub struct Semaphore<L: Linking = AtomicEager>(List<Waiter, usize, (), L>);
 
@@ -74,7 +74,7 @@ impl<L: Linking> Semaphore<L> {
         mut locked: LockedList<'a, Waiter, usize, (), L>,
     ) {
         assert!(!locked.is_empty(Relaxed));
-        let mut wakers = ArrayVec::<Waker, 32>::new();
+        let mut wakers = WakerBatch::<WAKER_BATCH_SIZE>::new();
         let mut waiter = locked.front().unwrap();
         loop {
             if waiter.permits_remaining as usize > permits {
@@ -90,7 +90,7 @@ impl<L: Linking> Semaphore<L> {
             }
             if wakers.is_full() {
                 drop(locked);
-                wakers.drain(..).for_each(Waker::wake);
+                wakers.wake_all();
                 match self.0.update_state_or_lock(Release, Relaxed, |state| {
                     Self::check_add_permits(state, permits)
                 }) {
@@ -101,7 +101,7 @@ impl<L: Linking> Semaphore<L> {
             }
         }
         drop(locked);
-        wakers.into_iter().for_each(Waker::wake);
+        wakers.wake_all();
     }
 
     #[inline]
@@ -180,14 +180,9 @@ impl<L: Linking> Semaphore<L> {
     pub fn close(&self) {
         if let Err(locked) = (self.0).update_state_or_lock(Release, Relaxed, |state| state | CLOSED)
         {
-            locked.drain(|_| CLOSED).for_each(
-                &mut ArrayVec::<Waker, 32>::new(),
-                |wakers, mut waiter, _| {
-                    wakers.push(waiter.waker.take().unwrap());
-                    wakers.is_full()
-                },
-                |wakers| wakers.drain(..).for_each(Waker::wake),
-            );
+            locked
+                .drain(|_| CLOSED)
+                .wake_all::<WAKER_BATCH_SIZE, _>(|mut waiter, _| waiter.waker.take());
         }
     }
 

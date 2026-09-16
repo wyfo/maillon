@@ -8,7 +8,7 @@ use aiq::{
     WaitList,
     list::Linking,
     wait_list::{
-        ClosedError, DEFAULT_WAKER_LIST_SIZE,
+        ClosedError, DEFAULT_WAKER_BATCH_SIZE,
         synchronization::{Sequential, Synchronization, Synchronized, Unsynchronized},
         wait::WakeCondition,
     },
@@ -304,11 +304,11 @@ fn notify_all_poll_consistency<S: Synchronization, L: Linking>(
 fn notify_all_is_atomic<S: Synchronization, L: Linking>(
     #[values(SYNC, SEQ, UNSYNC)] _sync: SyncMode<S>,
     #[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>,
-    #[values(0, DEFAULT_WAKER_LIST_SIZE)] tested_fut_index: usize,
+    #[values(0, DEFAULT_WAKER_BATCH_SIZE)] tested_fut_index: usize,
 ) {
     model(move || {
         let list = WaitList::<&'static str, S, L>::new();
-        let mut futs = (0..DEFAULT_WAKER_LIST_SIZE + 1)
+        let mut futs = (0..DEFAULT_WAKER_BATCH_SIZE + 1)
             .map(|_| list.wait().boxed())
             .collect::<Vec<_>>();
         for fut in &mut futs {
@@ -385,10 +385,10 @@ fn notify_many_cancel_race<S: Synchronization, L: Linking>(
     #[values(SYNC, SEQ, UNSYNC)] _sync: SyncMode<S>,
     #[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>,
 ) {
-    const COUNT: usize = DEFAULT_WAKER_LIST_SIZE + 1;
+    const COUNT: usize = DEFAULT_WAKER_BATCH_SIZE + 1;
     model(move || {
         let list = WaitList::<(), S, L>::new();
-        let mut waits = (0..DEFAULT_WAKER_LIST_SIZE + 4)
+        let mut waits = (0..DEFAULT_WAKER_BATCH_SIZE + 4)
             .map(|_| list.wait().boxed())
             .collect::<Vec<_>>();
         for wait in &mut waits {
@@ -535,11 +535,11 @@ fn wait_until_notified_completion<S: Synchronization, L: Linking>(
 fn notify_all_cancel_during_drain<S: Synchronization, L: Linking>(
     #[values(SYNC, SEQ, UNSYNC)] _sync: SyncMode<S>,
     #[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>,
-    #[values(0, DEFAULT_WAKER_LIST_SIZE)] cancelled_index: usize,
+    #[values(0, DEFAULT_WAKER_BATCH_SIZE)] cancelled_index: usize,
 ) {
     model(move || {
         let list = WaitList::<(), S, L>::new();
-        let mut futs = (0..DEFAULT_WAKER_LIST_SIZE + 2)
+        let mut futs = (0..DEFAULT_WAKER_BATCH_SIZE + 2)
             .map(|_| list.wait().boxed())
             .collect::<Vec<_>>();
         for fut in &mut futs {

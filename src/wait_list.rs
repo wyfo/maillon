@@ -5,8 +5,6 @@ use core::{
     task::Waker,
 };
 
-use waker_list::WakerList;
-
 use crate::{
     List, ListRef, Node, NodeData,
     list::{AtomicEager, GetBack, GetFront, Linking, ListEnd, ListGetEnd, LockedList},
@@ -17,13 +15,13 @@ use crate::{
         synchronization::{SyncMode, Synchronization, Synchronized},
         wait::{Wait, WaitUntil, WakeCondition},
     },
+    waker_batch::WakerBatch,
 };
 
 pub mod synchronization;
 pub mod wait;
-mod waker_list;
 
-pub const DEFAULT_WAKER_LIST_SIZE: usize = 32;
+pub const DEFAULT_WAKER_BATCH_SIZE: usize = 32;
 
 const STATE_OPEN: usize = 0;
 const STATE_CLOSED: usize = 1;
@@ -66,22 +64,22 @@ pub struct WaitList<
     S: Synchronization = Synchronized,
     L: Linking = AtomicEager,
     M: Mutex = DefaultMutex,
-    const WAKER_LIST_SIZE: usize = DEFAULT_WAKER_LIST_SIZE,
+    const WAKER_BATCH_SIZE: usize = DEFAULT_WAKER_BATCH_SIZE,
 > {
     list: List<Waiter<N>, usize, (), L, M>,
     _synchronization: PhantomData<S>,
 }
 
-impl<N: Unpin, S: Synchronization, L: Linking, M: Mutex, const WAKER_LIST_SIZE: usize> Default
-    for WaitList<N, S, L, M, WAKER_LIST_SIZE>
+impl<N: Unpin, S: Synchronization, L: Linking, M: Mutex, const WAKER_BATCH_SIZE: usize> Default
+    for WaitList<N, S, L, M, WAKER_BATCH_SIZE>
 {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<N: Unpin, S: Synchronization, L: Linking, M: Mutex, const WAKER_LIST_SIZE: usize>
-    WaitList<N, S, L, M, WAKER_LIST_SIZE>
+impl<N: Unpin, S: Synchronization, L: Linking, M: Mutex, const WAKER_BATCH_SIZE: usize>
+    WaitList<N, S, L, M, WAKER_BATCH_SIZE>
 {
     #[cfg_attr(loom, const_fn::const_fn(cfg(false)))]
     #[inline]
@@ -123,19 +121,14 @@ impl<N: Unpin, S: Synchronization, L: Linking, M: Mutex, const WAKER_LIST_SIZE: 
         state: usize,
         mut notification: F,
     ) {
-        locked.drain(|_| state).for_each(
-            &mut WakerList::<WAKER_LIST_SIZE>::new(),
-            |wakers, mut waiter, _| {
+        locked
+            .drain(|_| state)
+            .wake_all::<WAKER_BATCH_SIZE, _>(|mut waiter, _| {
                 if let Some(notification) = notification() {
                     waiter.notification = Some(notification);
                 }
-                if let Some(waker) = waiter.waker.take() {
-                    wakers.push(waker);
-                }
-                wakers.is_full()
-            },
-            |wakers| wakers.wake_all(),
-        );
+                waiter.waker.take()
+            });
     }
 
     #[inline]
@@ -184,7 +177,7 @@ impl<N: Unpin, S: Synchronization, L: Linking, M: Mutex, const WAKER_LIST_SIZE: 
     #[cold]
     #[inline(never)]
     fn wake_many<F: FnMut() -> N>(&self, count: usize, mut notification: F) {
-        let mut wakers = WakerList::<WAKER_LIST_SIZE>::new();
+        let mut wakers = WakerBatch::<WAKER_BATCH_SIZE>::new();
         let mut locked = self.list.lock();
         let mut front = locked.front();
         for _ in 0..count {
@@ -227,7 +220,7 @@ impl<N: Unpin, S: Synchronization, L: Linking, M: Mutex, const WAKER_LIST_SIZE: 
     }
 
     #[inline]
-    pub fn wait(&self) -> Wait<'_, N, S, L, M, WAKER_LIST_SIZE> {
+    pub fn wait(&self) -> Wait<'_, N, S, L, M, WAKER_BATCH_SIZE> {
         Wait(Node::new(WaitListRef(self)))
     }
 
@@ -242,8 +235,8 @@ impl<N: Unpin, S: Synchronization, L: Linking, M: Mutex, const WAKER_LIST_SIZE: 
     }
 }
 
-impl<S: Synchronization, L: Linking, M: Mutex, const WAKER_LIST_SIZE: usize>
-    WaitList<(), S, L, M, WAKER_LIST_SIZE>
+impl<S: Synchronization, L: Linking, M: Mutex, const WAKER_BATCH_SIZE: usize>
+    WaitList<(), S, L, M, WAKER_BATCH_SIZE>
 {
     #[inline]
     pub fn notify_one(&self) {
@@ -269,7 +262,7 @@ impl<S: Synchronization, L: Linking, M: Mutex, const WAKER_LIST_SIZE: usize>
     pub fn wait_until<F: FnMut(bool) -> W, W: WakeCondition>(
         &self,
         wake_condition: F,
-    ) -> WaitUntil<'_, F, S, L, M, WAKER_LIST_SIZE> {
+    ) -> WaitUntil<'_, F, S, L, M, WAKER_BATCH_SIZE> {
         WaitUntil::new(self.wait(), wake_condition)
     }
 }
@@ -280,11 +273,11 @@ struct WaitListRef<
     S: Synchronization,
     L: Linking,
     M: Mutex,
-    const WAKER_LIST_SIZE: usize,
->(&'a WaitList<N, S, L, M, WAKER_LIST_SIZE>);
+    const WAKER_BATCH_SIZE: usize,
+>(&'a WaitList<N, S, L, M, WAKER_BATCH_SIZE>);
 
-impl<N: Unpin, S: Synchronization, L: Linking, M: Mutex, const WAKER_LIST_SIZE: usize> ListRef
-    for WaitListRef<'_, N, S, L, M, WAKER_LIST_SIZE>
+impl<N: Unpin, S: Synchronization, L: Linking, M: Mutex, const WAKER_BATCH_SIZE: usize> ListRef
+    for WaitListRef<'_, N, S, L, M, WAKER_BATCH_SIZE>
 {
     type NodeData = Waiter<N>;
     type ListState = usize;
@@ -297,12 +290,12 @@ impl<N: Unpin, S: Synchronization, L: Linking, M: Mutex, const WAKER_LIST_SIZE: 
     }
 }
 
-impl<'a, N: Unpin, S: Synchronization, L: Linking, M: Mutex, const WAKER_LIST_SIZE: usize>
-    NodeData<WaitListRef<'a, N, S, L, M, WAKER_LIST_SIZE>> for Waiter<N>
+impl<'a, N: Unpin, S: Synchronization, L: Linking, M: Mutex, const WAKER_BATCH_SIZE: usize>
+    NodeData<WaitListRef<'a, N, S, L, M, WAKER_BATCH_SIZE>> for Waiter<N>
 {
     fn new_state_if_last_node_on_drop(
         self: Pin<&mut Self>,
-        _list: &WaitListRef<'a, N, S, L, M, WAKER_LIST_SIZE>,
+        _list: &WaitListRef<'a, N, S, L, M, WAKER_BATCH_SIZE>,
         _list_data: &mut (),
     ) -> usize {
         STATE_OPEN
@@ -310,7 +303,7 @@ impl<'a, N: Unpin, S: Synchronization, L: Linking, M: Mutex, const WAKER_LIST_SI
 
     fn on_drop<'list>(
         self: Pin<&mut Self>,
-        list: &'list WaitListRef<'a, N, S, L, M, WAKER_LIST_SIZE>,
+        list: &'list WaitListRef<'a, N, S, L, M, WAKER_BATCH_SIZE>,
         locked: Option<LockedList<'list, Self, usize, (), L, M>>,
         state_updated_on_unlink: bool,
     ) {
@@ -323,13 +316,13 @@ impl<'a, N: Unpin, S: Synchronization, L: Linking, M: Mutex, const WAKER_LIST_SI
             debug_assert!(!state_updated_on_unlink);
             match notif {
                 Notification::One(notification) => {
-                    WaitList::<N, S, L, M, WAKER_LIST_SIZE>::wake_single_locked::<GetFront, _>(
+                    WaitList::<N, S, L, M, WAKER_BATCH_SIZE>::wake_single_locked::<GetFront, _>(
                         locked,
                         || Notification::One(notification),
                     );
                 }
                 Notification::Last(notification) => {
-                    WaitList::<N, S, L, M, WAKER_LIST_SIZE>::wake_single_locked::<GetBack, _>(
+                    WaitList::<N, S, L, M, WAKER_BATCH_SIZE>::wake_single_locked::<GetBack, _>(
                         locked,
                         || Notification::Last(notification),
                     );

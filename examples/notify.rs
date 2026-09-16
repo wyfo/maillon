@@ -19,12 +19,12 @@ use aiq::{
     node_wrapper,
     sync::mutex::DefaultMutex,
 };
-use arrayvec::ArrayVec;
 #[cfg(loom)]
 use loom::sync::atomic::{AtomicUsize, fence};
 
 const STATE_NOTIFIED: usize = 1;
 const GENERATION_INCR: usize = 2;
+const WAKER_BATCH_SIZE: usize = 32;
 
 #[derive(Clone, Copy)]
 enum Notification {
@@ -92,17 +92,10 @@ impl<L: Linking> Notify<L> {
     fn wake_waiters<'a>(&'a self, locked: LockedList<'a, Waiter, usize, (), L>) {
         locked
             .drain(|_| (self.generation_backup.load(Relaxed)).wrapping_add(GENERATION_INCR))
-            .for_each(
-                &mut ArrayVec::<Waker, 32>::new(),
-                |wakers, mut waiter, _| {
-                    waiter.notification = Some(Notification::All);
-                    if let Some(waker) = waiter.waker.take() {
-                        wakers.push(waker);
-                    }
-                    wakers.is_full()
-                },
-                |wakers| wakers.drain(..).for_each(Waker::wake),
-            );
+            .wake_all::<WAKER_BATCH_SIZE, _>(|mut waiter, _| {
+                waiter.notification = Some(Notification::All);
+                waiter.waker.take()
+            });
     }
 
     pub fn notify_waiters(&self) {
