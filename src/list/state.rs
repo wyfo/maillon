@@ -1,4 +1,4 @@
-use core::{fmt::Debug, hint, marker::PhantomData, ptr, ptr::NonNull};
+use core::{fmt::Debug, marker::PhantomData, ptr, ptr::NonNull};
 
 use crate::{list::Linking, node::NodeLink};
 
@@ -13,7 +13,6 @@ pub trait ListState: ListStatePrivate + Debug + Copy + PartialEq + Send + Sync +
 pub(super) unsafe trait ListStatePrivate: Sized {
     fn tail_to_enum<L: Linking>(tail: *mut Tail<Self, L>) -> StateOrPtr<Self, L>;
     fn enum_to_tail<L: Linking>(state_or_ptr: StateOrPtr<Self, L>) -> *mut Tail<Self, L>;
-    fn tail_to_state_or<L: Linking>(tail: *mut Tail<Self, L>, default: Self) -> Self;
 }
 
 pub(super) enum StateOrPtr<S, L: Linking> {
@@ -49,8 +48,6 @@ unsafe impl ListStatePrivate for () {
             StateOrPtr::Ptr(ptr) => ptr.as_ptr().cast(),
         }
     }
-    #[inline(always)]
-    fn tail_to_state_or<L: Linking>(_tail: *mut Tail<Self, L>, _default: Self) -> Self {}
 }
 impl ListState for () {}
 
@@ -87,15 +84,6 @@ unsafe impl ListStatePrivate for usize {
             StateOrPtr::State(state) => state_to_ptr(state),
             StateOrPtr::Ptr(ptr) => ptr.as_ptr().map_addr(|addr| addr | TAIL_FLAG).cast(),
         }
-    }
-
-    #[inline(always)]
-    fn tail_to_state_or<L: Linking>(tail: *mut Tail<Self, L>, default: Self) -> Self {
-        hint::select_unpredictable(
-            tail.addr() & TAIL_FLAG == 0,
-            tail.addr() >> STATE_SHIFT,
-            default,
-        )
     }
 }
 impl ListState for usize {}

@@ -198,11 +198,6 @@ impl<T, D, L: Linking, M: Mutex> List<T, usize, D, L, M> {
     }
 
     #[inline]
-    pub fn load_state_or(&self, order: Ordering, default: usize) -> usize {
-        usize::tail_to_state_or(self.tail.load(order), default)
-    }
-
-    #[inline]
     pub fn load_state_rmw(&self, order: Ordering) -> Option<usize> {
         self.tail.fetch_byte_add(0, order).state()
     }
@@ -615,11 +610,6 @@ impl<'a, T, D, L: Linking, M: Mutex> LockedList<'a, T, usize, D, L, M> {
     #[inline]
     pub fn load_state(&self, order: Ordering) -> Option<usize> {
         self.list.load_state(order)
-    }
-
-    #[inline]
-    pub fn load_state_or(&self, order: Ordering, default: usize) -> usize {
-        self.list.load_state_or(order, default)
     }
 
     #[inline]

@@ -108,7 +108,11 @@ impl<L: Linking> Notify<L> {
     }
 
     fn generation(&self) -> usize {
-        (self.list).load_state_or(Acquire, self.generation_backup.load(Relaxed)) & !STATE_NOTIFIED
+        // The generation backup is loaded unconditionally with `unwrap_or`,
+        // so it is compiled as a `cmov`. It's important to have the Relaxed
+        // load before the Acquire one so they can be both done in parallel.
+        let backup = self.generation_backup.load(Relaxed);
+        self.list.load_state(Acquire).unwrap_or(backup) & !STATE_NOTIFIED
     }
 
     // TODO
