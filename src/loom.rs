@@ -1,11 +1,11 @@
 cfg_if::cfg_if! {
     if #[cfg(loom)] {
-        pub(crate) use loom::{sync, cell};
+        pub(crate) use loom::{cell, sync};
     } else if #[cfg(feature = "std")] {
         extern crate std;
         pub(crate) use std::{cell, sync};
     } else {
-        pub(crate) use core::{sync, cell};
+        pub(crate) use core::{cell, sync};
     }
 }
 

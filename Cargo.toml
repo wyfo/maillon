@@ -20,13 +20,12 @@ description = "An intrusive list with lock-free insertion."
 rust-version = "1.95"
 
 [features]
-default = ["std", "wait-list"]
+default = ["std"]
 atomic-wait = ["dep:atomic-wait"]
 lock_api = ["dep:lock_api"]
 parking_lot = ["dep:parking_lot", "dep:parking_lot_core", "lock_api"]
 pthread = ["dep:libc"]
 std = []
-wait-list = []
 
 [dependencies]
 atomic-wait = { version = "1", optional = true }
@@ -54,10 +53,6 @@ loom = { version = "0.7.2", features = ["futures"] }
 
 [lib]
 test = false
-
-[[test]]
-name = "wait_list"
-required-features = ["wait-list"]
 
 [[bench]]
 name = "notify"
