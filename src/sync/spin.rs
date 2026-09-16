@@ -1,14 +1,24 @@
-use core::{
-    hint,
-    sync::atomic::{AtomicBool, Ordering::*},
-};
+use core::hint;
 
-use crate::sync::{mutex::Mutex, parker::Parker};
+use crate::{
+    loom::sync::atomic::{AtomicBool, Ordering::*},
+    sync::{mutex::Mutex, parker::Parker},
+};
 
 pub struct SpinMutex(AtomicBool);
 
 unsafe impl Mutex for SpinMutex {
+    #[cfg(not(loom))]
     const INIT: Self = Self(AtomicBool::new(false));
+    #[cfg(loom)]
+    const INIT: Self = unimplemented!();
+    #[cfg(loom)]
+    fn new() -> Self
+    where
+        Self: Sized,
+    {
+        Self(AtomicBool::new(false))
+    }
     type Guard<'a>
         = ()
     where

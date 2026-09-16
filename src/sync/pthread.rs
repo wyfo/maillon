@@ -1,15 +1,12 @@
 extern crate alloc;
 
 use alloc::boxed::Box;
-use core::{
-    cell::UnsafeCell,
-    mem::MaybeUninit,
-    ptr,
-    ptr::NonNull,
-    sync::atomic::{AtomicPtr, Ordering::*},
-};
+use core::{cell::UnsafeCell, mem::MaybeUninit, ptr, ptr::NonNull};
 
-use crate::sync::{condvar::CondVar, mutex::Mutex};
+use crate::{
+    loom::sync::atomic::{AtomicPtr, Ordering::*},
+    sync::{condvar::CondVar, mutex::Mutex},
+};
 
 fn unwrap(err_code: i32) {
     if err_code != 0 {

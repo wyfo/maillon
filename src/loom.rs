@@ -1,12 +1,19 @@
-cfg_if::cfg_if! {
-    if #[cfg(loom)] {
-        pub(crate) use loom::{cell, sync};
-    } else if #[cfg(feature = "std")] {
-        extern crate std;
-        pub(crate) use std::{cell, sync};
-    } else {
-        pub(crate) use core::{cell, sync};
-    }
+#[cfg(not(loom))]
+pub(crate) use core::cell;
+
+#[cfg(loom)]
+pub(crate) use loom::{cell, sync};
+#[cfg(not(loom))]
+pub(crate) mod sync {
+    #[cfg(feature = "std")]
+    extern crate std;
+    #[cfg(not(feature = "portable-atomic"))]
+    pub(crate) use core::sync::atomic;
+    #[cfg(feature = "std")]
+    pub(crate) use std::sync::{Condvar, Mutex, MutexGuard};
+
+    #[cfg(feature = "portable-atomic")]
+    pub(crate) use portable_atomic as atomic;
 }
 
 pub(crate) trait AtomicPtrExt<T> {
