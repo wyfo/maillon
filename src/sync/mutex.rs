@@ -8,7 +8,6 @@ pub use super::spin::SpinMutex;
 /// exclusive: a lock can't be acquired while the mutex is already locked.
 ///
 /// Calls to [`unlock`](Self::unlock) must *synchronize-with* calls to [`lock`](Self::lock).
-// TODO safety: `lock` must not unwind, a panic in `Node`/`Drain` drop cannot be recovered
 pub unsafe trait Mutex: Send + Sync + 'static {
     const INIT: Self;
     #[doc(hidden)]

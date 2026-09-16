@@ -11,7 +11,7 @@ use crate::{
     loom::{AtomicPtrExt, cell::Cell, sync::atomic::AtomicPtr},
     node::NodeLink,
     sync::parker::{DEFAULT_SPIN_BEFORE_PARK, DefaultParker, Parker},
-    utils::OptionNonNullExt,
+    utils::{OptionNonNullExt, abort_on_unwind},
 };
 
 #[allow(private_bounds)]
@@ -113,9 +113,11 @@ impl<P: Parker, const SPIN_BEFORE_PARK: usize> PrivateLinking for AtomicEager<P,
                 #[cold]
                 #[inline(never)]
                 fn unpark<P: Parker>(parker: &P, tagged_parked_state: *mut ()) {
-                    unsafe {
+                    // TODO parker must not unwind, as node.linked_list would not bet set otherwise
+                    // so the node would not be removed in drop.
+                    abort_on_unwind(|| unsafe {
                         parker.unpark(tagged_parked_state.map_addr(|addr| addr & !PARKED_TAG));
-                    }
+                    });
                 }
                 unpark(parker, tagged_parked_state.cast());
             }
@@ -140,7 +142,9 @@ impl<P: Parker, const SPIN_BEFORE_PARK: usize> PrivateLinking for AtomicEager<P,
             parker: &P,
         ) -> NonNull<NodeLink<AtomicEager<P, SPIN_BEFORE_PARK>>> {
             if P::NEVER_BLOCKS {
-                return unsafe { parker.park_until(|| NonNull::new(next.load(Acquire))) };
+                return abort_on_unwind(|| unsafe {
+                    parker.park_until(|| NonNull::new(next.load(Acquire)))
+                });
             }
             for _ in 0..SPIN_BEFORE_PARK {
                 hint::spin_loop();
@@ -158,7 +162,7 @@ impl<P: Parker, const SPIN_BEFORE_PARK: usize> PrivateLinking for AtomicEager<P,
                 let next = next.load(Acquire);
                 (next.addr() & PARKED_TAG == 0).then(|| unsafe { NonNull::new_unchecked(next) })
             };
-            unsafe { parker.park_until(load_next) }
+            abort_on_unwind(|| unsafe { parker.park_until(load_next) })
         }
         wait_for_next::<P, SPIN_BEFORE_PARK>(next, parker)
     }

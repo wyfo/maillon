@@ -30,7 +30,7 @@ impl ParkingLotParker {
     }
 }
 
-unsafe impl Parker for ParkingLotParker {
+impl Parker for ParkingLotParker {
     const INIT: Self = Self(0);
 
     #[inline]

@@ -1,4 +1,4 @@
-use core::{mem::ManuallyDrop, ptr, ptr::NonNull};
+use core::{mem, mem::ManuallyDrop, ptr, ptr::NonNull};
 
 pub trait OptionNonNullExt<T> {
     #[allow(clippy::wrong_self_convention)]
@@ -19,4 +19,17 @@ pub fn defer(f: impl FnOnce()) -> impl Drop {
         }
     }
     Defer(ManuallyDrop::new(f))
+}
+
+#[inline]
+pub fn abort_on_unwind<R>(f: impl FnOnce() -> R) -> R {
+    #[cold]
+    #[inline(never)]
+    fn panic_on_unwind() -> ! {
+        panic!("unwinding is not allowed here");
+    }
+    let bomb = defer(|| panic_on_unwind());
+    let res = f();
+    mem::forget(bomb);
+    res
 }

@@ -24,7 +24,7 @@ impl AtomicParker {
 }
 
 // implementation taken for std Parker futex implementation
-unsafe impl Parker for AtomicParker {
+impl Parker for AtomicParker {
     #[allow(clippy::declare_interior_mutable_const)]
     const INIT: Self = Self(AtomicU32::new(0));
 

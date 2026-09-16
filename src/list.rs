@@ -7,6 +7,7 @@ use crate::{
     },
     node::{LinkedNodeRef, NodeData, NodeLink, NodeRef, NodeUnlinked, PrivateNodeRef, node_ref},
     sync::mutex::{DefaultMutex, Mutex},
+    utils::abort_on_unwind,
 };
 
 mod cursor;
@@ -117,7 +118,7 @@ impl<T, S: ListState, D, L: Linking, M: Mutex> List<T, S, D, L, M> {
     pub fn lock(&self) -> LockedList<'_, T, S, D, L, M> {
         LockedList {
             list: self,
-            guard: ManuallyDrop::new(self.mutex.lock()),
+            guard: ManuallyDrop::new(abort_on_unwind(|| self.mutex.lock())),
             _not_send: PhantomData,
         }
     }
@@ -673,6 +674,8 @@ impl<'a, T, D, L: Linking, M: Mutex> LockedList<'a, T, usize, D, L, M> {
 impl<T, S: ListState, D, L: Linking, M: Mutex> Drop for LockedList<'_, T, S, D, L, M> {
     #[inline]
     fn drop(&mut self) {
+        // TODO aborting on unwinding is not necessary as nodes needing to be released have
+        // been released
         unsafe { self.list.mutex.unlock(ManuallyDrop::take(&mut self.guard)) };
     }
 }

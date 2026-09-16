@@ -29,7 +29,7 @@ unsafe impl Mutex for SpinMutex {
 
 pub struct SpinParker;
 
-unsafe impl Parker for SpinParker {
+impl Parker for SpinParker {
     const NEVER_BLOCKS: bool = true;
     const INIT: Self = Self;
     #[inline]

@@ -26,13 +26,7 @@ pub const DEFAULT_SPIN_BEFORE_PARK: usize = 100; // same as `std::sys::sync::mut
 #[cfg(any(miri, loom))]
 pub const DEFAULT_SPIN_BEFORE_PARK: usize = 0;
 
-// TODO it must not have spurious wakeup, can use notified in a loop
-// TODO safety: `park_until` must not unwind, a panic in `Node`/`Drain` drop cannot be recovered
-// TODO safety: unpark must not panic
-/// # Safety
-///
-/// TODO
-pub unsafe trait Parker: Send + Sync + 'static {
+pub trait Parker: Send + Sync + 'static {
     const NEVER_BLOCKS: bool = false;
     const INIT: Self;
     #[doc(hidden)]
@@ -71,7 +65,7 @@ pub struct CondVarParker<M: Mutex, C: CondVar<M>, const NOTIFY_WITH_MUTEX_ACQUIR
     condvar: C,
 }
 
-unsafe impl<M: Mutex, C: CondVar<M>, const NOTIFY_WITH_MUTEX_ACQUIRED: bool> Parker
+impl<M: Mutex, C: CondVar<M>, const NOTIFY_WITH_MUTEX_ACQUIRED: bool> Parker
     for CondVarParker<M, C, NOTIFY_WITH_MUTEX_ACQUIRED>
 {
     #[cfg(not(loom))]
