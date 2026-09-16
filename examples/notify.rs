@@ -14,7 +14,7 @@ use std::{
 
 use aiq::{
     List, ListRef, Node, NodeData, NodeState,
-    list::{Eager, GetBack, GetFront, Linking, ListEnd, ListGetEnd, LockedList},
+    list::{AtomicEager, GetBack, GetFront, Linking, ListEnd, ListGetEnd, LockedList},
     node::NodeRef,
     node_wrapper,
     sync::mutex::DefaultMutex,
@@ -33,7 +33,7 @@ enum Notification {
     All,
 }
 
-pub struct Notify<L: Linking = Eager> {
+pub struct Notify<L: Linking = AtomicEager> {
     list: List<Waiter, usize, (), L>,
     generation_backup: AtomicUsize,
 }
@@ -90,11 +90,10 @@ impl<L: Linking> Notify<L> {
     }
 
     fn wake_waiters<'a>(&'a self, locked: LockedList<'a, Waiter, usize, (), L>) {
-        let mut wakers = ArrayVec::<Waker, 32>::new();
         locked
             .drain(|_| (self.generation_backup.load(Relaxed)).wrapping_add(GENERATION_INCR))
             .for_each(
-                &mut wakers,
+                &mut ArrayVec::<Waker, 32>::new(),
                 |wakers, mut waiter, _| {
                     waiter.notification = Some(Notification::All);
                     if let Some(waker) = waiter.waker.take() {
@@ -220,7 +219,7 @@ impl<N: Deref<Target = Notify<L>>, L: Linking> NodeData<NotifyRef<N, L>> for Wai
         locked: Option<LockedList<'list, Self, usize, (), L>>,
         state_updated_on_unlink: bool,
     ) {
-        if let Some(locked) = locked {
+        if let Some(mut locked) = locked {
             debug_assert!(!self.completed);
             debug_assert!(!state_updated_on_unlink || self.notification.is_none());
             if matches!(
@@ -319,7 +318,7 @@ fn poll_notified<N: Deref<Target = Notify<L>>, L: Linking>(
 }
 
 node_wrapper! {
-    pub struct Notified<'a, L: Linking = Eager>(Node<NotifyRef<&'a Notify<L>, L>>);
+    pub struct Notified<'a, L: Linking = AtomicEager>(Node<NotifyRef<&'a Notify<L>, L>>);
 }
 
 impl<L: Linking> Notified<'_, L> {
@@ -337,7 +336,7 @@ impl<L: Linking> Future for Notified<'_, L> {
 }
 
 node_wrapper! {
-    pub struct OwnedNotified<L: Linking = Eager>(Node<NotifyRef<Arc<Notify<L>>, L>>);
+    pub struct OwnedNotified<L: Linking = AtomicEager>(Node<NotifyRef<Arc<Notify<L>>, L>>);
 }
 
 impl<L: Linking> OwnedNotified<L> {

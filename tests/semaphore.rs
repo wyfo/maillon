@@ -8,18 +8,18 @@ mod linking;
 use std::sync::Arc;
 
 use aiq::list::Linking;
-use linking::{EAGER, LAZY, LinkingMode};
+use linking::{EAGER, LAZY, LinkingMode, SERIALIZED};
 use rstest::rstest;
 use semaphore::Semaphore;
 
 #[rstest]
-fn no_permits<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+fn no_permits<L: Linking>(#[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>) {
     // this should not panic
     Semaphore::<L>::new(0);
 }
 
 #[rstest]
-fn try_acquire<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+fn try_acquire<L: Linking>(#[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>) {
     let sem = Semaphore::<L>::new(1);
     {
         let p1 = sem.try_acquire();
@@ -33,7 +33,7 @@ fn try_acquire<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
 
 #[rstest]
 #[tokio::test]
-async fn acquire<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+async fn acquire<L: Linking>(#[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>) {
     let sem = Arc::new(Semaphore::<L>::new(1));
     let p1 = sem.try_acquire().unwrap();
     let sem_clone = sem.clone();
@@ -46,7 +46,7 @@ async fn acquire<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
 
 #[rstest]
 #[tokio::test]
-async fn add_permits<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+async fn add_permits<L: Linking>(#[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>) {
     let sem = Arc::new(Semaphore::<L>::new(0));
     let sem_clone = sem.clone();
     let j = tokio::spawn(async move {
@@ -57,7 +57,7 @@ async fn add_permits<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>
 }
 
 #[rstest]
-fn forget<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+fn forget<L: Linking>(#[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>) {
     let sem = Arc::new(Semaphore::<L>::new(1));
     {
         let p = sem.try_acquire().unwrap();
@@ -70,7 +70,7 @@ fn forget<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
 }
 
 #[rstest]
-fn merge<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+fn merge<L: Linking>(#[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>) {
     let sem = Arc::new(Semaphore::<L>::new(3));
     {
         let mut p1 = sem.try_acquire().unwrap();
@@ -86,7 +86,9 @@ fn merge<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
 #[rstest]
 #[cfg(not(target_family = "wasm"))] // No stack unwinding on wasm targets
 #[should_panic]
-fn merge_unrelated_permits<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+fn merge_unrelated_permits<L: Linking>(
+    #[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>,
+) {
     let sem1 = Arc::new(Semaphore::<L>::new(3));
     let sem2 = Arc::new(Semaphore::<L>::new(3));
     let mut p1 = sem1.try_acquire().unwrap();
@@ -95,7 +97,7 @@ fn merge_unrelated_permits<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingM
 }
 
 #[rstest]
-fn split<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+fn split<L: Linking>(#[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>) {
     let sem = Semaphore::<L>::new(5);
     let mut p1 = sem.try_acquire_many(3).unwrap();
     assert_eq!(sem.available_permits(), 2);
@@ -122,7 +124,7 @@ fn split<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
 
 #[rstest]
 #[tokio::test]
-async fn stress_test<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+async fn stress_test<L: Linking>(#[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>) {
     let sem = Arc::new(Semaphore::<L>::new(5));
     let mut join_handles = Vec::new();
     for _ in 0..1000 {
@@ -144,7 +146,7 @@ async fn stress_test<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>
 }
 
 #[rstest]
-fn add_max_amount_permits<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+fn add_max_amount_permits<L: Linking>(#[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>) {
     let s = Semaphore::<L>::new(0);
     s.add_permits(Semaphore::<L>::MAX_PERMITS);
     assert_eq!(s.available_permits(), Semaphore::<L>::MAX_PERMITS);
@@ -153,7 +155,9 @@ fn add_max_amount_permits<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMo
 #[cfg(not(target_family = "wasm"))] // wasm currently doesn't support unwinding
 #[rstest]
 #[should_panic]
-fn add_more_than_max_amount_permits1<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+fn add_more_than_max_amount_permits1<L: Linking>(
+    #[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>,
+) {
     let s = Semaphore::<L>::new(1);
     s.add_permits(Semaphore::<L>::MAX_PERMITS);
 }
@@ -161,7 +165,9 @@ fn add_more_than_max_amount_permits1<L: Linking>(#[values(EAGER, LAZY)] _linking
 #[cfg(not(target_family = "wasm"))] // wasm currently doesn't support unwinding
 #[rstest]
 #[should_panic]
-fn add_more_than_max_amount_permits2<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+fn add_more_than_max_amount_permits2<L: Linking>(
+    #[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>,
+) {
     let s = Semaphore::<L>::new(Semaphore::<L>::MAX_PERMITS - 1);
     s.add_permits(1);
     s.add_permits(1);
@@ -170,12 +176,14 @@ fn add_more_than_max_amount_permits2<L: Linking>(#[values(EAGER, LAZY)] _linking
 #[cfg(not(target_family = "wasm"))] // wasm currently doesn't support unwinding
 #[rstest]
 #[should_panic]
-fn panic_when_exceeds_maxpermits<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+fn panic_when_exceeds_maxpermits<L: Linking>(
+    #[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>,
+) {
     let _ = Semaphore::<L>::new(Semaphore::<L>::MAX_PERMITS + 1);
 }
 
 #[rstest]
-fn no_panic_at_maxpermits<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+fn no_panic_at_maxpermits<L: Linking>(#[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>) {
     let _ = Semaphore::<L>::new(Semaphore::<L>::MAX_PERMITS);
     let s = Semaphore::<L>::new(Semaphore::<L>::MAX_PERMITS - 1);
     s.add_permits(1);

@@ -16,12 +16,12 @@ use std::{
 
 use aiq::list::Linking;
 use futures::executor::block_on;
-use linking::{EAGER, LAZY, LinkingMode};
+use linking::{EAGER, LAZY, LinkingMode, SERIALIZED};
 use rstest::rstest;
 use semaphore::Semaphore;
 
 #[rstest]
-fn basic_usage<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+fn basic_usage<L: Linking>(#[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>) {
     const NUM: usize = 2;
 
     struct Shared<L: Linking> {
@@ -55,7 +55,7 @@ fn basic_usage<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
 }
 
 #[rstest]
-fn release<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+fn release<L: Linking>(#[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>) {
     let semaphore = Arc::new(Semaphore::<L>::new(1));
 
     {
@@ -69,7 +69,7 @@ fn release<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
 }
 
 #[rstest]
-fn basic_closing<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+fn basic_closing<L: Linking>(#[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>) {
     const NUM: usize = 2;
 
     let semaphore = Arc::new(Semaphore::<L>::new(1));
@@ -90,7 +90,7 @@ fn basic_closing<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
 }
 
 #[rstest]
-fn concurrent_close<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+fn concurrent_close<L: Linking>(#[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>) {
     const NUM: usize = 3;
 
     let semaphore = Arc::new(Semaphore::<L>::new(1));
@@ -108,7 +108,7 @@ fn concurrent_close<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>)
 }
 
 #[rstest]
-fn concurrent_cancel<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+fn concurrent_cancel<L: Linking>(#[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>) {
     async fn poll_and_cancel<L: Linking>(semaphore: Arc<Semaphore<L>>) {
         let mut acquire1 = Some(semaphore.acquire());
         let mut acquire2 = Some(semaphore.acquire());
@@ -150,7 +150,7 @@ fn concurrent_cancel<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>
 }
 
 #[rstest]
-fn batch<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+fn batch<L: Linking>(#[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>) {
     let semaphore = Arc::new(Semaphore::<L>::new(10));
     let active = Arc::new(AtomicUsize::new(0));
     let mut threads = vec![];
@@ -183,7 +183,7 @@ fn batch<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
 }
 
 #[rstest]
-fn release_during_acquire<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+fn release_during_acquire<L: Linking>(#[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>) {
     let semaphore = Arc::new(Semaphore::<L>::new(10));
     let permits = semaphore
         .try_acquire_many(8)
@@ -198,7 +198,9 @@ fn release_during_acquire<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMo
 }
 
 #[rstest]
-fn concurrent_permit_updates<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+fn concurrent_permit_updates<L: Linking>(
+    #[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>,
+) {
     let semaphore = Arc::new(Semaphore::<L>::new(5));
     let t1 = {
         let semaphore = semaphore.clone();

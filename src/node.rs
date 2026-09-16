@@ -63,8 +63,8 @@ impl<L: Linking> NodeLink<L> {
     // TODO takes `NonNull<Self>`, not `&self`: a reference would only carry provenance over the
     // link, not over the whole `NodeInner`
     #[inline(always)]
-    pub(crate) fn data_ptr<T>(node: NonNull<Self>) -> *mut T {
-        let inner = node.as_ptr().cast::<NodeInner<T, L>>();
+    pub(crate) fn data_ptr<T>(link: NonNull<Self>) -> *mut T {
+        let inner = link.as_ptr().cast::<NodeInner<T, L>>();
         #[cfg(loom)]
         unsafe {
             (*inner).access.set(());
@@ -223,16 +223,20 @@ impl<'a, L: ListRef> NodeUnlinked<'a, L> {
     pub fn list(&self) -> &'a L {
         self.0.list()
     }
+
+    #[inline(always)]
+    pub(crate) fn set_linked(&self, list: &List<L>) {
+        (self.0.linked_list).set(Some(list.into()));
+    }
 }
 
 impl<'a, L: ListRef<ListState = ()>> NodeUnlinked<'a, L> {
     #[inline]
     pub fn push_back(self, order: Ordering) {
         let list = self.list().as_list();
-        let link = self.0.link();
-        let f = None::<fn(()) -> Option<()>>;
-        let on_pushed = || self.0.linked_list.set(Some(NonNull::from(list)));
-        let _ = unsafe { list.push_back(link, order, Relaxed, f, |_| true, on_pushed) };
+        let f = None::<fn(Pin<&mut L::NodeData>, ()) -> Option<()>>;
+        let pushed = list.push_back(self, order, Relaxed, f, |_, _| true);
+        debug_assert_eq!(pushed, Err(true));
     }
 }
 
@@ -241,14 +245,11 @@ impl<'a, L: ListRef<ListState = usize>> NodeUnlinked<'a, L> {
         self,
         set_order: Ordering,
         fetch_order: Ordering,
-        mut on_push: P,
+        on_push: P,
     ) -> bool {
         let list = self.list().as_list();
-        let link = self.0.link();
-        let f = None::<fn(usize) -> Option<usize>>;
-        let on_push_back = |state| on_push(Self(self.0).data_mut(), state);
-        let on_pushed = || self.0.linked_list.set(Some(NonNull::from(list)));
-        unsafe { list.push_back(link, set_order, fetch_order, f, on_push_back, on_pushed) }
+        let f = None::<fn(Pin<&mut L::NodeData>, usize) -> Option<usize>>;
+        list.push_back(self, set_order, fetch_order, f, on_push)
             .unwrap_err()
     }
 
@@ -257,20 +258,17 @@ impl<'a, L: ListRef<ListState = usize>> NodeUnlinked<'a, L> {
         P: FnMut(Pin<&mut L::NodeData>, Option<usize>) -> bool,
         U: FnOnce(Pin<&mut L::NodeData>, usize),
     >(
-        mut self,
+        self,
         set_order: Ordering,
         fetch_order: Ordering,
-        mut f: F,
+        f: F,
         on_state_updated: U,
-        mut on_push: P,
+        on_push: P,
     ) -> Result<usize, bool> {
         let list = self.list().as_list();
-        let link = self.0.link();
-        let f = |state| f(Self(self.0).data_mut(), state);
-        let on_push = |state| on_push(Self(self.0).data_mut(), state);
-        let on_pushed = || self.0.linked_list.set(Some(NonNull::from(list)));
-        unsafe { list.push_back(link, set_order, fetch_order, Some(f), on_push, on_pushed) }
-            .inspect(|&state| on_state_updated(self.data_mut(), state))
+        let mut this = Self(self.0);
+        list.push_back(self, set_order, fetch_order, Some(f), on_push)
+            .inspect(|&state| on_state_updated(this.data_mut(), state))
     }
 }
 
@@ -327,11 +325,11 @@ impl<'a, L: ListRef<ListState = usize>> NodeLinked<'a, L, usize> {
 pub(crate) trait PrivateNodeRef<T> {
     type Linking: Linking;
 
-    fn node(&self) -> NonNull<NodeLink<Self::Linking>>;
+    fn link(&self) -> NonNull<NodeLink<Self::Linking>>;
 
     #[inline(always)]
     fn data_ptr(&self) -> *mut T {
-        NodeLink::data_ptr(self.node())
+        NodeLink::data_ptr(self.link())
     }
 }
 
@@ -413,7 +411,7 @@ macro_rules! node_ref {
             type Linking = $linking;
 
             #[inline(always)]
-            fn node(&self) -> core::ptr::NonNull<crate::node::NodeLink<$linking>> {
+            fn link(&self) -> core::ptr::NonNull<crate::node::NodeLink<$linking>> {
                 self.$($node_path)*
             }
         }

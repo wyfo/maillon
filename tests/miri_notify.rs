@@ -8,7 +8,7 @@ use std::{sync::Arc, thread};
 
 use aiq::list::Linking;
 use futures::executor::block_on;
-use linking::{EAGER, LAZY, LinkingMode};
+use linking::{EAGER, LAZY, LinkingMode, SERIALIZED};
 use notify::Notify;
 use rstest::rstest;
 use tokio_test::{assert_pending, assert_ready};
@@ -16,7 +16,7 @@ use tokio_test::{assert_pending, assert_ready};
 const WAKE_LIST_SIZE: usize = 32;
 
 #[rstest]
-fn notify_one<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+fn notify_one<L: Linking>(#[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>) {
     let tx = Arc::new(Notify::<L>::new());
     let rx = tx.clone();
 
@@ -31,7 +31,7 @@ fn notify_one<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
 }
 
 #[rstest]
-fn notify_waiters<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+fn notify_waiters<L: Linking>(#[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>) {
     let notify = Arc::new(Notify::<L>::new());
     let tx = notify.clone();
     let notified1 = notify.notified();
@@ -50,7 +50,7 @@ fn notify_waiters<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
 }
 
 #[rstest]
-fn notify_waiters_and_one<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+fn notify_waiters_and_one<L: Linking>(#[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>) {
     let notify = Arc::new(Notify::<L>::new());
     let tx1 = notify.clone();
     let tx2 = notify.clone();
@@ -77,7 +77,7 @@ fn notify_waiters_and_one<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMo
 }
 
 #[rstest]
-fn notify_multi<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+fn notify_multi<L: Linking>(#[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>) {
     let notify = Arc::new(Notify::<L>::new());
 
     let mut threads = vec![];
@@ -105,7 +105,7 @@ fn notify_multi<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
 }
 
 #[rstest]
-fn notify_drop<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+fn notify_drop<L: Linking>(#[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>) {
     use std::{
         future::{Future, poll_fn},
         task::Poll,
@@ -145,7 +145,9 @@ fn notify_drop<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
 /// with each other. If the first future is notified by a `notify_waiters`
 /// call, then the second one must be notified as well.
 #[rstest]
-fn notify_waiters_poll_consistency<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+fn notify_waiters_poll_consistency<L: Linking>(
+    #[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>,
+) {
     fn notify_waiters_poll_consistency_variant<L: Linking>(poll_setting: [bool; 2]) {
         let notify = Arc::new(Notify::<L>::new());
         let mut notified = [
@@ -188,7 +190,7 @@ fn notify_waiters_poll_consistency<L: Linking>(#[values(EAGER, LAZY)] _linking: 
 /// tested futures to end up in different chunks.
 #[rstest]
 fn notify_waiters_poll_consistency_many<L: Linking>(
-    #[values(EAGER, LAZY)] _linking: LinkingMode<L>,
+    #[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>,
 ) {
     fn notify_waiters_poll_consistency_many_variant<L: Linking>(order: [usize; 2]) {
         let notify = Arc::new(Notify::<L>::new());
@@ -225,7 +227,9 @@ fn notify_waiters_poll_consistency_many<L: Linking>(
 /// Checks if a call to `notify_waiters` is observed as atomic when combined
 /// with a concurrent call to `notify_one`.
 #[rstest]
-fn notify_waiters_is_atomic<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+fn notify_waiters_is_atomic<L: Linking>(
+    #[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>,
+) {
     fn notify_waiters_is_atomic_variant<L: Linking>(tested_fut_index: usize) {
         let notify = Arc::new(Notify::<L>::new());
 
@@ -275,7 +279,7 @@ fn notify_waiters_is_atomic<L: Linking>(#[values(EAGER, LAZY)] _linking: Linking
 /// ```
 #[rstest]
 fn notify_waiters_sequential_notified_await<L: Linking>(
-    #[values(EAGER, LAZY)] _linking: LinkingMode<L>,
+    #[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>,
 ) {
     use tokio::sync::oneshot;
 

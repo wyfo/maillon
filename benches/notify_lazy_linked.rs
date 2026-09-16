@@ -10,7 +10,7 @@ use std::sync::{
 use criterion::{
     BenchmarkGroup, Criterion, criterion_group, criterion_main, measurement::WallTime,
 };
-type Notify = notify::Notify<aiq::list::Lazy>;
+type Notify = notify::Notify<aiq::list::AtomicLazy>;
 
 fn rt() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_multi_thread()

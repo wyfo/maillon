@@ -8,12 +8,12 @@ mod linking;
 use std::sync::Arc;
 
 use aiq::list::Linking;
-use linking::{EAGER, LAZY, LinkingMode};
+use linking::{EAGER, LAZY, LinkingMode, SERIALIZED};
 use rstest::rstest;
 use semaphore::Semaphore;
 
 #[rstest]
-fn try_acquire<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+fn try_acquire<L: Linking>(#[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>) {
     let sem = Arc::new(Semaphore::<L>::new(1));
     {
         let p1 = sem.clone().try_acquire_owned();
@@ -26,7 +26,7 @@ fn try_acquire<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
 }
 
 #[rstest]
-fn try_acquire_many<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+fn try_acquire_many<L: Linking>(#[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>) {
     let sem = Arc::new(Semaphore::<L>::new(42));
     {
         let p1 = sem.clone().try_acquire_many_owned(42);
@@ -43,7 +43,7 @@ fn try_acquire_many<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>)
 
 #[rstest]
 #[tokio::test]
-async fn acquire<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+async fn acquire<L: Linking>(#[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>) {
     let sem = Arc::new(Semaphore::<L>::new(1));
     let p1 = sem.clone().try_acquire_owned().unwrap();
     let sem_clone = sem.clone();
@@ -56,7 +56,7 @@ async fn acquire<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
 
 #[rstest]
 #[tokio::test]
-async fn acquire_many<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+async fn acquire_many<L: Linking>(#[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>) {
     let semaphore = Arc::new(Semaphore::<L>::new(42));
     let permit32 = semaphore.clone().try_acquire_many_owned(32).unwrap();
     let (sender, receiver) = tokio::sync::oneshot::channel();
@@ -72,7 +72,7 @@ async fn acquire_many<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L
 
 #[rstest]
 #[tokio::test]
-async fn add_permits<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+async fn add_permits<L: Linking>(#[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>) {
     let sem = Arc::new(Semaphore::<L>::new(0));
     let sem_clone = sem.clone();
     let j = tokio::spawn(async move {
@@ -83,7 +83,7 @@ async fn add_permits<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>
 }
 
 #[rstest]
-fn forget<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+fn forget<L: Linking>(#[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>) {
     let sem = Arc::new(Semaphore::<L>::new(1));
     {
         let p = sem.clone().try_acquire_owned().unwrap();
@@ -96,7 +96,7 @@ fn forget<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
 }
 
 #[rstest]
-fn merge<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+fn merge<L: Linking>(#[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>) {
     let sem = Arc::new(Semaphore::<L>::new(3));
     {
         let mut p1 = sem.clone().try_acquire_owned().unwrap();
@@ -112,7 +112,9 @@ fn merge<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
 #[rstest]
 #[cfg(not(target_family = "wasm"))] // No stack unwinding on wasm targets
 #[should_panic]
-fn merge_unrelated_permits<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+fn merge_unrelated_permits<L: Linking>(
+    #[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>,
+) {
     let sem1 = Arc::new(Semaphore::<L>::new(3));
     let sem2 = Arc::new(Semaphore::<L>::new(3));
     let mut p1 = sem1.try_acquire_owned().unwrap();
@@ -121,7 +123,7 @@ fn merge_unrelated_permits<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingM
 }
 
 #[rstest]
-fn split<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+fn split<L: Linking>(#[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>) {
     let sem = Arc::new(Semaphore::<L>::new(5));
     let mut p1 = sem.clone().try_acquire_many_owned(3).unwrap();
     assert_eq!(sem.available_permits(), 2);
@@ -148,7 +150,7 @@ fn split<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
 
 #[rstest]
 #[tokio::test]
-async fn stress_test<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+async fn stress_test<L: Linking>(#[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>) {
     let sem = Arc::new(Semaphore::<L>::new(5));
     let mut join_handles = Vec::new();
     for _ in 0..1000 {

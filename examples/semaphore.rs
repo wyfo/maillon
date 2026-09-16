@@ -12,7 +12,7 @@ use std::{
 
 use aiq::{
     List, ListRef, Node, NodeData, NodeState,
-    list::{Eager, Linking, LockedList},
+    list::{AtomicEager, Linking, LockedList},
     node_wrapper,
     sync::mutex::DefaultMutex,
 };
@@ -21,7 +21,7 @@ use arrayvec::ArrayVec;
 const CLOSED: usize = 1;
 const PERMIT_SHIFT: usize = 1;
 
-pub struct Semaphore<L: Linking = Eager>(List<Waiter, usize, (), L>);
+pub struct Semaphore<L: Linking = AtomicEager>(List<Waiter, usize, (), L>);
 
 impl<L: Linking> Default for Semaphore<L> {
     fn default() -> Self {
@@ -180,9 +180,8 @@ impl<L: Linking> Semaphore<L> {
     pub fn close(&self) {
         if let Err(locked) = (self.0).update_state_or_lock(Release, Relaxed, |state| state | CLOSED)
         {
-            let mut wakers = ArrayVec::<Waker, 32>::new();
             locked.drain(|_| CLOSED).for_each(
-                &mut wakers,
+                &mut ArrayVec::<Waker, 32>::new(),
                 |wakers, mut waiter, _| {
                     wakers.push(waiter.waker.take().unwrap());
                     wakers.is_full()
@@ -249,7 +248,7 @@ impl<'a, L: Linking> NodeData<SemaphoreRef<'a, L>> for Waiter {
             return;
         }
         let acquired = self.permits_total - self.permits_remaining;
-        if let Some(locked) = locked {
+        if let Some(mut locked) = locked {
             let add_permits = |state| Some(Semaphore::<L>::check_add_permits(state, acquired as _));
             if acquired == 0 || (locked.try_update_state(Relaxed, Relaxed, add_permits)).is_ok() {
                 return;
@@ -325,7 +324,7 @@ impl<L: Linking> Future for AcquireFuture<'_, L> {
     }
 }
 
-pub struct SemaphorePermit<'a, L: Linking = Eager> {
+pub struct SemaphorePermit<'a, L: Linking = AtomicEager> {
     sem: &'a Semaphore<L>,
     permits: u32,
 }
@@ -370,7 +369,7 @@ impl<L: Linking> Drop for SemaphorePermit<'_, L> {
     }
 }
 
-pub struct OwnedSemaphorePermit<L: Linking = Eager> {
+pub struct OwnedSemaphorePermit<L: Linking = AtomicEager> {
     sem: Arc<Semaphore<L>>,
     permits: u32,
 }

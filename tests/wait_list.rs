@@ -14,7 +14,7 @@ use aiq::{
     },
 };
 use futures::FutureExt;
-use linking::{EAGER, LAZY, LinkingMode};
+use linking::{EAGER, LAZY, LinkingMode, SERIALIZED};
 use loom::{AtomicUsize, block_on, fence, model, thread};
 use rstest::rstest;
 
@@ -175,16 +175,31 @@ macro_rules! assert_pending {
     };
 }
 
+// https://github.com/tokio-rs/loom/issues/424
+macro_rules! skip_loom_issue_424 {
+    ($sync:ty, $linking:ty) => {
+        #[cfg(loom)]
+        use std::any::TypeId;
+        #[cfg(loom)]
+        if TypeId::of::<$sync>() == TypeId::of::<Synchronized>()
+            && TypeId::of::<$linking>() == TypeId::of::<aiq::list::Serialized>()
+        {
+            return;
+        }
+    };
+}
+
 #[rstest]
 fn wait_until<S: Synchronization, L: Linking>(
     // loom doesn't support SEQ
     #[values(SYNC, UNSYNC, UNSYNC_RMW)] sync: SyncMode<S>,
-    #[values(EAGER, LAZY)] _linking: LinkingMode<L>,
+    #[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>,
     #[values(NotifyMode::One, NotifyMode::Last, NotifyMode::All)] notify_mode: NotifyMode,
     #[values(WaitMode::Normal, WaitMode::Minimal)] wait_mode: WaitMode,
 ) where
     SyncMode<S>: WakeConditionAccess,
 {
+    skip_loom_issue_424!(S, L);
     model(move || {
         let list = WaitList::<(), S, L>::new();
         let wake_condition = AtomicUsize::new(0);
@@ -206,7 +221,7 @@ fn wait_until<S: Synchronization, L: Linking>(
 #[rstest]
 fn notify_one_last<S: Synchronization, L: Linking>(
     #[values(SYNC, SEQ, UNSYNC)] _sync: SyncMode<S>,
-    #[values(EAGER, LAZY)] _linking: LinkingMode<L>,
+    #[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>,
     #[values((NotifyMode::One, 0), (NotifyMode::Last, 1))] (notify_mode, wait_idx): (
         NotifyMode,
         usize,
@@ -226,7 +241,7 @@ fn notify_one_last<S: Synchronization, L: Linking>(
 #[rstest]
 fn notify_one_last_cancel<S: Synchronization, L: Linking>(
     #[values(SYNC, SEQ, UNSYNC)] _sync: SyncMode<S>,
-    #[values(EAGER, LAZY)] _linking: LinkingMode<L>,
+    #[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>,
     #[values((NotifyMode::One, 0), (NotifyMode::Last, 1))] (notify_mode, wait_idx): (
         NotifyMode,
         usize,
@@ -249,7 +264,7 @@ fn notify_one_last_cancel<S: Synchronization, L: Linking>(
 #[rstest]
 fn notify_all_cancel<S: Synchronization, L: Linking>(
     #[values(SYNC, SEQ, UNSYNC)] _sync: SyncMode<S>,
-    #[values(EAGER, LAZY)] _linking: LinkingMode<L>,
+    #[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>,
 ) {
     model(|| {
         let list = WaitList::<(), S, L>::new();
@@ -266,7 +281,7 @@ fn notify_all_cancel<S: Synchronization, L: Linking>(
 #[rstest]
 fn notify_all_poll_consistency<S: Synchronization, L: Linking>(
     #[values(SYNC, SEQ, UNSYNC)] _sync: SyncMode<S>,
-    #[values(EAGER, LAZY)] _linking: LinkingMode<L>,
+    #[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>,
 ) {
     model(|| {
         let list = WaitList::<(), S, L>::new();
@@ -288,7 +303,7 @@ fn notify_all_poll_consistency<S: Synchronization, L: Linking>(
 #[rstest]
 fn notify_all_is_atomic<S: Synchronization, L: Linking>(
     #[values(SYNC, SEQ, UNSYNC)] _sync: SyncMode<S>,
-    #[values(EAGER, LAZY)] _linking: LinkingMode<L>,
+    #[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>,
     #[values(0, DEFAULT_WAKER_LIST_SIZE)] tested_fut_index: usize,
 ) {
     model(move || {
@@ -317,7 +332,7 @@ fn notify_all_is_atomic<S: Synchronization, L: Linking>(
 #[rstest]
 fn notify_all_sequential_wait<S: Synchronization, L: Linking>(
     #[values(SYNC, SEQ, UNSYNC)] _sync: SyncMode<S>,
-    #[values(EAGER, LAZY)] _linking: LinkingMode<L>,
+    #[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>,
 ) {
     model(move || {
         let list = WaitList::<(), S, L>::new();
@@ -338,7 +353,7 @@ fn notify_all_sequential_wait<S: Synchronization, L: Linking>(
 #[rstest]
 fn notify_many<S: Synchronization, L: Linking>(
     #[values(SYNC, SEQ, UNSYNC)] _sync: SyncMode<S>,
-    #[values(EAGER, LAZY)] _linking: LinkingMode<L>,
+    #[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>,
     #[values(0, 2, 5)] count: usize,
 ) {
     model(move || {
@@ -368,7 +383,7 @@ fn notify_many<S: Synchronization, L: Linking>(
 #[rstest]
 fn notify_many_cancel_race<S: Synchronization, L: Linking>(
     #[values(SYNC, SEQ, UNSYNC)] _sync: SyncMode<S>,
-    #[values(EAGER, LAZY)] _linking: LinkingMode<L>,
+    #[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>,
 ) {
     const COUNT: usize = DEFAULT_WAKER_LIST_SIZE + 1;
     model(move || {
@@ -397,7 +412,7 @@ fn notify_many_cancel_race<S: Synchronization, L: Linking>(
 #[rstest]
 fn close<S: Synchronization, L: Linking>(
     #[values(SYNC, SEQ, UNSYNC)] _sync: SyncMode<S>,
-    #[values(EAGER, LAZY)] _linking: LinkingMode<L>,
+    #[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>,
 ) {
     model(|| {
         let list = WaitList::<(), S, L>::new();
@@ -415,7 +430,7 @@ fn close<S: Synchronization, L: Linking>(
 #[rstest]
 fn wait_until_closed<S: Synchronization, L: Linking>(
     #[values(SYNC, SEQ, UNSYNC)] _sync: SyncMode<S>,
-    #[values(EAGER, LAZY)] _linking: LinkingMode<L>,
+    #[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>,
 ) {
     model(|| {
         let list = WaitList::<(), S, L>::new();
@@ -431,7 +446,7 @@ fn wait_until_closed<S: Synchronization, L: Linking>(
 #[rstest]
 fn wait_until_predicate_has_priority_on_close<S: Synchronization, L: Linking>(
     #[values(SYNC, SEQ, UNSYNC, UNSYNC_RMW)] sync: SyncMode<S>,
-    #[values(EAGER, LAZY)] _linking: LinkingMode<L>,
+    #[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>,
 ) where
     SyncMode<S>: WakeConditionAccess,
 {
@@ -454,7 +469,7 @@ fn wait_until_predicate_has_priority_on_close<S: Synchronization, L: Linking>(
 #[rstest]
 fn close_synchronization<S: Synchronization, L: Linking>(
     #[values(SYNC, SEQ, UNSYNC)] _sync: SyncMode<S>,
-    #[values(EAGER, LAZY)] _linking: LinkingMode<L>,
+    #[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>,
 ) {
     model(|| {
         let list = WaitList::<(), S, L>::new();
@@ -475,7 +490,7 @@ fn close_synchronization<S: Synchronization, L: Linking>(
 #[rstest]
 fn notify_cancel_race<S: Synchronization, L: Linking>(
     #[values(SYNC, SEQ, UNSYNC)] _sync: SyncMode<S>,
-    #[values(EAGER, LAZY)] _linking: LinkingMode<L>,
+    #[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>,
 ) {
     model(|| {
         let list = WaitList::<usize, S, L>::new();
@@ -497,7 +512,7 @@ fn notify_cancel_race<S: Synchronization, L: Linking>(
 #[rstest]
 fn wait_until_notified_completion<S: Synchronization, L: Linking>(
     #[values(SYNC, SEQ, UNSYNC)] _sync: SyncMode<S>,
-    #[values(EAGER, LAZY)] _linking: LinkingMode<L>,
+    #[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>,
 ) {
     model(|| {
         let list = WaitList::<(), S, L>::new();
@@ -519,7 +534,7 @@ fn wait_until_notified_completion<S: Synchronization, L: Linking>(
 #[rstest]
 fn notify_all_cancel_during_drain<S: Synchronization, L: Linking>(
     #[values(SYNC, SEQ, UNSYNC)] _sync: SyncMode<S>,
-    #[values(EAGER, LAZY)] _linking: LinkingMode<L>,
+    #[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>,
     #[values(0, DEFAULT_WAKER_LIST_SIZE)] cancelled_index: usize,
 ) {
     model(move || {
@@ -544,8 +559,9 @@ fn notify_all_cancel_during_drain<S: Synchronization, L: Linking>(
 #[rstest]
 fn notify_all_push_during_drain<S: Synchronization, L: Linking>(
     #[values(SYNC, SEQ, UNSYNC)] _sync: SyncMode<S>,
-    #[values(EAGER, LAZY)] _linking: LinkingMode<L>,
+    #[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>,
 ) {
+    skip_loom_issue_424!(S, L);
     model(|| {
         let list = WaitList::<(), S, L>::new();
         let mut wait = list.wait().boxed();

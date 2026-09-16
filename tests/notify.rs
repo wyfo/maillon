@@ -6,7 +6,7 @@ mod notify;
 mod linking;
 
 use aiq::list::Linking;
-use linking::{EAGER, LAZY, LinkingMode};
+use linking::{EAGER, LAZY, LinkingMode, SERIALIZED};
 use notify::Notify;
 use rstest::rstest;
 use tokio_test::{task::spawn, *};
@@ -16,7 +16,7 @@ trait AssertSend: Send + Sync {}
 impl<L: Linking> AssertSend for Notify<L> {}
 
 #[rstest]
-fn notify_notified_one<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+fn notify_notified_one<L: Linking>(#[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>) {
     let notify = Notify::<L>::new();
     let mut notified = spawn(async { notify.notified().await });
 
@@ -25,7 +25,9 @@ fn notify_notified_one<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<
 }
 
 #[rstest]
-fn notify_multi_notified_one<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+fn notify_multi_notified_one<L: Linking>(
+    #[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>,
+) {
     let notify = Notify::<L>::new();
     let mut notified1 = spawn(async { notify.notified().await });
     let mut notified2 = spawn(async { notify.notified().await });
@@ -41,7 +43,9 @@ fn notify_multi_notified_one<L: Linking>(#[values(EAGER, LAZY)] _linking: Linkin
 }
 
 #[rstest]
-fn notify_multi_notified_last<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+fn notify_multi_notified_last<L: Linking>(
+    #[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>,
+) {
     let notify = Notify::<L>::new();
     let mut notified1 = spawn(async { notify.notified().await });
     let mut notified2 = spawn(async { notify.notified().await });
@@ -57,7 +61,7 @@ fn notify_multi_notified_last<L: Linking>(#[values(EAGER, LAZY)] _linking: Linki
 }
 
 #[rstest]
-fn notified_one_notify<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+fn notified_one_notify<L: Linking>(#[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>) {
     let notify = Notify::<L>::new();
     let mut notified = spawn(async { notify.notified().await });
 
@@ -69,7 +73,7 @@ fn notified_one_notify<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<
 }
 
 #[rstest]
-fn notified_multi_notify<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+fn notified_multi_notify<L: Linking>(#[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>) {
     let notify = Notify::<L>::new();
     let mut notified1 = spawn(async { notify.notified().await });
     let mut notified2 = spawn(async { notify.notified().await });
@@ -86,7 +90,7 @@ fn notified_multi_notify<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMod
 }
 
 #[rstest]
-fn notify_notified_multi<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+fn notify_notified_multi<L: Linking>(#[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>) {
     let notify = Notify::<L>::new();
 
     notify.notify_one();
@@ -104,7 +108,9 @@ fn notify_notified_multi<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMod
 }
 
 #[rstest]
-fn notified_drop_notified_notify<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+fn notified_drop_notified_notify<L: Linking>(
+    #[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>,
+) {
     let notify = Notify::<L>::new();
     let mut notified1 = spawn(async { notify.notified().await });
     let mut notified2 = spawn(async { notify.notified().await });
@@ -121,7 +127,9 @@ fn notified_drop_notified_notify<L: Linking>(#[values(EAGER, LAZY)] _linking: Li
 }
 
 #[rstest]
-fn notified_multi_notify_drop_one<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+fn notified_multi_notify_drop_one<L: Linking>(
+    #[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>,
+) {
     let notify = Notify::<L>::new();
     let mut notified1 = spawn(async { notify.notified().await });
     let mut notified2 = spawn(async { notify.notified().await });
@@ -141,7 +149,9 @@ fn notified_multi_notify_drop_one<L: Linking>(#[values(EAGER, LAZY)] _linking: L
 }
 
 #[rstest]
-fn notified_multi_notify_one_drop<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+fn notified_multi_notify_one_drop<L: Linking>(
+    #[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>,
+) {
     let notify = Notify::<L>::new();
     let mut notified1 = spawn(async { notify.notified().await });
     let mut notified2 = spawn(async { notify.notified().await });
@@ -163,7 +173,9 @@ fn notified_multi_notify_one_drop<L: Linking>(#[values(EAGER, LAZY)] _linking: L
 }
 
 #[rstest]
-fn notified_multi_notify_last_drop<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+fn notified_multi_notify_last_drop<L: Linking>(
+    #[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>,
+) {
     let notify = Notify::<L>::new();
     let mut notified1 = spawn(async { notify.notified().await });
     let mut notified2 = spawn(async { notify.notified().await });
@@ -184,7 +196,9 @@ fn notified_multi_notify_last_drop<L: Linking>(#[values(EAGER, LAZY)] _linking: 
 }
 
 #[rstest]
-fn notify_in_drop_after_wake<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+fn notify_in_drop_after_wake<L: Linking>(
+    #[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>,
+) {
     use std::{future::Future, sync::Arc};
 
     use futures::task::ArcWake;
@@ -218,7 +232,9 @@ fn notify_in_drop_after_wake<L: Linking>(#[values(EAGER, LAZY)] _linking: Linkin
 }
 
 #[rstest]
-fn notify_one_after_dropped_all<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+fn notify_one_after_dropped_all<L: Linking>(
+    #[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>,
+) {
     let notify = Notify::<L>::new();
     let mut notified1 = spawn(async { notify.notified().await });
 
@@ -235,7 +251,9 @@ fn notify_one_after_dropped_all<L: Linking>(#[values(EAGER, LAZY)] _linking: Lin
 }
 
 #[rstest]
-fn test_notify_one_not_enabled<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+fn test_notify_one_not_enabled<L: Linking>(
+    #[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>,
+) {
     let notify = Notify::<L>::new();
     let mut future = spawn(notify.notified());
 
@@ -244,7 +262,9 @@ fn test_notify_one_not_enabled<L: Linking>(#[values(EAGER, LAZY)] _linking: Link
 }
 
 #[rstest]
-fn test_notify_one_after_enable<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+fn test_notify_one_after_enable<L: Linking>(
+    #[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>,
+) {
     let notify = Notify::<L>::new();
     let mut future = spawn(notify.notified());
 
@@ -256,7 +276,7 @@ fn test_notify_one_after_enable<L: Linking>(#[values(EAGER, LAZY)] _linking: Lin
 }
 
 #[rstest]
-fn test_poll_after_enable<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+fn test_poll_after_enable<L: Linking>(#[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>) {
     let notify = Notify::<L>::new();
     let mut future = spawn(notify.notified());
 
@@ -265,7 +285,7 @@ fn test_poll_after_enable<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMo
 }
 
 #[rstest]
-fn test_enable_after_poll<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+fn test_enable_after_poll<L: Linking>(#[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>) {
     let notify = Notify::<L>::new();
     let mut future = spawn(notify.notified());
 
@@ -274,7 +294,9 @@ fn test_enable_after_poll<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMo
 }
 
 #[rstest]
-fn test_enable_consumes_permit<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+fn test_enable_consumes_permit<L: Linking>(
+    #[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>,
+) {
     let notify = Notify::<L>::new();
 
     // Add a permit.
@@ -288,7 +310,7 @@ fn test_enable_consumes_permit<L: Linking>(#[values(EAGER, LAZY)] _linking: Link
 }
 
 #[rstest]
-fn test_waker_update<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+fn test_waker_update<L: Linking>(#[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>) {
     use std::{future::Future, task::Context};
 
     use futures::task::noop_waker;

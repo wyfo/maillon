@@ -12,13 +12,13 @@ use std::{
 };
 
 use aiq::list::Linking;
-use linking::{EAGER, LAZY, LinkingMode};
+use linking::{EAGER, LAZY, LinkingMode, SERIALIZED};
 use loom::{future::block_on, sync::atomic::AtomicUsize, thread};
 use rstest::rstest;
 use semaphore::Semaphore;
 
 #[rstest]
-fn basic_usage<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+fn basic_usage<L: Linking>(#[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>) {
     const NUM: usize = 2;
 
     struct Shared<L: Linking> {
@@ -54,7 +54,7 @@ fn basic_usage<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
 }
 
 #[rstest]
-fn release<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+fn release<L: Linking>(#[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>) {
     loom::model(|| {
         let semaphore = Arc::new(Semaphore::<L>::new(1));
 
@@ -70,7 +70,7 @@ fn release<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
 }
 
 #[rstest]
-fn basic_closing<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+fn basic_closing<L: Linking>(#[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>) {
     const NUM: usize = 2;
 
     loom::model(|| {
@@ -93,7 +93,7 @@ fn basic_closing<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
 }
 
 #[rstest]
-fn concurrent_close<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+fn concurrent_close<L: Linking>(#[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>) {
     const NUM: usize = 3;
 
     loom::model(|| {
@@ -114,7 +114,7 @@ fn concurrent_close<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>)
 
 #[ignore]
 #[rstest]
-fn concurrent_cancel<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+fn concurrent_cancel<L: Linking>(#[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>) {
     async fn poll_and_cancel<L: Linking>(semaphore: Arc<Semaphore<L>>) {
         let mut acquire1 = Some(semaphore.acquire());
         let mut acquire2 = Some(semaphore.acquire());
@@ -158,7 +158,7 @@ fn concurrent_cancel<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>
 }
 
 #[rstest]
-fn batch<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+fn batch<L: Linking>(#[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>) {
     let mut b = loom::model::Builder::new();
     b.preemption_bound = Some(1);
 
@@ -196,7 +196,7 @@ fn batch<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
 }
 
 #[rstest]
-fn release_during_acquire<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+fn release_during_acquire<L: Linking>(#[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>) {
     loom::model(|| {
         let semaphore = Arc::new(Semaphore::<L>::new(10));
         let permits = semaphore
@@ -213,7 +213,9 @@ fn release_during_acquire<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMo
 }
 
 #[rstest]
-fn concurrent_permit_updates<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+fn concurrent_permit_updates<L: Linking>(
+    #[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>,
+) {
     loom::model(move || {
         let semaphore = Arc::new(Semaphore::<L>::new(5));
         let t1 = {

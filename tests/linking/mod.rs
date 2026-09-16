@@ -6,9 +6,10 @@
 
 use std::marker::PhantomData;
 
-use aiq::list::{Eager, Lazy, Linking};
+use aiq::list::{AtomicEager, AtomicLazy, Linking, Serialized};
 
 pub struct LinkingMode<L: Linking>(PhantomData<L>);
 
-pub const EAGER: LinkingMode<Eager> = LinkingMode(PhantomData);
-pub const LAZY: LinkingMode<Lazy> = LinkingMode(PhantomData);
+pub const EAGER: LinkingMode<AtomicEager> = LinkingMode(PhantomData);
+pub const LAZY: LinkingMode<AtomicLazy> = LinkingMode(PhantomData);
+pub const SERIALIZED: LinkingMode<Serialized> = LinkingMode(PhantomData);

@@ -1,14 +1,11 @@
-use core::{
-    cell::UnsafeCell, marker::PhantomData, mem::ManuallyDrop, ops::Deref, pin::Pin, ptr,
-    ptr::NonNull,
-};
+use core::{cell::UnsafeCell, marker::PhantomData, mem::ManuallyDrop, pin::Pin, ptr, ptr::NonNull};
 
 use crate::{
     loom::{
         AtomicPtrExt,
         sync::atomic::{AtomicPtr, Ordering, Ordering::*, fence},
     },
-    node::{LinkedNodeRef, NodeData, NodeLink, node_ref},
+    node::{LinkedNodeRef, NodeData, NodeLink, NodeRef, NodeUnlinked, PrivateNodeRef, node_ref},
     sync::mutex::{DefaultMutex, Mutex},
 };
 
@@ -26,7 +23,7 @@ type MutexGuard<'a, M> = <M as Mutex>::Guard<'a>;
 
 const HEAD_MARKER: usize = 1;
 
-pub struct List<T, S: ListState = (), D = (), L: Linking = Eager, M: Mutex = DefaultMutex> {
+pub struct List<T, S: ListState = (), D = (), L: Linking = AtomicEager, M: Mutex = DefaultMutex> {
     tail: AtomicPtr<Tail<S, L>>,
     head: L::NextPtr,
     mutex: M,
@@ -91,7 +88,19 @@ impl<T, S: ListState, D, L: Linking, M: Mutex> List<T, S, D, L, M> {
 
     #[inline(always)]
     fn tail(&self) -> Option<NonNull<NodeLink<L>>> {
-        self.tail.load(Acquire).ptr()
+        let order = if L::SERIALIZED { Relaxed } else { Acquire };
+        self.tail.load(order).ptr()
+    }
+
+    #[inline(always)]
+    fn store_tail_serialized(&self, new_tail: *mut Tail<S, L>, order: Ordering) {
+        debug_assert!(L::SERIALIZED);
+        match order {
+            Acquire | AcqRel => {
+                self.tail.swap(new_tail, order);
+            }
+            _ => self.tail.store(new_tail, order),
+        }
     }
 
     #[inline]
@@ -113,35 +122,44 @@ impl<T, S: ListState, D, L: Linking, M: Mutex> List<T, S, D, L, M> {
         }
     }
 
-    pub(crate) unsafe fn push_back(
+    pub(crate) fn push_back<LR>(
         &self,
-        mut node: NonNull<NodeLink<L>>,
+        mut node: NodeUnlinked<'_, LR>,
         set_order: Ordering,
         fetch_order: Ordering,
-        mut f: Option<impl FnMut(S) -> Option<S>>,
-        mut on_push: impl FnMut(Option<S>) -> bool,
-        on_pushed: impl FnOnce(),
-    ) -> Result<S, bool> {
+        mut f: Option<impl FnMut(Pin<&mut T>, S) -> Option<S>>,
+        mut on_push: impl FnMut(Pin<&mut T>, Option<S>) -> bool,
+    ) -> Result<S, bool>
+    where
+        LR: ListRef<NodeData = T, ListState = S, ListData = D, Linking = L, Mutex = M>,
+    {
+        debug_assert!(ptr::eq(node.list().as_list(), self));
+        let mut link = node.link();
+        let _locked = L::SERIALIZED.then(|| self.lock());
         let set_order = L::push_back_set_order(set_order);
         let mut tail = self.tail.load(fetch_order);
         let prev = loop {
             let (new_tail, prev) = match S::tail_to_enum(tail) {
                 StateOrPtr::State(state)
                     if let Some(f) = f.as_mut()
-                        && let Some(new_state) = f(state) =>
+                        && let Some(new_state) = f(node.data_mut(), state) =>
                 {
                     (new_state.into_tail(), ptr::null_mut())
                 }
-                state_or_ptr if !on_push(state_or_ptr.state()) => {
-                    unsafe { node.as_mut().prev.store_mut(ptr::null_mut()) };
+                state_or_ptr if !on_push(node.data_mut(), state_or_ptr.state()) => {
+                    unsafe { link.as_mut().prev.store_mut(ptr::null_mut()) };
                     return Err(false);
                 }
                 StateOrPtr::State(_) => {
-                    (node.into_tail(), ptr::without_provenance_mut(HEAD_MARKER))
+                    (link.into_tail(), ptr::without_provenance_mut(HEAD_MARKER))
                 }
-                StateOrPtr::Ptr(prev) => (node.into_tail(), prev.as_ptr()),
+                StateOrPtr::Ptr(prev) => (link.into_tail(), prev.as_ptr()),
             };
-            unsafe { node.as_mut().prev.store_mut(prev) };
+            unsafe { link.as_mut().prev.store_mut(prev) };
+            if L::SERIALIZED {
+                self.store_tail_serialized(new_tail, set_order);
+                break prev;
+            }
             match (self.tail).compare_exchange_weak(tail, new_tail, set_order, fetch_order) {
                 Ok(_) => break prev,
                 Err(t) => tail = t,
@@ -152,9 +170,8 @@ impl<T, S: ListState, D, L: Linking, M: Mutex> List<T, S, D, L, M> {
             HEAD_MARKER => NonNull::from(&self.head),
             _ => unsafe { NonNull::new_unchecked((&raw const (*prev).next).cast_mut()) },
         };
-        // TODO must be called before unpark in case unpark panics
-        on_pushed();
-        L::store_next(prev_next, node, &self.parker);
+        L::store_next(prev_next, link, &self.parker);
+        node.set_linked(self);
         Err(true)
     }
 }
@@ -211,6 +228,22 @@ impl<T, D, L: Linking, M: Mutex> List<T, usize, D, L, M> {
         success: Ordering,
         failure: Ordering,
     ) -> Result<usize, Option<usize>> {
+        if L::SERIALIZED {
+            self.lock()
+                .compare_exchange_state(current, new, success, failure)
+        } else {
+            self.compare_exchange_state_atomic(current, new, success, failure)
+        }
+    }
+
+    #[inline]
+    fn compare_exchange_state_atomic(
+        &self,
+        current: usize,
+        new: usize,
+        success: Ordering,
+        failure: Ordering,
+    ) -> Result<usize, Option<usize>> {
         match (self.tail).compare_exchange(current.into_tail(), new.into_tail(), success, failure) {
             Ok(_) => Ok(current),
             Err(ptr) => Err(ptr.state()),
@@ -219,6 +252,20 @@ impl<T, D, L: Linking, M: Mutex> List<T, usize, D, L, M> {
 
     #[inline]
     pub fn try_update_state<F: FnMut(usize) -> Option<usize>>(
+        &self,
+        set_order: Ordering,
+        fetch_order: Ordering,
+        f: F,
+    ) -> Result<usize, Option<usize>> {
+        if L::SERIALIZED {
+            self.lock().try_update_state(set_order, fetch_order, f)
+        } else {
+            self.try_update_state_atomic(set_order, fetch_order, f)
+        }
+    }
+
+    #[inline]
+    fn try_update_state_atomic<F: FnMut(usize) -> Option<usize>>(
         &self,
         set_order: Ordering,
         fetch_order: Ordering,
@@ -245,11 +292,14 @@ impl<T, D, L: Linking, M: Mutex> List<T, usize, D, L, M> {
         fetch_order: Ordering,
         mut f: F,
     ) -> Result<usize, LockedList<'_, T, usize, D, L, M>> {
-        if let Ok(s) = self.try_update_state(set_order, fetch_order, |s| Some(f(s))) {
+        if !L::SERIALIZED
+            && let Ok(s) = self.try_update_state_atomic(set_order, fetch_order, |s| Some(f(s)))
+        {
             return Ok(s);
         }
-        let locked = self.lock();
-        self.try_update_state(set_order, fetch_order, |s| Some(f(s)))
+        let mut locked = self.lock();
+        locked
+            .try_update_state(set_order, fetch_order, |s| Some(f(s)))
             .or(Err(locked))
     }
 
@@ -265,7 +315,12 @@ impl<T, D, L: Linking, M: Mutex> List<T, usize, D, L, M> {
         mut f: F,
         locked_fallback: G,
     ) {
-        if (self.try_update_state(set_order, fetch_order, |s| Some(f(s)))).is_err() {
+        if L::SERIALIZED {
+            let mut locked = self.lock();
+            if (locked.try_update_state(set_order, fetch_order, |s| Some(f(s)))).is_err() {
+                locked_fallback(locked);
+            }
+        } else if (self.try_update_state_atomic(set_order, fetch_order, |s| Some(f(s)))).is_err() {
             self.update_state_or_lock_with_cold(set_order, fetch_order, f, locked_fallback);
         }
     }
@@ -283,8 +338,8 @@ impl<T, D, L: Linking, M: Mutex> List<T, usize, D, L, M> {
         mut f: F,
         locked_fallback: G,
     ) {
-        let locked = self.lock();
-        if (self.try_update_state(set_order, fetch_order, |s| Some(f(s)))).is_err() {
+        let mut locked = self.lock();
+        if (locked.try_update_state(set_order, fetch_order, |s| Some(f(s)))).is_err() {
             locked_fallback(locked);
         }
     }
@@ -333,8 +388,14 @@ impl<T: NodeData<Self>, S: ListState, D, L: Linking, M: Mutex> ListRef for &List
     }
 }
 
-pub struct LockedList<'a, T, S: ListState = (), D = (), L: Linking = Eager, M: Mutex = DefaultMutex>
-{
+pub struct LockedList<
+    'a,
+    T,
+    S: ListState = (),
+    D = (),
+    L: Linking = AtomicEager,
+    M: Mutex = DefaultMutex,
+> {
     list: &'a List<T, S, D, L, M>,
     guard: ManuallyDrop<MutexGuard<'a, M>>,
     _not_send: PhantomData<*mut ()>,
@@ -346,6 +407,16 @@ unsafe impl<'a, T: Send, S: ListState, D: Sync, L: Linking, M: Mutex> Sync
 }
 
 impl<'a, T, S: ListState, D, L: Linking, M: Mutex> LockedList<'a, T, S, D, L, M> {
+    #[inline]
+    pub fn is_empty(&self, order: Ordering) -> bool {
+        self.list.is_empty(order)
+    }
+
+    #[inline]
+    pub fn is_empty_rmw(&self, order: Ordering) -> bool {
+        self.list.is_empty_rmw(order)
+    }
+
     /// [`Linking::get_next`] with the list's head slot and parker filled in.
     #[inline(always)]
     fn get_next(
@@ -354,7 +425,7 @@ impl<'a, T, S: ListState, D, L: Linking, M: Mutex> LockedList<'a, T, S, D, L, M>
         next: &L::NextPtr,
         tail: NonNull<NodeLink<L>>,
     ) -> NonNull<NodeLink<L>> {
-        L::get_next(node, next, tail, &self.parker)
+        L::get_next(node, next, tail, &self.list.parker)
     }
 
     #[inline]
@@ -362,13 +433,17 @@ impl<'a, T, S: ListState, D, L: Linking, M: Mutex> LockedList<'a, T, S, D, L, M>
     where
         L: Linking,
     {
-        let node = self.get_next(None, &self.head, self.tail()?);
+        let node = if L::SERIALIZED {
+            L::load_next(&self.list.head)?
+        } else {
+            self.get_next(None, &self.list.head, self.list.tail()?)
+        };
         Some(ListFront { node, locked: self })
     }
 
     #[inline]
     pub fn back(&mut self) -> Option<ListBack<'a, '_, T, S, D, L, M>> {
-        let node = self.tail()?;
+        let node = self.list.tail()?;
         Some(ListBack { node, locked: self })
     }
 
@@ -408,7 +483,7 @@ impl<'a, T, S: ListState, D, L: Linking, M: Mutex> LockedList<'a, T, S, D, L, M>
     #[inline(always)]
     pub(crate) unsafe fn remove<F: FnOnce(Pin<&mut T>, &mut D) -> S>(
         &mut self,
-        node: NonNull<NodeLink<L>>,
+        link: NonNull<NodeLink<L>>,
         new_state_if_last_node: F,
         is_front: bool,
         is_back: bool,
@@ -419,44 +494,50 @@ impl<'a, T, S: ListState, D, L: Linking, M: Mutex> LockedList<'a, T, S, D, L, M>
         // (it was written with at least Release in push_back, but a fence(Acquire) would not
         // work as the task may have moved in another thread)
         if L::NODES_ACCESS_REQUIRES_TAIL_ACQUIRE && !is_front && !is_back && !is_cursor {
-            self.tail();
+            self.list.tail();
         }
-        let node_ref = unsafe { node.as_ref() };
+        let link_ref = unsafe { link.as_ref() };
         let prev = if is_front {
             NonNull::new(ptr::without_provenance_mut(HEAD_MARKER)).unwrap()
         } else {
             // TODO safety the node is linked
-            unsafe { node_ref.load_prev() }
+            unsafe { link_ref.load_prev() }
         };
         let is_head = prev.addr().get() == HEAD_MARKER;
         let prev_next = if is_head {
-            &self.head
+            &self.list.head
         } else {
             unsafe { &prev.as_ref().next }
         };
         // TODO a cursor node may come from the tail or a `prev` walk, so its incoming edge may
         // still be unpublished, unlike a node returned by `get_next`
         if is_back || is_cursor {
-            L::wait_next(prev_next, &self.parker);
+            L::wait_next(prev_next, &self.list.parker);
         }
         let mut next = if is_back {
             None
         } else {
-            L::load_next(&node_ref.next)
+            L::load_next(&link_ref.next)
         };
         let mut tail = None;
         if next.is_none() {
             L::update_next(prev_next, None);
             let new_tail = if is_head {
                 // TODO raw pointers: `prev_next` may borrow `self.head`
-                let data = unsafe { Pin::new_unchecked(&mut *NodeLink::data_ptr::<T>(node)) };
+                let data = unsafe { Pin::new_unchecked(&mut *NodeLink::data_ptr::<T>(link)) };
                 let list_data = unsafe { &mut *self.data_ptr() };
                 new_state_if_last_node(data, list_data).into_tail()
             } else {
                 prev.into_tail()
             };
-            let node_ptr = node.into_tail();
-            if let Err(t) = (self.tail).compare_exchange(node_ptr, new_tail, Release, Relaxed) {
+            let node_ptr = link.into_tail();
+            let result = if L::SERIALIZED {
+                self.list.tail.store(new_tail, Release);
+                Ok(node_ptr)
+            } else {
+                (self.list.tail).compare_exchange(node_ptr, new_tail, Release, Relaxed)
+            };
+            if let Err(t) = result {
                 if is_back || L::NODES_ACCESS_REQUIRES_TAIL_ACQUIRE {
                     fence(Acquire);
                 }
@@ -467,7 +548,7 @@ impl<'a, T, S: ListState, D, L: Linking, M: Mutex> LockedList<'a, T, S, D, L, M>
                     t.ptr()
                 };
                 // TODO is the node is drained, backward iteration can be started from it directly
-                next = Some(self.get_next(Some(node), &node_ref.next, tail.unwrap_or(node)));
+                next = Some(self.get_next(Some(link), &link_ref.next, tail.unwrap_or(link)));
             } else if !is_head {
                 tail = Some(prev);
             }
@@ -476,8 +557,49 @@ impl<'a, T, S: ListState, D, L: Linking, M: Mutex> LockedList<'a, T, S, D, L, M>
             unsafe { next.as_ref().prev.store(prev.as_ptr(), Relaxed) };
             L::update_next(prev_next, Some(next));
         }
-        node_ref.unlink();
+        link_ref.unlink();
         (next, tail)
+    }
+}
+
+impl<'a, T, S: ListState, D, M: Mutex> LockedList<'a, T, S, D, Serialized, M> {
+    #[inline]
+    pub fn push_back<LR>(&mut self, node: NodeUnlinked<'_, LR>, order: Ordering)
+    where
+        LR: ListRef<NodeData = T, ListState = S, ListData = D, Linking = Serialized, Mutex = M>,
+    {
+        let head_marker = NonNull::new(ptr::without_provenance_mut(HEAD_MARKER)).unwrap();
+        let prev = self.list.tail().unwrap_or(head_marker);
+        unsafe { self.insert_between(node, prev, None, order) };
+    }
+
+    // TODO safety: `prev` is `HEAD_MARKER` or a linked node, `next` is `prev`'s successor
+    #[inline(always)]
+    pub(super) unsafe fn insert_between<LR>(
+        &mut self,
+        node: NodeUnlinked<'_, LR>,
+        prev: NonNull<NodeLink<Serialized>>,
+        next: Option<NonNull<NodeLink<Serialized>>>,
+        order: Ordering,
+    ) where
+        LR: ListRef<NodeData = T, ListState = S, ListData = D, Linking = Serialized, Mutex = M>,
+    {
+        debug_assert!(ptr::eq(node.list().as_list(), self.list));
+        let mut link = node.link();
+        let link_ref = unsafe { link.as_mut() };
+        link_ref.prev.store_mut(prev.as_ptr());
+        Serialized::update_next_mut(&mut link_ref.next, next);
+        let prev_next = if prev.addr().get() == HEAD_MARKER {
+            &self.list.head
+        } else {
+            unsafe { &prev.as_ref().next }
+        };
+        Serialized::update_next(prev_next, Some(link));
+        match next {
+            Some(next) => unsafe { next.as_ref().prev.store(link.as_ptr(), Relaxed) },
+            None => self.list.store_tail_serialized(link.into_tail(), order),
+        }
+        node.set_linked(self.list);
     }
 }
 
@@ -489,6 +611,57 @@ impl<'a, T, D, L: Linking, M: Mutex> LockedList<'a, T, (), D, L, M> {
 }
 
 impl<'a, T, D, L: Linking, M: Mutex> LockedList<'a, T, usize, D, L, M> {
+    #[inline]
+    pub fn load_state(&self, order: Ordering) -> Option<usize> {
+        self.list.load_state(order)
+    }
+
+    #[inline]
+    pub fn load_state_or(&self, order: Ordering, default: usize) -> usize {
+        self.list.load_state_or(order, default)
+    }
+
+    #[inline]
+    pub fn load_state_rmw(&self, order: Ordering) -> Option<usize> {
+        self.list.load_state_rmw(order)
+    }
+
+    #[inline]
+    pub fn compare_exchange_state(
+        &mut self,
+        current: usize,
+        new: usize,
+        success: Ordering,
+        failure: Ordering,
+    ) -> Result<usize, Option<usize>> {
+        if !L::SERIALIZED {
+            return (self.list).compare_exchange_state_atomic(current, new, success, failure);
+        }
+        match self.list.tail.load(failure).state() {
+            Some(state) if state == current => {
+                self.list.store_tail_serialized(new.into_tail(), success);
+                Ok(current)
+            }
+            state => Err(state),
+        }
+    }
+
+    #[inline]
+    pub fn try_update_state<F: FnMut(usize) -> Option<usize>>(
+        &mut self,
+        set_order: Ordering,
+        fetch_order: Ordering,
+        mut f: F,
+    ) -> Result<usize, Option<usize>> {
+        if !L::SERIALIZED {
+            return self.list.try_update_state_atomic(set_order, fetch_order, f);
+        }
+        let state = self.list.tail.load(fetch_order).state().ok_or(None)?;
+        let new_state = f(state).ok_or(Some(state))?;
+        (self.list).store_tail_serialized(new_state.into_tail(), set_order);
+        Ok(state)
+    }
+
     pub fn drain<F: FnOnce(&mut D) -> usize>(
         self,
         new_state_if_not_empty: F,
@@ -504,21 +677,13 @@ impl<T, S: ListState, D, L: Linking, M: Mutex> Drop for LockedList<'_, T, S, D, 
     }
 }
 
-impl<T, S: ListState, D, L: Linking, M: Mutex> Deref for LockedList<'_, T, S, D, L, M> {
-    type Target = List<T, S, D, L, M>;
-
-    fn deref(&self) -> &Self::Target {
-        self.list
-    }
-}
-
 pub trait ListEnd<
     'locked,
     'a,
     T,
     S: ListState = (),
     D = (),
-    L: Linking = Eager,
+    L: Linking = AtomicEager,
     M: Mutex = DefaultMutex,
 >: LinkedNodeRef<T, D> + Sized
 {
@@ -532,7 +697,7 @@ pub struct ListFront<
     T,
     S: ListState = (),
     D = (),
-    L: Linking = Eager,
+    L: Linking = AtomicEager,
     M: Mutex = DefaultMutex,
 > {
     node: NonNull<NodeLink<L>>,
@@ -597,7 +762,7 @@ pub struct ListBack<
     T,
     S: ListState = (),
     D = (),
-    L: Linking = Eager,
+    L: Linking = AtomicEager,
     M: Mutex = DefaultMutex,
 > {
     node: NonNull<NodeLink<L>>,

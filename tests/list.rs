@@ -9,11 +9,11 @@ use aiq::{
     List, Node, NodeState,
     list::{
         DrainEnd, DrainGetEnd, GetBack, GetFront, LIST_STATE_MAX, Linking, ListEnd, ListGetEnd,
-        LockedList,
+        LockedList, Serialized,
     },
     node::{NodeData, NodeRef},
 };
-use linking::{EAGER, LAZY, LinkingMode};
+use linking::{EAGER, LAZY, LinkingMode, SERIALIZED};
 use loom::{model, thread};
 use rstest::rstest;
 
@@ -55,7 +55,7 @@ fn state_overflow() {
 }
 
 #[rstest]
-fn drop_non_empty_drain<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+fn drop_non_empty_drain<L: Linking>(#[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>) {
     model(|| {
         let list = TestList::<L>::new();
         let nodes: [_; 2] = array::from_fn(|i| push_node(&list, i + 1));
@@ -65,7 +65,9 @@ fn drop_non_empty_drain<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode
 }
 
 #[rstest]
-fn panic_in_drain_execute_unlocked<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+fn panic_in_drain_execute_unlocked<L: Linking>(
+    #[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>,
+) {
     model(|| {
         let list = TestList::<L>::new();
         let nodes: [_; 2] = array::from_fn(|i| push_node(&list, i + 1));
@@ -80,7 +82,7 @@ fn panic_in_drain_execute_unlocked<L: Linking>(#[values(EAGER, LAZY)] _linking: 
 
 #[rstest]
 fn remove_many<L: Linking, E: ListGetEnd>(
-    #[values(EAGER, LAZY)] _linking: LinkingMode<L>,
+    #[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>,
     #[values((GetFront, [1, 2, 3]), (GetBack, [3, 2, 1]))] (_end, ids): (E, [usize; 3]),
 ) {
     model(move || {
@@ -103,7 +105,7 @@ fn remove_many<L: Linking, E: ListGetEnd>(
 
 #[rstest]
 fn drain_many<L: Linking, E: DrainGetEnd>(
-    #[values(EAGER, LAZY)] _linking: LinkingMode<L>,
+    #[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>,
     #[values((GetFront, [1, 2, 3]), (GetBack, [3, 2, 1]))] (_end, ids): (E, [usize; 3]),
 ) {
     model(move || {
@@ -125,7 +127,7 @@ fn drain_many<L: Linking, E: DrainGetEnd>(
 }
 
 #[rstest]
-fn cursor_empty<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+fn cursor_empty<L: Linking>(#[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>) {
     model(|| {
         let list = TestList::<L>::new();
         let mut locked = list.lock();
@@ -142,7 +144,7 @@ fn cursor_empty<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
 }
 
 #[rstest]
-fn cursor_move<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+fn cursor_move<L: Linking>(#[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>) {
     model(|| {
         let list = TestList::<L>::new();
         let _nodes: [_; 3] = array::from_fn(|i| push_node(&list, i + 1));
@@ -167,7 +169,7 @@ fn cursor_move<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
 }
 
 #[rstest]
-fn cursor_remove_current<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+fn cursor_remove_current<L: Linking>(#[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>) {
     model(|| {
         let list = TestList::<L>::new();
         let nodes: [_; 3] = array::from_fn(|i| push_node(&list, i + 1));
@@ -192,7 +194,9 @@ fn cursor_remove_current<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMod
 }
 
 #[rstest]
-fn cursor_remove_concurrent_push<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+fn cursor_remove_concurrent_push<L: Linking>(
+    #[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>,
+) {
     model(|| {
         let list = TestList::<L>::new();
         let node = push_node(&list, 1);
@@ -206,5 +210,92 @@ fn cursor_remove_concurrent_push<L: Linking>(#[values(EAGER, LAZY)] _linking: Li
         drop(locked);
         assert!(list.is_empty(Relaxed));
         assert!(!node.is_linked());
+    });
+}
+
+fn ids<L: Linking>(locked: &mut LockedList<'_, TestData, (), (), L>) -> Vec<usize> {
+    let mut ids = Vec::new();
+    let mut cursor = locked.cursor_front();
+    while let Some(current) = cursor.current() {
+        ids.push(current.0);
+        cursor.move_next();
+    }
+    ids
+}
+
+#[test]
+fn locked_push_back() {
+    model(|| {
+        let list = TestList::<Serialized>::new();
+        let mut nodes: [_; 3] =
+            array::from_fn(|i| Box::pin(TestNode::with_data(&list, TestData(i + 1))));
+        let mut locked = list.lock();
+        for node in &mut nodes {
+            match node.as_mut().state() {
+                NodeState::Unlinked(node) => locked.push_back(node, Relaxed),
+                NodeState::Linked(_) => unreachable!(),
+            }
+            assert!(node.is_linked());
+        }
+        assert_eq!(ids(&mut locked), [1, 2, 3]);
+        let mut cursor = locked.cursor_front();
+        while cursor.remove_current() {}
+        drop(locked);
+        assert!(list.is_empty(Relaxed));
+        assert!(nodes.iter().all(|node| !node.is_linked()));
+    });
+}
+
+#[test]
+fn cursor_insert() {
+    model(|| {
+        let list = TestList::<Serialized>::new();
+        let mut nodes: [_; 6] =
+            array::from_fn(|i| Box::pin(TestNode::with_data(&list, TestData(i + 1))));
+        let mut unlinked = nodes.iter_mut().map(|node| match node.as_mut().state() {
+            NodeState::Unlinked(node) => node,
+            NodeState::Linked(_) => unreachable!(),
+        });
+        let mut locked = list.lock();
+        let mut cursor = locked.cursor_front();
+        cursor.insert_after(unlinked.next().unwrap(), Relaxed);
+        cursor.insert_after(unlinked.next().unwrap(), Relaxed);
+        cursor.insert_before(unlinked.next().unwrap(), Relaxed);
+        assert!(cursor.current().is_none());
+        assert_eq!(ids(&mut locked), [2, 1, 3]);
+        let mut cursor = locked.cursor_front();
+        cursor.move_next();
+        assert_eq!(cursor.current().unwrap().0, 1);
+        cursor.insert_before(unlinked.next().unwrap(), Relaxed);
+        cursor.insert_after(unlinked.next().unwrap(), Relaxed);
+        assert_eq!(cursor.current().unwrap().0, 1);
+        assert_eq!(ids(&mut locked), [2, 4, 1, 5, 3]);
+        let mut cursor = locked.cursor_back();
+        cursor.insert_after(unlinked.next().unwrap(), Relaxed);
+        assert_eq!(ids(&mut locked), [2, 4, 1, 5, 3, 6]);
+        let mut cursor = locked.cursor_back();
+        assert_eq!(cursor.current().unwrap().0, 6);
+        cursor.move_prev();
+        assert_eq!(cursor.current().unwrap().0, 3);
+        let mut cursor = locked.cursor_front();
+        while cursor.remove_current() {}
+        drop(locked);
+        assert!(list.is_empty(Relaxed));
+        assert!(nodes.iter().all(|node| !node.is_linked()));
+    });
+}
+
+#[test]
+fn locked_push_back_from_node_only() {
+    model(|| {
+        let list = TestList::<Serialized>::new();
+        let mut node = Box::pin(TestNode::with_data(&list, TestData(1)));
+        let NodeState::Unlinked(unlinked) = node.as_mut().state() else {
+            unreachable!()
+        };
+        let mut locked = aiq::list::ListRef::as_list(unlinked.list()).lock();
+        locked.push_back(unlinked, Relaxed);
+        drop(locked);
+        assert!(node.is_linked());
     });
 }

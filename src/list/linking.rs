@@ -39,6 +39,7 @@ pub(crate) trait PrivateLinking: Sized {
     /// from `tail` — there, using an unacquired tail races the enqueuer's non-atomic write
     /// of its own `prev`.
     const NODES_ACCESS_REQUIRES_TAIL_ACQUIRE: bool;
+    const SERIALIZED: bool;
     /// The ordering of `push_back`'s tail CAS: the caller's request raised to this
     /// variant's floor. The argument is a *minimum*, so a request stronger than the floor
     /// on another axis is honoured on top of it.
@@ -72,11 +73,11 @@ pub(crate) trait PrivateLinking: Sized {
 const PARKED_TAG: usize = 1;
 
 #[derive(Debug)]
-pub struct Eager<
+pub struct AtomicEager<
     P: Parker = DefaultParker,
     const SPIN_BEFORE_PARK: usize = DEFAULT_SPIN_BEFORE_PARK,
 >(PhantomData<P>);
-impl<P: Parker, const SPIN_BEFORE_PARK: usize> PrivateLinking for Eager<P, SPIN_BEFORE_PARK> {
+impl<P: Parker, const SPIN_BEFORE_PARK: usize> PrivateLinking for AtomicEager<P, SPIN_BEFORE_PARK> {
     type NextPtr = AtomicPtr<NodeLink<Self>>;
     type Parker = P;
     #[allow(clippy::declare_interior_mutable_const)]
@@ -92,6 +93,7 @@ impl<P: Parker, const SPIN_BEFORE_PARK: usize> PrivateLinking for Eager<P, SPIN_
         P::new()
     }
     const NODES_ACCESS_REQUIRES_TAIL_ACQUIRE: bool = false;
+    const SERIALIZED: bool = false;
     fn push_back_set_order(set_order: Ordering) -> Ordering {
         match set_order {
             Relaxed | Acquire | Release | AcqRel => AcqRel,
@@ -134,9 +136,9 @@ impl<P: Parker, const SPIN_BEFORE_PARK: usize> PrivateLinking for Eager<P, SPIN_
         #[cold]
         #[inline(never)]
         fn wait_for_next<P: Parker, const SPIN_BEFORE_PARK: usize>(
-            next: &AtomicPtr<NodeLink<Eager<P, SPIN_BEFORE_PARK>>>,
+            next: &AtomicPtr<NodeLink<AtomicEager<P, SPIN_BEFORE_PARK>>>,
             parker: &P,
-        ) -> NonNull<NodeLink<Eager<P, SPIN_BEFORE_PARK>>> {
+        ) -> NonNull<NodeLink<AtomicEager<P, SPIN_BEFORE_PARK>>> {
             if P::NEVER_BLOCKS {
                 return unsafe { parker.park_until(|| NonNull::new(next.load(Acquire))) };
             }
@@ -173,13 +175,13 @@ impl<P: Parker, const SPIN_BEFORE_PARK: usize> PrivateLinking for Eager<P, SPIN_
         NonNull::new(sentinel.next.load_mut())
     }
 }
-impl<P: Parker, const SPIN_BEFORE_PARK: usize> Linking for Eager<P, SPIN_BEFORE_PARK> {
+impl<P: Parker, const SPIN_BEFORE_PARK: usize> Linking for AtomicEager<P, SPIN_BEFORE_PARK> {
     type PreferredDrainGetEnd = GetFront;
 }
 
 #[derive(Debug)]
-pub struct Lazy;
-impl PrivateLinking for Lazy {
+pub struct AtomicLazy;
+impl PrivateLinking for AtomicLazy {
     type NextPtr = Cell<Option<NonNull<NodeLink<Self>>>>;
     type Parker = ();
     #[allow(clippy::declare_interior_mutable_const)]
@@ -193,6 +195,7 @@ impl PrivateLinking for Lazy {
     #[cfg(loom)]
     fn new_parker() -> Self::Parker {}
     const NODES_ACCESS_REQUIRES_TAIL_ACQUIRE: bool = true;
+    const SERIALIZED: bool = false;
     fn push_back_set_order(set_order: Ordering) -> Ordering {
         match set_order {
             Relaxed | Release => Release,
@@ -222,9 +225,9 @@ impl PrivateLinking for Lazy {
         #[cold]
         #[inline(never)]
         fn find_next(
-            node: Option<NonNull<NodeLink<Lazy>>>,
-            mut tail: NonNull<NodeLink<Lazy>>,
-        ) -> NonNull<NodeLink<Lazy>> {
+            node: Option<NonNull<NodeLink<AtomicLazy>>>,
+            mut tail: NonNull<NodeLink<AtomicLazy>>,
+        ) -> NonNull<NodeLink<AtomicLazy>> {
             loop {
                 let prev = unsafe { tail.as_ref().load_prev() };
                 // TODO not writing the next pointer of the last node is actually a good thing,
@@ -277,6 +280,59 @@ impl PrivateLinking for Lazy {
         Some(Self::get_next(None, &sentinel.next, tail, &()))
     }
 }
-impl Linking for Lazy {
+impl Linking for AtomicLazy {
     type PreferredDrainGetEnd = GetBack;
+}
+
+#[derive(Debug)]
+pub struct Serialized;
+impl PrivateLinking for Serialized {
+    type NextPtr = Cell<Option<NonNull<NodeLink<Self>>>>;
+    type Parker = ();
+    #[allow(clippy::declare_interior_mutable_const)]
+    #[cfg(not(loom))]
+    const NEW_NEXT: Self::NextPtr = Cell::new(None);
+    #[cfg(not(loom))]
+    const NEW_PARKER: Self::Parker = ();
+    fn new_next(ptr: Option<NonNull<NodeLink<Self>>>) -> Self::NextPtr {
+        Cell::new(ptr)
+    }
+    #[cfg(loom)]
+    fn new_parker() -> Self::Parker {}
+    const NODES_ACCESS_REQUIRES_TAIL_ACQUIRE: bool = false;
+    const SERIALIZED: bool = true;
+    fn push_back_set_order(set_order: Ordering) -> Ordering {
+        set_order
+    }
+    fn store_next(
+        prev_next: NonNull<Self::NextPtr>,
+        node: NonNull<NodeLink<Self>>,
+        _parker: &Self::Parker,
+    ) {
+        unsafe { prev_next.as_ref() }.set(Some(node));
+    }
+    fn load_next(next: &Self::NextPtr) -> Option<NonNull<NodeLink<Self>>> {
+        next.get()
+    }
+    fn get_next(
+        _node: Option<NonNull<NodeLink<Self>>>,
+        next: &Self::NextPtr,
+        _tail: NonNull<NodeLink<Self>>,
+        _parker: &Self::Parker,
+    ) -> NonNull<NodeLink<Self>> {
+        // TODO safety: every link is written under the mutex
+        unsafe { Self::load_next(next).unwrap_unchecked() }
+    }
+    fn update_next(next: &Self::NextPtr, ptr: Option<NonNull<NodeLink<Self>>>) {
+        next.set(ptr);
+    }
+    fn wait_next(next: &Self::NextPtr, _parker: &Self::Parker) -> Option<NonNull<NodeLink<Self>>> {
+        Self::load_next(next)
+    }
+    fn drain_get_head(sentinel: &mut NodeLink<Self>) -> Option<NonNull<NodeLink<Self>>> {
+        sentinel.next.get()
+    }
+}
+impl Linking for Serialized {
+    type PreferredDrainGetEnd = GetFront;
 }

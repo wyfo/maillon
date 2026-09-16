@@ -1,7 +1,12 @@
-use core::{pin::Pin, ptr::NonNull};
+use core::{pin::Pin, ptr, ptr::NonNull};
 
 use crate::{
-    list::{Eager, HEAD_MARKER, Linking, ListState, LockedList, NodeLink},
+    list::{
+        AtomicEager, HEAD_MARKER, Linking, ListRef, ListState, LockedList, NodeLink,
+        PrivateLinking, Serialized,
+    },
+    loom::sync::atomic::Ordering,
+    node::NodeUnlinked,
     sync::mutex::{DefaultMutex, Mutex},
 };
 
@@ -11,7 +16,7 @@ pub struct ListCursor<
     T,
     S: ListState = (),
     D = (),
-    L: Linking = Eager,
+    L: Linking = AtomicEager,
     M: Mutex = DefaultMutex,
 > {
     node: Option<NonNull<NodeLink<L>>>,
@@ -63,12 +68,12 @@ impl<'locked, 'a, T, S: ListState, D, L: Linking, M: Mutex> ListCursor<'locked, 
 
     #[inline]
     pub fn move_next(&mut self) {
-        let next_ptr = (self.node).map_or(&self.locked.head, |n| unsafe { &n.as_ref().next });
+        let next_ptr = (self.node).map_or(&self.locked.list.head, |n| unsafe { &n.as_ref().next });
         if let Some(next) = L::load_next(next_ptr) {
             self.node = Some(next);
             return;
         }
-        let Some(tail) = self.locked.tail() else {
+        let Some(tail) = self.locked.list.tail() else {
             // TODO the list is empty, so the cursor is already on the ghost node
             debug_assert!(self.node.is_none());
             return;
@@ -80,7 +85,7 @@ impl<'locked, 'a, T, S: ListState, D, L: Linking, M: Mutex> ListCursor<'locked, 
                 unsafe { &node.as_ref().next },
                 tail,
             )),
-            None => Some(self.locked.get_next(None, &self.locked.head, tail)),
+            None => Some(self.locked.get_next(None, &self.locked.list.head, tail)),
         };
     }
 
@@ -91,7 +96,7 @@ impl<'locked, 'a, T, S: ListState, D, L: Linking, M: Mutex> ListCursor<'locked, 
             Some(node) => {
                 Some(unsafe { node.as_ref().load_prev() }).filter(|p| p.addr().get() != HEAD_MARKER)
             }
-            None => self.locked.tail(),
+            None => self.locked.list.tail(),
         };
     }
 
@@ -105,6 +110,40 @@ impl<'locked, 'a, T, S: ListState, D, L: Linking, M: Mutex> ListCursor<'locked, 
             unsafe { (self.locked).remove(node, new_state_if_last_node, false, false, true) };
         self.node = next;
         Some(next.is_none() && tail.is_none())
+    }
+}
+
+impl<'locked, T, S: ListState, D, M: Mutex> ListCursor<'locked, '_, T, S, D, Serialized, M> {
+    #[inline]
+    pub fn insert_before<LR>(&mut self, node: NodeUnlinked<'_, LR>, order: Ordering)
+    where
+        LR: ListRef<NodeData = T, ListState = S, ListData = D, Linking = Serialized, Mutex = M>,
+    {
+        match self.node {
+            Some(current) => {
+                let prev = unsafe { current.as_ref().load_prev() };
+                unsafe { self.locked.insert_between(node, prev, Some(current), order) };
+            }
+            None => self.locked.push_back(node, order),
+        }
+    }
+
+    #[inline]
+    pub fn insert_after<LR>(&mut self, node: NodeUnlinked<'_, LR>, order: Ordering)
+    where
+        LR: ListRef<NodeData = T, ListState = S, ListData = D, Linking = Serialized, Mutex = M>,
+    {
+        let (prev, next) = match self.node {
+            Some(current) => (
+                current,
+                Serialized::load_next(unsafe { &current.as_ref().next }),
+            ),
+            None => (
+                NonNull::new(ptr::without_provenance_mut(HEAD_MARKER)).unwrap(),
+                Serialized::load_next(&self.locked.list.head),
+            ),
+        };
+        unsafe { self.locked.insert_between(node, prev, next, order) };
     }
 }
 

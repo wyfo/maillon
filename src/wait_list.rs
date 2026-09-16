@@ -9,7 +9,7 @@ use waker_list::WakerList;
 
 use crate::{
     List, ListRef, Node, NodeData,
-    list::{Eager, GetBack, GetFront, Linking, ListEnd, ListGetEnd, LockedList},
+    list::{AtomicEager, GetBack, GetFront, Linking, ListEnd, ListGetEnd, LockedList},
     loom::sync::atomic::Ordering::Relaxed,
     node::NodeRef,
     sync::mutex::{DefaultMutex, Mutex},
@@ -64,7 +64,7 @@ impl<N> Notification<N> {
 pub struct WaitList<
     N: Unpin = (),
     S: Synchronization = Synchronized,
-    L: Linking = Eager,
+    L: Linking = AtomicEager,
     M: Mutex = DefaultMutex,
     const WAKER_LIST_SIZE: usize = DEFAULT_WAKER_LIST_SIZE,
 > {
@@ -123,9 +123,8 @@ impl<N: Unpin, S: Synchronization, L: Linking, M: Mutex, const WAKER_LIST_SIZE: 
         state: usize,
         mut notification: F,
     ) {
-        let mut wakers = WakerList::<WAKER_LIST_SIZE>::new();
         locked.drain(|_| state).for_each(
-            &mut wakers,
+            &mut WakerList::<WAKER_LIST_SIZE>::new(),
             |wakers, mut waiter, _| {
                 if let Some(notification) = notification() {
                     waiter.notification = Some(notification);

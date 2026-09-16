@@ -7,8 +7,8 @@ use core::{
 
 use crate::{
     list::{
-        Eager, GetBack, GetFront, HEAD_MARKER, IntoTail, Linking, ListState, LockedList, NodeLink,
-        TailExt,
+        AtomicEager, GetBack, GetFront, HEAD_MARKER, IntoTail, Linking, ListState, LockedList,
+        NodeLink, TailExt,
     },
     loom::{
         AtomicPtrExt,
@@ -21,8 +21,14 @@ use crate::{
 
 // TODO it should be possible to accept L: Linking, but it currently breaks everything with head
 // always returning None
-pub struct Drain<'a, T, S: ListState = (), D = (), L: Linking = Eager, M: Mutex + 'a = DefaultMutex>
-{
+pub struct Drain<
+    'a,
+    T,
+    S: ListState = (),
+    D = (),
+    L: Linking = AtomicEager,
+    M: Mutex + 'a = DefaultMutex,
+> {
     sentinel_node: NodeLink<L>,
     locked: ManuallyDrop<LockedList<'a, T, S, D, L, M>>,
 }
@@ -34,9 +40,9 @@ impl<'a, T, S: ListState, D, L: Linking, M: Mutex> Drain<'a, T, S, D, L, M> {
     ) -> Self {
         let mut head = None;
         let mut tail = None;
-        if locked.tail().is_some() {
-            head = L::wait_next(&locked.list.head, &locked.parker);
-            L::update_next(&locked.head, None);
+        if locked.list.tail().is_some() {
+            head = L::wait_next(&locked.list.head, &locked.list.parker);
+            L::update_next(&locked.list.head, None);
             // TODO
             // `Release` is for the `head` store just above: it must not sink past the swap.
             // Otherwise a concurrent enqueuer whose phase-1 CAS lands after the swap writes
@@ -54,7 +60,14 @@ impl<'a, T, S: ListState, D, L: Linking, M: Mutex> Drain<'a, T, S, D, L, M> {
             // (https://github.com/rust-lang/miri/issues/5104, fixed by #5111), so the tail's
             // own modification order settles who wins.
             let new_tail = new_state_if_not_empty(locked.data_mut()).into_tail();
-            tail = Some(unsafe { locked.tail.swap(new_tail, AcqRel).ptr().unwrap_unchecked() });
+            let old_tail = if L::SERIALIZED {
+                let tail = locked.list.tail.load(Relaxed);
+                locked.list.tail.store(new_tail, Release);
+                tail
+            } else {
+                locked.list.tail.swap(new_tail, AcqRel)
+            };
+            tail = Some(unsafe { old_tail.ptr().unwrap_unchecked() });
         }
         Self {
             sentinel_node: NodeLink {
@@ -198,7 +211,7 @@ pub trait DrainEnd<
     T,
     S: ListState = (),
     D = (),
-    L: Linking = Eager,
+    L: Linking = AtomicEager,
     M: Mutex = DefaultMutex,
 >: LinkedNodeRef<T, D> + Sized
 {
@@ -211,7 +224,7 @@ pub struct DrainFront<
     T,
     S: ListState = (),
     D = (),
-    L: Linking = Eager,
+    L: Linking = AtomicEager,
     M: Mutex = DefaultMutex,
 > {
     node: NonNull<NodeLink<L>>,
@@ -273,7 +286,7 @@ pub struct DrainBack<
     T,
     S: ListState = (),
     D = (),
-    L: Linking = Eager,
+    L: Linking = AtomicEager,
     M: Mutex = DefaultMutex,
 > {
     node: NonNull<NodeLink<L>>,
@@ -312,7 +325,7 @@ impl<T, S: ListState, D, L: Linking, M: Mutex> DrainBack<'_, '_, T, S, D, L, M> 
             self.drain.set_head(None);
         } else {
             let locked = &self.drain.locked;
-            L::wait_next(unsafe { &prev.unwrap().as_ref().next }, &locked.parker);
+            L::wait_next(unsafe { &prev.unwrap().as_ref().next }, &locked.list.parker);
         }
         self.drain.set_tail(prev);
         node.unlink();

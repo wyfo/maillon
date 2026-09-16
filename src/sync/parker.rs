@@ -11,14 +11,14 @@ pub use super::spin::SpinParker;
 pub use super::std::StdParker;
 use crate::sync::{condvar::CondVar, mutex::Mutex};
 
-/// Default number of spins before parking, e.g. for [`Eager`](crate::list::Eager).
+/// Default number of spins before parking, e.g. for [`AtomicEager`](crate::list::AtomicEager).
 ///
 /// Zero under `miri` and `loom`: every spin is an instrumented atomic load, so spinning
 /// multiplies the state space a model has to explore and the branch budget it consumes,
 /// without exercising anything the park path does not already cover.
 #[cfg(not(any(miri, loom)))]
 pub const DEFAULT_SPIN_BEFORE_PARK: usize = 100; // same as `std::sys::sync::mutex::futex`
-/// Default number of spins before parking, e.g. for [`Eager`](crate::list::Eager).
+/// Default number of spins before parking, e.g. for [`AtomicEager`](crate::list::AtomicEager).
 ///
 /// Zero under `miri` and `loom`: every spin is an instrumented atomic load, so spinning
 /// multiplies the state space a model has to explore and the branch budget it consumes,
@@ -28,6 +28,7 @@ pub const DEFAULT_SPIN_BEFORE_PARK: usize = 0;
 
 // TODO it must not have spurious wakeup, can use notified in a loop
 // TODO safety: `park_until` must not unwind, a panic in `Node`/`Drain` drop cannot be recovered
+// TODO safety: unpark must not panic
 /// # Safety
 ///
 /// TODO

@@ -6,7 +6,7 @@ use core::{
 
 use crate::{
     Node, NodeState,
-    list::{Eager, Linking},
+    list::{AtomicEager, Linking},
     loom::sync::atomic::fence,
     node_wrapper,
     sync::mutex::{DefaultMutex, Mutex},
@@ -21,7 +21,7 @@ node_wrapper! {
         'a,
         N: Unpin = (),
         S: Synchronization = Synchronized,
-        L: Linking = Eager,
+        L: Linking = AtomicEager,
         M: Mutex = DefaultMutex,
         const WAKER_LIST_SIZE: usize = DEFAULT_WAKER_LIST_SIZE,
     >(pub(super) Node<WaitListRef<'a, N, S, L, M, WAKER_LIST_SIZE>>);
@@ -128,7 +128,7 @@ pub struct WaitUntil<
     'a,
     F,
     S: Synchronization = Synchronized,
-    L: Linking = Eager,
+    L: Linking = AtomicEager,
     M: Mutex = DefaultMutex,
     const WAKER_LIST_SIZE: usize = DEFAULT_WAKER_LIST_SIZE,
 > {
