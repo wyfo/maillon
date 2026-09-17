@@ -1,7 +1,11 @@
+#[cfg(nightly)]
+use core::pin::UnsafePinned;
 use core::{mem::ManuallyDrop, pin::Pin, ptr::NonNull, task::Waker};
 
 #[allow(unused_imports)]
 use crate::msrv::StrictProvenance;
+#[cfg(not(nightly))]
+use crate::unsafe_pinned::UnsafePinned;
 use crate::{
     list::{
         AtomicEager, GetBack, GetFront, HEAD_MARKER, IntoTail, Linking, ListState, LockedList,
@@ -28,7 +32,7 @@ pub struct Drain<
     L: Linking = AtomicEager,
     M: Mutex + 'a = DefaultMutex,
 > {
-    sentinel_node: NodeLink<L>,
+    sentinel_node: UnsafePinned<NodeLink<L>>,
     locked: ManuallyDrop<LockedList<'a, T, S, D, L, M>>,
 }
 
@@ -69,32 +73,37 @@ impl<'a, T, S: ListState, D, L: Linking, M: Mutex> Drain<'a, T, S, D, L, M> {
             tail = Some(unsafe { old_tail.ptr().unwrap_unchecked() });
         }
         Self {
-            sentinel_node: NodeLink {
+            sentinel_node: UnsafePinned::new(NodeLink {
                 prev: AtomicPtr::new(tail.as_ptr()),
                 next: L::new_next(head),
-            },
+            }),
             locked: ManuallyDrop::new(locked),
         }
     }
 
+    fn sentinel(&mut self) -> &mut NodeLink<L> {
+        unsafe { &mut *self.sentinel_node.get() }
+    }
+
     fn head(&mut self) -> Option<NonNull<NodeLink<L>>> {
-        L::drain_get_head(&mut self.sentinel_node)
+        L::drain_get_head(self.sentinel())
     }
 
     fn tail(&mut self) -> Option<NonNull<NodeLink<L>>> {
-        NonNull::new(self.sentinel_node.prev.load_mut())
+        NonNull::new(self.sentinel().prev.load_mut())
     }
 
     fn set_head(&mut self, head: Option<NonNull<NodeLink<L>>>) {
-        L::update_next_mut(&mut self.sentinel_node.next, head);
+        L::update_next_mut(&mut self.sentinel().next, head);
     }
 
     fn set_tail(&mut self, tail: Option<NonNull<NodeLink<L>>>) {
-        self.sentinel_node.prev.store_mut(tail.as_ptr());
+        self.sentinel().prev.store_mut(tail.as_ptr());
     }
 
     pub fn is_empty(&self) -> bool {
-        self.sentinel_node.prev.load(Relaxed).is_null()
+        let sentinel = unsafe { &*self.sentinel_node.get() };
+        sentinel.prev.load(Relaxed).is_null()
     }
 
     #[inline]
@@ -117,17 +126,16 @@ impl<'a, T, S: ListState, D, L: Linking, M: Mutex> Drain<'a, T, S, D, L, M> {
 
     pub fn execute_unlocked<F: FnOnce() -> R, R>(self: Pin<&mut Self>, f: F) -> R {
         let this = unsafe { self.get_unchecked_mut() };
-        // TODO constructing the pointer from a const ref should matter
-        let sentinel_ptr = ptr::from_ref(&this.sentinel_node).cast_mut();
         if let Some(head) = this.head() {
-            unsafe { head.as_ref().prev.store(sentinel_ptr, Relaxed) }
             let tail = unsafe { this.tail().unwrap_unchecked() };
+            let sentinel_ptr = ptr::from_mut(this.sentinel());
+            unsafe { head.as_ref().prev.store(sentinel_ptr, Relaxed) }
             unsafe { L::update_next(&tail.as_ref().next, NonNull::new(sentinel_ptr)) };
         }
         let list = unsafe { ManuallyDrop::take(&mut this.locked) }.unlock();
         let _guard = defer(|| {
             this.locked = ManuallyDrop::new(list.lock());
-            if this.tail().as_ptr() == sentinel_ptr {
+            if ptr::eq(this.tail().as_ptr(), this.sentinel()) {
                 debug_assert_eq!(this.head(), this.tail());
                 this.set_head(None);
                 this.set_tail(None);
@@ -346,7 +354,7 @@ impl<T, S: ListState, D, L: Linking, M: Mutex> DrainBack<'_, '_, T, S, D, L, M> 
         let node = unsafe { self.node.as_ref() };
         let mut prev = Some(unsafe { node.load_prev() });
         if prev.as_ptr().addr() == HEAD_MARKER
-            || prev.as_ptr() == ptr::from_mut(&mut self.drain.sentinel_node)
+            || prev.as_ptr() == ptr::from_mut(self.drain.sentinel())
         {
             prev = None;
             self.drain.set_head(None);

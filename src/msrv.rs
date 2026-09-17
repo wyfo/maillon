@@ -91,6 +91,7 @@ impl<T> StrictProvenance<T> for NonNull<T> {
 pub(crate) mod ptr {
     pub(crate) use core::ptr::*;
 
+    #[cfg(feature = "parking_lot")]
     pub(crate) fn from_ref<T: ?Sized>(t: &T) -> *const T {
         t as _
     }
