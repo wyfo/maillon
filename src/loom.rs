@@ -38,11 +38,11 @@ impl<T> AtomicPtrExt<T> for sync::atomic::AtomicPtr<T> {
         return self.with_mut(|p| *p = ptr);
     }
 
+    #[cfg_attr(miri, allow(unreachable_code, unused_variables))]
     fn fetch_byte_add(&self, val: usize, order: sync::atomic::Ordering) -> *mut T {
         #[cfg(miri)]
         panic!("miri requires at least Rust 1.91");
-        #[cfg(not(miri))]
-        return unsafe { &*(self as *const _ as *const sync::atomic::AtomicUsize) }
-            .fetch_add(val, order) as _;
+        unsafe { &*(self as *const _ as *const sync::atomic::AtomicUsize) }.fetch_add(val, order)
+            as _
     }
 }
