@@ -97,13 +97,14 @@ impl<T, S: ListState, D, L: Linking, M: Mutex> List<T, S, D, L, M> {
     }
 
     #[inline(always)]
-    fn store_tail_serialized(&self, new_tail: *mut Tail<S, L>, order: Ordering) {
-        debug_assert!(L::SERIALIZED);
-        match order {
-            Acquire | AcqRel => {
-                self.tail.swap(new_tail, order);
-            }
-            _ => self.tail.store(new_tail, order),
+    fn store_tail_serialized(&self, new_tail: *mut Tail<S, L>, order: Ordering, is_empty: bool) {
+        debug_assert!(L::SERIALIZED && is_empty == self.tail().is_none());
+        if !is_empty {
+            self.tail.store(new_tail, Relaxed);
+        } else if matches!(order, Acquire | AcqRel) {
+            self.tail.swap(new_tail, order);
+        } else {
+            self.tail.store(new_tail, order);
         }
     }
 
@@ -163,7 +164,7 @@ impl<T, S: ListState, D, L: Linking, M: Mutex> List<T, S, D, L, M> {
             };
             unsafe { link.as_mut().prev.store_mut(prev) };
             if L::SERIALIZED {
-                self.store_tail_serialized(new_tail, set_order);
+                self.store_tail_serialized(new_tail, set_order, state_or_ptr.state().is_some());
                 break prev;
             }
             match (self.tail).compare_exchange_weak(tail, new_tail, set_order, fetch_order) {
@@ -593,7 +594,8 @@ impl<'a, T, S: ListState, D, M: Mutex> LockedList<'a, T, S, D, Serialized, M> {
         let link_ref = unsafe { link.as_mut() };
         link_ref.prev.store_mut(prev.as_ptr());
         Serialized::update_next_mut(&mut link_ref.next, next);
-        let prev_next = if prev.addr().get() == HEAD_MARKER {
+        let is_head = prev.addr().get() == HEAD_MARKER;
+        let prev_next = if is_head {
             &self.list.head
         } else {
             unsafe { &prev.as_ref().next }
@@ -601,7 +603,7 @@ impl<'a, T, S: ListState, D, M: Mutex> LockedList<'a, T, S, D, Serialized, M> {
         Serialized::update_next(prev_next, Some(link));
         match next {
             Some(next) => unsafe { next.as_ref().prev.store(link.as_ptr(), Relaxed) },
-            None => self.list.store_tail_serialized(link.into_tail(), order),
+            None => (self.list).store_tail_serialized(link.into_tail(), order, is_head),
         }
         node.set_linked(self.list);
     }
@@ -638,7 +640,8 @@ impl<'a, T, D, L: Linking, M: Mutex> LockedList<'a, T, usize, D, L, M> {
         }
         match self.list.tail.load(failure).state() {
             Some(state) if state == current => {
-                self.list.store_tail_serialized(new.into_tail(), success);
+                self.list
+                    .store_tail_serialized(new.into_tail(), success, true);
                 Ok(current)
             }
             state => Err(state),
@@ -657,7 +660,7 @@ impl<'a, T, D, L: Linking, M: Mutex> LockedList<'a, T, usize, D, L, M> {
         }
         let state = self.list.tail.load(fetch_order).state().ok_or(None)?;
         let new_state = f(state).ok_or(Some(state))?;
-        (self.list).store_tail_serialized(new_state.into_tail(), set_order);
+        (self.list).store_tail_serialized(new_state.into_tail(), set_order, true);
         Ok(state)
     }
 
