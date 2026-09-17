@@ -176,8 +176,18 @@ macro_rules! assert_pending {
     };
 }
 
+/// Loom doesn't support `SeqCst` operation, so `S=Sequential` tests must be skipped
+macro_rules! loom_skip_sequential {
+    ($S:ident) => {
+        #[cfg(loom)]
+        if std::any::TypeId::of::<$S>() == std::any::TypeId::of::<Sequential>() {
+            return;
+        }
+    };
+}
+
 // https://github.com/tokio-rs/loom/issues/424
-macro_rules! skip_loom_issue_424 {
+macro_rules! loom_skip_issue_424 {
     ($sync:ty, $linking:ty) => {
         #[cfg(loom)]
         use std::any::TypeId;
@@ -192,15 +202,15 @@ macro_rules! skip_loom_issue_424 {
 
 #[rstest]
 fn wait_until<S: Synchronization, L: Linking>(
-    // loom doesn't support SEQ
-    #[values(SYNC, UNSYNC, UNSYNC_RMW)] sync: SyncMode<S>,
+    #[values(SYNC, SEQ, UNSYNC, UNSYNC_RMW)] sync: SyncMode<S>,
     #[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>,
     #[values(NotifyMode::One, NotifyMode::Last, NotifyMode::All)] notify_mode: NotifyMode,
     #[values(WaitMode::Normal, WaitMode::Minimal)] wait_mode: WaitMode,
 ) where
     SyncMode<S>: WakeConditionAccess,
 {
-    skip_loom_issue_424!(S, L);
+    loom_skip_sequential!(S);
+    loom_skip_issue_424!(S, L);
     model(move || {
         let list = WaitList::<(), S, L>::new();
         let wake_condition = AtomicUsize::new(0);
@@ -562,7 +572,7 @@ fn notify_all_push_during_drain<S: Synchronization, L: Linking>(
     #[values(SYNC, SEQ, UNSYNC)] _sync: SyncMode<S>,
     #[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>,
 ) {
-    skip_loom_issue_424!(S, L);
+    loom_skip_issue_424!(S, L);
     model(|| {
         let list = WaitList::<(), S, L>::new();
         let mut wait = list.wait().boxed();
