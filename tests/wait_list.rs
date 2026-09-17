@@ -433,8 +433,8 @@ fn close<S: Synchronization, L: Linking>(
         list.close();
         assert!(list.is_closed());
         assert!(list.is_empty());
-        assert_eq!(assert_ready!(wait), Err(ClosedError));
-        assert_eq!(assert_ready!(list.wait().boxed()), Err(ClosedError));
+        assert!(assert_ready!(wait).is_err());
+        assert!(assert_ready!(list.wait().boxed()).is_err());
     });
 }
 
@@ -447,10 +447,7 @@ fn wait_until_closed<S: Synchronization, L: Linking>(
         let list = WaitList::<(), S, L>::new();
         list.close();
         assert_eq!(assert_ready!(list.wait_until(|_| true).boxed()), Ok(()));
-        assert_eq!(
-            assert_ready!(list.wait_until(|_| false).boxed()),
-            Err(ClosedError)
-        );
+        assert!(assert_ready!(list.wait_until(|_| false).boxed()).is_err());
     });
 }
 

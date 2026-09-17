@@ -42,6 +42,7 @@ impl<N> Default for Waiter<N> {
     }
 }
 
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClosedError;
 
