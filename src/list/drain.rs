@@ -159,7 +159,8 @@ impl<'a, T, S: ListState, D, L: Linking, M: Mutex> Drain<'a, T, S, D, L, M> {
         helper: &mut H,
         mut on_next: impl FnMut(&mut H, Pin<&mut T>, &mut D) -> bool,
         mut on_unlock: impl FnMut(&mut H),
-    ) {
+    ) -> usize {
+        let mut count = 0;
         {
             let mut moved_self = self;
             let mut this = unsafe { Pin::new_unchecked(&mut moved_self) };
@@ -168,6 +169,7 @@ impl<'a, T, S: ListState, D, L: Linking, M: Mutex> Drain<'a, T, S, D, L, M> {
                 let (data, list_data) = node.split_data();
                 let unlock = on_next(helper, data, list_data);
                 end = node.unlink();
+                count += 1;
                 if unlock {
                     if end.is_none() {
                         break;
@@ -176,18 +178,19 @@ impl<'a, T, S: ListState, D, L: Linking, M: Mutex> Drain<'a, T, S, D, L, M> {
                     this.as_mut().execute_unlocked(|| on_unlock(helper));
                     end = E::get_end(this.as_mut());
                     if end.is_none() {
-                        return;
+                        return count;
                     }
                 }
             }
         }
         on_unlock(helper);
+        count
     }
 
     fn wake_all_impl<E: DrainGetEnd, const WAKER_BATCH_SIZE: usize>(
         self,
         mut f: impl FnMut(Pin<&mut T>, &mut D) -> Option<Waker>,
-    ) {
+    ) -> usize {
         self.for_each_impl::<E, _>(
             &mut WakerBatch::<WAKER_BATCH_SIZE>::new(),
             |wakers, node_data, list_data| {
@@ -197,7 +200,7 @@ impl<'a, T, S: ListState, D, L: Linking, M: Mutex> Drain<'a, T, S, D, L, M> {
                 wakers.is_full()
             },
             |wakers| wakers.wake_all(),
-        );
+        )
     }
 
     pub fn for_each<H, N: FnMut(&mut H, Pin<&mut T>, &mut D) -> bool, U: FnMut(&mut H)>(
@@ -205,8 +208,8 @@ impl<'a, T, S: ListState, D, L: Linking, M: Mutex> Drain<'a, T, S, D, L, M> {
         helper: &mut H,
         on_next: N,
         on_unlock: U,
-    ) {
-        self.for_each_impl::<L::PreferredDrainGetEnd, _>(helper, on_next, on_unlock);
+    ) -> usize {
+        self.for_each_impl::<L::PreferredDrainGetEnd, _>(helper, on_next, on_unlock)
     }
 
     pub fn wake_all<
@@ -215,8 +218,8 @@ impl<'a, T, S: ListState, D, L: Linking, M: Mutex> Drain<'a, T, S, D, L, M> {
     >(
         self,
         f: F,
-    ) {
-        self.wake_all_impl::<L::PreferredDrainGetEnd, WAKER_BATCH_SIZE>(f);
+    ) -> usize {
+        self.wake_all_impl::<L::PreferredDrainGetEnd, WAKER_BATCH_SIZE>(f)
     }
 
     #[cold]
@@ -403,8 +406,8 @@ pub trait DrainGetEnd: Sized {
         helper: &mut H,
         on_next: N,
         on_unlock: U,
-    ) {
-        drain.for_each_impl::<Self, _>(helper, on_next, on_unlock);
+    ) -> usize {
+        drain.for_each_impl::<Self, _>(helper, on_next, on_unlock)
     }
 
     fn wake_all<
@@ -418,8 +421,8 @@ pub trait DrainGetEnd: Sized {
     >(
         drain: Drain<'_, T, S, D, L, M>,
         f: F,
-    ) {
-        drain.wake_all_impl::<Self, WAKER_BATCH_SIZE>(f);
+    ) -> usize {
+        drain.wake_all_impl::<Self, WAKER_BATCH_SIZE>(f)
     }
 }
 

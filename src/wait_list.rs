@@ -178,7 +178,9 @@ impl<N: Unpin, S: Synchronization, L: Linking, M: Mutex, const WAKER_BATCH_SIZE:
             Release,
             Relaxed,
             |_| STATE_CLOSED,
-            |locked| Self::wake_all(locked, STATE_CLOSED, || None),
+            |locked| {
+                Self::wake_all(locked, STATE_CLOSED, || None);
+            },
         );
     }
 
@@ -188,7 +190,7 @@ impl<N: Unpin, S: Synchronization, L: Linking, M: Mutex, const WAKER_BATCH_SIZE:
         locked: LockedList<Waiter<N>, usize, (), L, M>,
         state: usize,
         mut notification: F,
-    ) {
+    ) -> usize {
         locked
             .drain(|_| state)
             .wake_all::<WAKER_BATCH_SIZE, _>(|mut waiter, _| {
@@ -196,18 +198,18 @@ impl<N: Unpin, S: Synchronization, L: Linking, M: Mutex, const WAKER_BATCH_SIZE:
                     waiter.notification = Some(notification);
                 }
                 waiter.waker.take()
-            });
+            })
     }
 
     /// Notifies the first registered waiter with `notification()`.
     ///
     /// `notification` is only called if there is a waiter. If the waiter is dropped before
     /// consuming the notification, it is passed on to the first waiter registered at that time.
+    ///
+    /// Returns `true` if a waiter has been notified.
     #[inline]
-    pub fn notify_one_with<F: FnOnce() -> N>(&self, notification: F) {
-        if !self.is_empty() {
-            self.wake_single::<GetFront, _>(|| Notification::One(notification()));
-        }
+    pub fn notify_one_with<F: FnOnce() -> N>(&self, notification: F) -> bool {
+        !self.is_empty() && self.wake_single::<GetFront, _>(|| Notification::One(notification()))
     }
 
     /// Notifies the last registered waiter with `notification()`.
@@ -215,25 +217,25 @@ impl<N: Unpin, S: Synchronization, L: Linking, M: Mutex, const WAKER_BATCH_SIZE:
     /// `notification` is only called if there is a waiter. If the waiter is dropped before
     /// consuming the notification, it is passed on to the last waiter registered at that time,
     /// which may have been registered after the dropped one.
+    ///
+    /// Returns `true` if a waiter has been notified.
     #[inline]
-    pub fn notify_last_with<F: FnOnce() -> N>(&self, notification: F) {
-        if !self.is_empty() {
-            self.wake_single::<GetBack, _>(|| Notification::Last(notification()));
-        }
+    pub fn notify_last_with<F: FnOnce() -> N>(&self, notification: F) -> bool {
+        !self.is_empty() && self.wake_single::<GetBack, _>(|| Notification::Last(notification()))
     }
 
     #[cold]
     #[inline(never)]
-    fn wake_single<E: ListGetEnd, F: FnOnce() -> Notification<N>>(&self, notification: F) {
-        Self::wake_single_locked::<E, F>(self.list.lock(), notification);
+    fn wake_single<E: ListGetEnd, F: FnOnce() -> Notification<N>>(&self, notification: F) -> bool {
+        Self::wake_single_locked::<E, F>(self.list.lock(), notification)
     }
 
     fn wake_single_locked<E: ListGetEnd, F: FnOnce() -> Notification<N>>(
         mut locked: LockedList<Waiter<N>, usize, (), L, M>,
         notification: F,
-    ) {
+    ) -> bool {
         let Some(mut waiter) = E::get_end(&mut locked) else {
-            return;
+            return false;
         };
         waiter.data_mut().notification = Some(notification());
         let waker = waiter.data_mut().waker.take();
@@ -242,26 +244,31 @@ impl<N: Unpin, S: Synchronization, L: Linking, M: Mutex, const WAKER_BATCH_SIZE:
         if let Some(waker) = waker {
             waker.wake();
         }
+        true
     }
 
     /// Notifies up to `count` waiters, in registration order, each one with `notification()`.
     ///
     /// `notification` is called once per notified waiter. If a waiter is dropped before
     /// consuming its notification, it is passed on to the first waiter registered at that time.
+    ///
+    /// Returns the number of notified waiters.
     #[inline]
-    pub fn notify_many_with<F: FnMut() -> N>(&self, count: usize, notification: F) {
-        if !self.is_empty() {
-            self.wake_many(count, notification);
+    pub fn notify_many_with<F: FnMut() -> N>(&self, count: usize, notification: F) -> usize {
+        if self.is_empty() {
+            return 0;
         }
+        self.wake_many(count, notification)
     }
 
     #[cold]
     #[inline(never)]
-    fn wake_many<F: FnMut() -> N>(&self, count: usize, mut notification: F) {
+    fn wake_many<F: FnMut() -> N>(&self, count: usize, mut notification: F) -> usize {
         let mut wakers = WakerBatch::<WAKER_BATCH_SIZE>::new();
         let mut locked = self.list.lock();
         let mut front = locked.front();
-        for _ in 0..count {
+        let mut notified = 0;
+        while notified < count {
             let Some(mut waiter) = front else {
                 break;
             };
@@ -270,11 +277,12 @@ impl<N: Unpin, S: Synchronization, L: Linking, M: Mutex, const WAKER_BATCH_SIZE:
                 wakers.push(waker);
             }
             front = waiter.unlink(|_, _| STATE_OPEN);
+            notified += 1;
             if wakers.is_full() {
                 let list = locked.unlock();
                 wakers.wake_all();
                 if list.is_empty(Relaxed) {
-                    return;
+                    return notified;
                 }
                 locked = list.lock();
                 front = locked.front();
@@ -282,26 +290,30 @@ impl<N: Unpin, S: Synchronization, L: Linking, M: Mutex, const WAKER_BATCH_SIZE:
         }
         drop(locked);
         wakers.wake_all();
+        notified
     }
 
     /// Notifies all the registered waiters, each one with `notification()`.
     ///
     /// `notification` is called once per waiter. Contrary to the other `notify_*` methods, the
     /// notification is lost if the waiter is dropped before consuming it.
+    ///
+    /// Returns the number of notified waiters.
     #[inline]
-    pub fn notify_all_with<F: FnMut() -> N>(&self, notification: F) {
-        if !self.is_empty() {
-            self.notify_all_impl(notification);
+    pub fn notify_all_with<F: FnMut() -> N>(&self, notification: F) -> usize {
+        if self.is_empty() {
+            return 0;
         }
+        self.notify_all_impl(notification)
     }
 
     #[cold]
     #[inline(never)]
-    fn notify_all_impl<F: FnMut() -> N>(&self, mut notification: F) {
+    fn notify_all_impl<F: FnMut() -> N>(&self, mut notification: F) -> usize {
         let locked = self.list.lock();
         Self::wake_all(locked, STATE_OPEN, || {
             Some(Notification::All(notification()))
-        });
+        })
     }
 
     /// Waits for a notification.
@@ -325,7 +337,7 @@ impl<N: Unpin, S: Synchronization, L: Linking, M: Mutex, const WAKER_BATCH_SIZE:
             Notification::One(notification) => self.notify_one_with(|| notification),
             Notification::Last(notification) => self.notify_last_with(|| notification),
             _ => unreachable!(),
-        }
+        };
     }
 }
 
@@ -336,32 +348,32 @@ impl<S: Synchronization, L: Linking, M: Mutex, const WAKER_BATCH_SIZE: usize>
     ///
     /// See [`notify_one_with`](Self::notify_one_with).
     #[inline]
-    pub fn notify_one(&self) {
-        self.notify_one_with(|| ());
+    pub fn notify_one(&self) -> bool {
+        self.notify_one_with(|| ())
     }
 
     /// Notifies the last registered waiter.
     ///
     /// See [`notify_last_with`](Self::notify_last_with).
     #[inline]
-    pub fn notify_last(&self) {
-        self.notify_last_with(|| ());
+    pub fn notify_last(&self) -> bool {
+        self.notify_last_with(|| ())
     }
 
     /// Notifies up to `count` waiters, in registration order.
     ///
     /// See [`notify_many_with`](Self::notify_many_with).
     #[inline]
-    pub fn notify_many(&self, count: usize) {
-        self.notify_many_with(count, || ());
+    pub fn notify_many(&self, count: usize) -> usize {
+        self.notify_many_with(count, || ())
     }
 
     /// Notifies all the registered waiters.
     ///
     /// See [`notify_all_with`](Self::notify_all_with).
     #[inline]
-    pub fn notify_all(&self) {
-        self.notify_all_with(|| ());
+    pub fn notify_all(&self) -> usize {
+        self.notify_all_with(|| ())
     }
 
     /// Waits until the given wake condition is satisfied.

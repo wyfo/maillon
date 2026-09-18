@@ -113,7 +113,7 @@ enum WaitMode {
 }
 
 trait WaitListExt<S: Synchronization, L: Linking> {
-    fn notify(&self, mode: NotifyMode);
+    fn notify(&self, mode: NotifyMode) -> bool;
     async fn wait_until2<F: FnMut(bool) -> W, W: WakeCondition + Default>(
         &self,
         mode: WaitMode,
@@ -122,11 +122,11 @@ trait WaitListExt<S: Synchronization, L: Linking> {
 }
 
 impl<S: Synchronization, L: Linking> WaitListExt<S, L> for WaitList<(), S, L> {
-    fn notify(&self, mode: NotifyMode) {
+    fn notify(&self, mode: NotifyMode) -> bool {
         match mode {
             NotifyMode::One => self.notify_one(),
             NotifyMode::Last => self.notify_last(),
-            NotifyMode::All => self.notify_all(),
+            NotifyMode::All => self.notify_all() > 0,
         }
     }
     async fn wait_until2<F: FnMut(bool) -> W, W: WakeCondition + Default>(
@@ -151,8 +151,8 @@ impl<N: Unpin + Copy, S: Synchronization, L: Linking> WaitListExt2<N, S, L> for 
         match mode {
             NotifyMode::One => self.notify_one_with(|| notif),
             NotifyMode::Last => self.notify_last_with(|| notif),
-            NotifyMode::All => self.notify_all_with(|| notif),
-        }
+            NotifyMode::All => self.notify_all_with(|| notif) > 0,
+        };
     }
 }
 
