@@ -190,6 +190,15 @@ The `maillon::list::Drain` algorithm reuses the idea originally introduced to `t
 
 A small improvement, motivated by API ergonomics, has been made: the circular chaining is deferred until the list lock actually needs to be released mid-drain.
 
+## License
+
+Licensed under either of
+
+- [Apache License, Version 2.0](LICENSE-APACHE)
+- [MIT license](LICENSE-MIT)
+
+at your option.
+
 [^1]: In some rare cases, an inserting thread might need to unpark a remover thread, making insertion not strictly lock-free. It is however possible to switch the list to lazy node linking, making the node insertion fully lock-free.
 [^2]: The `uncontented` typo comes from the original `tokio` benchmark.
 [^3]: There is literally a [hack](https://rust-lang.github.io/rfcs/3467-unsafe-pinned.html) in the compiler to support them.
