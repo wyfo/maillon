@@ -82,19 +82,8 @@ mod private {
 }
 pub(crate) use private::PrivateLinking;
 
-/// Default number of spins before parking, e.g. for [`AtomicEager`](crate::list::AtomicEager).
-///
-/// Zero under `miri` and `loom`: every spin is an instrumented atomic load, so spinning
-/// multiplies the state space a model has to explore and the branch budget it consumes,
-/// without exercising anything the park path does not already cover.
-// TODO doc wording: no longer a count
 #[cfg(not(any(miri, loom)))]
 pub type DefaultSpinBeforePark = BackoffLimit<SpinBackoff, 100>; // same as `std::sys::sync::mutex::futex`
-/// Default number of spins before parking, e.g. for [`AtomicEager`](crate::list::AtomicEager).
-///
-/// Zero under `miri` and `loom`: every spin is an instrumented atomic load, so spinning
-/// multiplies the state space a model has to explore and the branch budget it consumes,
-/// without exercising anything the park path does not already cover.
 #[cfg(any(miri, loom))]
 pub type DefaultSpinBeforePark = BackoffLimit<SpinBackoff, 0>;
 
