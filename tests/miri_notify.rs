@@ -6,9 +6,9 @@ mod linking;
 
 use std::{sync::Arc, thread};
 
-use aiq::linking::Linking;
 use futures::executor::block_on;
 use linking::{EAGER, LAZY, LinkingMode, SERIALIZED};
+use maillon::linking::Linking;
 use notify::Notify;
 use rstest::rstest;
 use tokio_test::{assert_pending, assert_ready};

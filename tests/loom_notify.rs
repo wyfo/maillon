@@ -5,9 +5,9 @@ mod notify;
 
 mod linking;
 
-use aiq::linking::Linking;
 use linking::{EAGER, LAZY, LinkingMode, SERIALIZED};
 use loom::{future::block_on, sync::Arc, thread};
+use maillon::linking::Linking;
 use notify::Notify;
 use rstest::rstest;
 use tokio_test::{assert_pending, assert_ready};

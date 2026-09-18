@@ -14,9 +14,9 @@ use std::{
     thread,
 };
 
-use aiq::linking::Linking;
 use futures::executor::block_on;
 use linking::{EAGER, LAZY, LinkingMode, SERIALIZED};
+use maillon::linking::Linking;
 use rstest::rstest;
 use semaphore::Semaphore;
 

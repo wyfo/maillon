@@ -11,7 +11,7 @@ use std::{
     task::{Context, Poll, Waker},
 };
 
-use aiq::{
+use maillon::{
     List, ListRef, LockedList, Node, NodeData, NodeState, WakerBatch,
     linking::{AtomicEager, Linking},
     node_wrapper,

@@ -4,11 +4,11 @@
 ///
 /// ```
 /// # use core::{future::Future, pin::Pin, task::{Context, Poll}};
-/// use aiq::{List, Node, NodeState, node_wrapper};
+/// use maillon::{List, Node, NodeState, node_wrapper};
 ///
 /// struct MyNodeData {/* ... */}
 ///
-/// # impl aiq::NodeData<&List<MyNodeData>> for MyNodeData {
+/// # impl maillon::NodeData<&List<MyNodeData>> for MyNodeData {
 /// #     fn new_state_if_last_node_on_drop(
 /// #         self: Pin<&mut Self>,
 /// #         _list: &&List<MyNodeData>,
@@ -19,7 +19,7 @@
 /// #     fn on_drop<'list>(
 /// #         self: Pin<&mut Self>,
 /// #         _list: &'list &List<MyNodeData>,
-/// #         _locked: Option<aiq::LockedList<'list, MyNodeData>>,
+/// #         _locked: Option<maillon::LockedList<'list, MyNodeData>>,
 /// #         _state_updated_on_unlink: bool,
 /// #     ) {
 /// #         todo!()
@@ -46,11 +46,11 @@
 ///
 /// ```
 /// # use core::{future::Future, pin::Pin, task::{Context, Poll}};
-/// use aiq::{List, Node, NodeState, node_wrapper};
+/// use maillon::{List, Node, NodeState, node_wrapper};
 ///
 /// struct MyNodeData {/* ... */}
 ///
-/// # impl aiq::NodeData<&List<MyNodeData>> for MyNodeData {
+/// # impl maillon::NodeData<&List<MyNodeData>> for MyNodeData {
 /// #     fn new_state_if_last_node_on_drop(
 /// #         self: Pin<&mut Self>,
 /// #         _list: &&List<MyNodeData>,
@@ -61,7 +61,7 @@
 /// #     fn on_drop<'list>(
 /// #         self: Pin<&mut Self>,
 /// #         _list: &'list &List<MyNodeData>,
-/// #         _locked: Option<aiq::LockedList<'list, MyNodeData>>,
+/// #         _locked: Option<maillon::LockedList<'list, MyNodeData>>,
 /// #         _state_updated_on_unlink: bool,
 /// #     ) {
 /// #         todo!()

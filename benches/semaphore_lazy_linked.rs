@@ -7,7 +7,7 @@ use std::sync::Arc;
 use criterion::{
     BenchmarkGroup, Criterion, criterion_group, criterion_main, measurement::WallTime,
 };
-type Semaphore = semaphore::Semaphore<aiq::linking::AtomicLazy>;
+type Semaphore = semaphore::Semaphore<maillon::linking::AtomicLazy>;
 use tokio::{runtime::Runtime, task};
 
 fn single_rt() -> Runtime {

@@ -5,7 +5,9 @@ use std::{
     sync::atomic::Ordering::Relaxed,
 };
 
-use aiq::{
+use linking::{EAGER, LAZY, LinkingMode, SERIALIZED};
+use loom::{model, thread};
+use maillon::{
     List, Node, NodeState,
     linking::{Linking, Serialized},
     list::{
@@ -13,8 +15,6 @@ use aiq::{
     },
     node::{NodeData, NodeRef},
 };
-use linking::{EAGER, LAZY, LinkingMode, SERIALIZED};
-use loom::{model, thread};
 use rstest::rstest;
 
 mod linking;
@@ -293,7 +293,7 @@ fn locked_push_back_from_node_only() {
         let NodeState::Unlinked(unlinked) = node.as_mut().state() else {
             unreachable!()
         };
-        let mut locked = aiq::list::ListRef::as_list(unlinked.list()).lock();
+        let mut locked = maillon::list::ListRef::as_list(unlinked.list()).lock();
         locked.push_back(unlinked, Relaxed);
         drop(locked);
         assert!(node.is_linked());

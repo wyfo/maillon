@@ -1,6 +1,6 @@
 # Algorithm
 
-`aiq` stands for Atomic Intrusive Queue. It is an intrusive doubly-linked list of pinned nodes, which supports concurrent tail-insertion and serialized removal.
+`maillon` is an intrusive doubly-linked list of pinned nodes, which supports concurrent tail-insertion and serialized removal.
 
 Code fragments included in the explanation are simplified for clarity.
 
@@ -309,7 +309,7 @@ Regarding the `Dequeue`/`Pop`/`NodeDrained` types seen earlier, because they all
 
 ## Queue state
 
-A key advantage of `aiq` over mutex-protected queues is that the atomic tail pointer can store arbitrary integer data when the queue is empty, using pointer tagging. The `S: QueueState` parameter can take two values: `()` (no state) and `usize`. With the latter, a whole class of algorithms becomes possible, the most immediate being a semaphore.
+A key advantage of `maillon` over mutex-protected queues is that the atomic tail pointer can store arbitrary integer data when the queue is empty, using pointer tagging. The `S: QueueState` parameter can take two values: `()` (no state) and `usize`. With the latter, a whole class of algorithms becomes possible, the most immediate being a semaphore.
 
 In a semaphore, the counter reaches zero when waiters start to enqueue, so the queue state can store the number of available permits while the queue stores the waiting nodes. When there are no enqueued waiters, semaphore operations reduce to simple CAS loops on the queue's tail pointer via `Queue::fetch_update_state<F: FnMut(S) -> Option<S>>(&self, mut f: F) -> Result<S, Option<S>>`. Removal methods also have a counterpart that sets a new queue state when removing the last node.
 
@@ -330,6 +330,6 @@ pub(crate) struct NodeInner<T> {
     pub(crate) data: loom::cell::UnsafeCell<T>,
 }
 ```
-As a result, node data accesses by reference are disabled and methods `with_data`/`with_data_mut` must be used. These methods are also available without `#[cfg(loom)]` (but hidden), making it possible to write loom-compatible code directly. This is for example used in `aiq` examples.
+As a result, node data accesses by reference are disabled and methods `with_data`/`with_data_mut` must be used. These methods are also available without `#[cfg(loom)]` (but hidden), making it possible to write loom-compatible code directly. This is for example used in `maillon` examples.
 
 [^1]: there is literally a temporary hack in the compiler to handle it.

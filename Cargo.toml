@@ -1,9 +1,9 @@
 [package]
-name = "aiq"
-version = "0.1.0-alpha.6"
+name = "maillon"
+version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-homepage = "https://github.com/wyfo/aiq"
+homepage = "https://github.com/wyfo/maillon"
 keywords = [
   "atomic",
   "lock-free",
@@ -15,7 +15,7 @@ categories = [
   "data-structures",
   "no-std",
 ]
-repository = "https://github.com/wyfo/aiq"
+repository = "https://github.com/wyfo/maillon"
 description = "An intrusive list with lock-free insertion."
 rust-version = "1.70"
 
@@ -85,7 +85,7 @@ all-features = true
 unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(nightly)",
   "cfg(loom)",
-  "cfg(aiq_notify_fetch_max)",
+  "cfg(maillon_notify_fetch_max)",
 ] }
 unsafe_op_in_unsafe_fn = "warn"
 

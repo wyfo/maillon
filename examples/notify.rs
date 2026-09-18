@@ -13,7 +13,9 @@ use std::{
     task::{Context, Poll, Waker},
 };
 
-use aiq::{
+#[cfg(loom)]
+use loom::sync::atomic::{AtomicUsize, fence};
+use maillon::{
     List, ListRef, LockedList, Node, NodeData, NodeState,
     linking::{AtomicEager, Linking},
     list::{GetBack, GetFront, ListEnd, ListGetEnd},
@@ -21,8 +23,6 @@ use aiq::{
     node_wrapper,
     sync::mutex::DefaultMutex,
 };
-#[cfg(loom)]
-use loom::sync::atomic::{AtomicUsize, fence};
 
 const STATE_NOTIFIED: usize = 1;
 const GENERATION_INCR: usize = 2;
@@ -126,7 +126,7 @@ impl<L: Linking> Notify<L> {
     fn store_generation_backup(&self, generation: usize) -> bool {
         debug_assert!(generation & STATE_NOTIFIED == 0);
         if cfg!(all(target_arch = "aarch64", target_pointer_width = "64"))
-            || cfg!(aiq_notify_fetch_max)
+            || cfg!(maillon_notify_fetch_max)
         {
             let backup = self.generation_backup.load(Relaxed);
             let stored = backup == generation

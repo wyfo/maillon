@@ -6,7 +6,7 @@
 
 use std::marker::PhantomData;
 
-use aiq::linking::{AtomicEager, AtomicLazy, Linking, Serialized};
+use maillon::linking::{AtomicEager, AtomicLazy, Linking, Serialized};
 
 pub struct LinkingMode<L: Linking>(PhantomData<L>);
 

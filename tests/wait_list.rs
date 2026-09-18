@@ -5,7 +5,10 @@ use std::{
     task::{Context, Poll, Waker},
 };
 
-use aiq::{
+use futures::FutureExt;
+use linking::{EAGER, LAZY, LinkingMode, SERIALIZED};
+use loom::{AtomicUsize, block_on, fence, model, thread};
+use maillon::{
     WaitList,
     linking::Linking,
     wait_list::{
@@ -14,9 +17,6 @@ use aiq::{
         wait::WakeCondition,
     },
 };
-use futures::FutureExt;
-use linking::{EAGER, LAZY, LinkingMode, SERIALIZED};
-use loom::{AtomicUsize, block_on, fence, model, thread};
 use rstest::rstest;
 
 mod linking;
@@ -193,7 +193,7 @@ macro_rules! loom_skip_issue_424 {
         use std::any::TypeId;
         #[cfg(loom)]
         if TypeId::of::<$sync>() == TypeId::of::<Synchronized>()
-            && TypeId::of::<$linking>() == TypeId::of::<aiq::list::Serialized>()
+            && TypeId::of::<$linking>() == TypeId::of::<maillon::list::Serialized>()
         {
             return;
         }

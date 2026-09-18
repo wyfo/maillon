@@ -55,9 +55,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - name: benchmark aiq
+      - name: benchmark maillon
         run: cargo bench --all-features --bench notify --bench semaphore -- --warm-up-time 1 --measurement-time 1
-      - name: benchmark aiq lazy linked
+      - name: benchmark maillon lazy linked
         run: cargo bench --all-features --bench notify_lazy_linked --bench semaphore_lazy_linked -- --warm-up-time 1 --measurement-time 1
       - name: benchmark tokio
         run: cargo bench --all-features --bench tokio_notify --bench tokio_semaphore -- --warm-up-time 1 --measurement-time 1

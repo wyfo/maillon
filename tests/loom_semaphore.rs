@@ -11,9 +11,9 @@ use std::{
     task::Poll,
 };
 
-use aiq::linking::Linking;
 use linking::{EAGER, LAZY, LinkingMode, SERIALIZED};
 use loom::{future::block_on, sync::atomic::AtomicUsize, thread};
+use maillon::linking::Linking;
 use rstest::rstest;
 use semaphore::Semaphore;
 

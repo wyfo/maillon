@@ -7,8 +7,8 @@ mod linking;
 
 use std::sync::Arc;
 
-use aiq::linking::Linking;
 use linking::{EAGER, LAZY, LinkingMode, SERIALIZED};
+use maillon::linking::Linking;
 use notify::Notify;
 use rstest::rstest;
 use tokio_test::{task::spawn, *};

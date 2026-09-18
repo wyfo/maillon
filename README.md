@@ -1,6 +1,8 @@
-# aiq — Atomic Intrusive Queue
+# maillon
 
 A concurrent intrusive list with lock-free insertion, mainly for building synchronization primitives.
+
+*Maillon is the French word for a chain link.*
 
 ## Features
 
@@ -18,7 +20,7 @@ A concurrent intrusive list with lock-free insertion, mainly for building synchr
 ```rust
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 
-use aiq::WaitList;
+use maillon::WaitList;
 
 async fn wait_for_flag(flag: &AtomicBool, wait_list: &WaitList) {
     wait_list.wait_until(|_| flag.load(Relaxed)).await.unwrap();
@@ -41,7 +43,7 @@ use std::{
     task::{Context, Poll, Waker},
 };
 
-use aiq::{List, Node, NodeData, NodeState, list::LockedList, node_wrapper};
+use maillon::{List, Node, NodeData, NodeState, list::LockedList, node_wrapper};
 
 #[derive(Default)]
 pub struct WaitList {
@@ -127,7 +129,7 @@ impl NodeData<&List<Waiter>> for Waiter {
 }
 ```
 
-See [examples](examples) for full implementations of `tokio::sync::Notify` and `tokio::sync::Semaphore` built with `aiq`, with fully identical API and behavior.
+See [examples](examples) for full implementations of `tokio::sync::Notify` and `tokio::sync::Semaphore` built with `maillon`, with fully identical API and behavior.
 
 ## Cargo Features
 
@@ -144,11 +146,11 @@ Without any features enabled, the library falls back to spin-based mutex and par
 
 ## Performance
 
-Results of the `tokio` benchmarks, run with both `tokio` native primitives and their `aiq` counterparts from [examples](examples) on an Intel i7-1065G7:
+Results of the `tokio` benchmarks, run with both `tokio` native primitives and their `maillon` counterparts from [examples](examples) on an Intel i7-1065G7:
 
 *benchmarks prefixed by `contention`/`uncontented`[^2] measure `Semaphore` performance*
 
-| Benchmark                       |       aiq |     tokio | aiq speedup |
+| Benchmark                       |       maillon |     tokio | maillon speedup |
 |---------------------------------|----------:|----------:|------------:|
 | `notify_one/10`                 | 200.35 µs | 247.28 µs |        1.23 |
 | `notify_one/50`                 | 252.83 µs | 272.73 µs |        1.08 |
@@ -169,9 +171,9 @@ Results of the `tokio` benchmarks, run with both `tokio` native primitives and t
 | `uncontented/concurrent_single` | 529.70 ns | 624.12 ns |        1.18 |
 | `uncontented/multi`             | 287.34 ns | 400.76 ns |        1.39 |
 
-`aiq`-based reimplementations seem to give a consistent speedup compared to `tokio` native ones. The only exception is `notify_waiters/500`, and it can be explained by several factors:
-- The benchmark results are extremely noisy, ranging from 200 µs to 400 µs, so `aiq` can in fact perform better than `tokio` on some runs.
-- The scenario is not very realistic: all the threads are hammering the same cache line with CAS loops to requeue or notify in tight loops. The key point is that `aiq` doesn't use backoff in CAS loops, so they run in full-contention mode, while `tokio`'s native implementation serializes all operations. Adding exponential backoff to the `push_back` operation improves the result down to 150 µs.
+`maillon`-based reimplementations seem to give a consistent speedup compared to `tokio` native ones. The only exception is `notify_waiters/500`, and it can be explained by several factors:
+- The benchmark results are extremely noisy, ranging from 200 µs to 400 µs, so `maillon` can in fact perform better than `tokio` on some runs.
+- The scenario is not very realistic: all the threads are hammering the same cache line with CAS loops to requeue or notify in tight loops. The key point is that `maillon` doesn't use backoff in CAS loops, so they run in full-contention mode, while `tokio`'s native implementation serializes all operations. Adding exponential backoff to the `push_back` operation improves the result down to 150 µs.
 - CPU hyperthreading typically handles this kind of ultra-contended scenario badly. Pinning the process to 4 cores only, or reducing the number of worker threads to 3 in order to avoid hyperthreading also greatly improves the result. Combined with exponential backoff, time drops below 100 µs.
 
 ## Safety and testing
@@ -184,7 +186,7 @@ Reimplementations of `tokio::sync::Notify` and `tokio::sync::Semaphore` are also
 
 ## Acknowledgements
 
-The `aiq::list::Drain` algorithm reuses the idea originally introduced to `tokio` by [Tymoteusz Wiśniewski](https://github.com/satakuma) in [tokio-rs/tokio#5458](https://github.com/tokio-rs/tokio/pull/5458): make the draining atomic by moving the list nodes into a temporary circular list.
+The `maillon::list::Drain` algorithm reuses the idea originally introduced to `tokio` by [Tymoteusz Wiśniewski](https://github.com/satakuma) in [tokio-rs/tokio#5458](https://github.com/tokio-rs/tokio/pull/5458): make the draining atomic by moving the list nodes into a temporary circular list.
 
 A small improvement, motivated by API ergonomics, has been made: the circular chaining is deferred until the list lock actually needs to be released mid-drain.
 
