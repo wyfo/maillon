@@ -206,7 +206,8 @@ Licensed under either of
 
 at your option.
 
-[^1]: In some rare cases, an inserting thread might need to unpark a remover thread, making insertion not strictly lock-free. It is however possible to switch the list to lazy node linking, making the node insertion fully lock-free.
+[^1]: In some rare cases, an inserting thread might need to unpark a remover thread, making insertion not strictly lock-free. It is also possible to switch the list to lazy node linking, making the node insertion fully lock-free. A third option is serialized linking, where insertion requires locking but can then happen at any position
+through a cursor, not only at the back.
 [^2]: The `uncontented` typo comes from the original `tokio` benchmark.
 [^3]: There is literally a [hack](https://rust-lang.github.io/rfcs/3467-unsafe-pinned.html) in the compiler to support them.
 [^4]: Except for the pin projection of `wait_list::wait::WaitUntil`, written directly to avoid depending on `pin-project-lite`.
