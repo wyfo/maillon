@@ -16,7 +16,7 @@ categories = [
   "no-std",
 ]
 repository = "https://github.com/wyfo/maillon"
-description = "An intrusive list with lock-free insertion."
+description = "A concurrent intrusive list with lock-free insertion, mainly for building synchronization primitives."
 rust-version = "1.70"
 
 [features]
