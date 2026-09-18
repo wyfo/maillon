@@ -26,6 +26,7 @@ unsafe impl super::mutex::Mutex for Mutex<()> {
     }
 }
 
+/// A [`Parker`](super::parker::Parker) built on std primitives.
 pub type StdParker = super::parker::CondVarParker<Mutex<()>, Condvar, false>;
 
 // SAFETY: `Condvar::wait` reacquires the mutex before returning, and `notify_all`

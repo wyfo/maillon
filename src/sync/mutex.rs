@@ -1,15 +1,25 @@
+//! The [`Mutex`] abstraction and its implementations.
 #[cfg(all(feature = "pthread", unix))]
 pub use super::pthread::PthreadMutex;
 pub use super::spin::SpinMutex;
 
+/// A raw mutex abstraction.
+///
+/// *This trait only exists because `std::sync::Mutex` [can't implement] `lock_api::RawMutex`.*
+///
 /// # Safety
 ///
 /// Implementations of this trait must ensure that the mutex is actually
 /// exclusive: a lock can't be acquired while the mutex is already locked.
 ///
-/// Calls to [`unlock`](Self::unlock) must *synchronize-with* calls to [`lock`](Self::lock).
+/// Calls to [`unlock`](Self::unlock) must *synchronize-with* subsequent calls to
+/// [`lock`](Self::lock).
+///
+/// [can't implement]: https://internals.rust-lang.org/t/unsafe-low-level-mutex/24565
 pub unsafe trait Mutex: Send + Sync + 'static {
+    /// Initial value for an unlocked mutex.
     const INIT: Self;
+
     #[doc(hidden)]
     fn new() -> Self
     where
@@ -17,13 +27,21 @@ pub unsafe trait Mutex: Send + Sync + 'static {
     {
         Self::INIT
     }
+
+    /// An optional guard carrying the locked state of the mutex.
     type Guard<'a>
     where
         Self: 'a;
+
+    /// Acquires this mutex, blocking the current thread until it is able to do so.
     fn lock(&self) -> Self::Guard<'_>;
+
+    /// Unlocks this mutex.
+    ///
     /// # Safety
     ///
-    /// The guard must have been returned from [`lock`](Self::lock), and must be used only once.
+    /// The guard must have been returned from [`lock`](Self::lock) called on this very mutex, and
+    /// must be used only once, on the same thread the guard was acquired on.
     unsafe fn unlock<'a>(&'a self, guard: Self::Guard<'a>);
 }
 
@@ -49,14 +67,21 @@ unsafe impl<R: lock_api::RawMutex + Send + Sync + 'static> Mutex for lock_api::M
 
 cfg_if::cfg_if! {
     if #[cfg(loom)] {
-        pub type DefaultMutex = crate::loom::sync::Mutex<()>;
+        type DefaultMutexImpl = crate::loom::sync::Mutex<()>;
     } else if #[cfg(feature = "parking_lot")] {
-        pub type DefaultMutex = parking_lot::Mutex<()>;
+        type DefaultMutexImpl = parking_lot::Mutex<()>;
     } else if #[cfg(feature = "std")] {
-        pub type DefaultMutex = crate::loom::sync::Mutex<()>;
+        type DefaultMutexImpl = crate::loom::sync::Mutex<()>;
     } else if #[cfg(all(feature = "pthread", unix))] {
-        pub type DefaultMutex = PthreadMutex;
+        type DefaultMutexImpl = PthreadMutex;
     } else {
-        pub type DefaultMutex = SpinMutex;
+        type DefaultMutexImpl = SpinMutex;
     }
 }
+
+/// The default mutex implementation used by [`List`](crate::List).
+///
+/// It is selected from the enabled features, by decreasing priority: `parking_lot`
+/// (`parking_lot::Mutex<()>`), `std` (`std::sync::Mutex<()>`), `pthread` (`PthreadMutex`,
+/// unix only), and [`SpinMutex`] otherwise.
+pub type DefaultMutex = DefaultMutexImpl;

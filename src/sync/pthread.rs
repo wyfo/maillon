@@ -84,6 +84,9 @@ impl Drop for RawMutex {
     }
 }
 
+/// A pthread-based [`Mutex`] implementation.
+///
+/// The pthread mutex is lazily heap-allocated on first use.
 #[derive(Debug)]
 pub struct PthreadMutex(LazyBox<RawMutex>);
 
@@ -132,6 +135,9 @@ impl Drop for RawCondvar {
     }
 }
 
+/// A pthread-based [`CondVar`] implementation.
+///
+/// The pthread condvar is lazily heap-allocated on first use.
 #[derive(Debug)]
 pub struct PthreadCondVar(LazyBox<RawCondvar>);
 
@@ -172,4 +178,5 @@ unsafe impl CondVar<PthreadMutex> for PthreadCondVar {
     }
 }
 
+/// A pthread-based [`Parker`](super::parker::Parker) implementation.
 pub type PthreadParker = super::parker::CondVarParker<PthreadMutex, PthreadCondVar, true>;

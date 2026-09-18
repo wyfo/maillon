@@ -1,3 +1,6 @@
+//! The [`Parker`] abstraction and its implementations.
+//!
+//! [`CondVarParker`], a generic implementation based on [`CondVar`], is also provided.
 use core::ptr;
 
 #[cfg(feature = "atomic-wait")]
@@ -11,9 +14,16 @@ pub use super::spin::SpinParker;
 pub use super::std::StdParker;
 use crate::sync::{condvar::CondVar, mutex::Mutex};
 
+/// A thread parker abstraction.
 pub trait Parker: Send + Sync + 'static {
+    /// Whether the parker actually ever parks the thread or not.
+    ///
+    /// Spin loop based parkers never block, so they don't require synchronization with unparking.
     const NEVER_BLOCKS: bool = false;
+
+    /// Initial parker value.
     const INIT: Self;
+
     #[doc(hidden)]
     fn new() -> Self
     where
@@ -21,29 +31,36 @@ pub trait Parker: Send + Sync + 'static {
     {
         Self::INIT
     }
+
+    /// A 2-aligned pointer retrieved before parking and passed later to `unpark`.
+    ///
+    /// It can be used to identify the parked thread when unparking it.
     fn parked_state(&self) -> *mut () {
         ptr::null_mut()
     }
+
+    /// Parks the thread until a notification is received after a call to `unpark`.
+    ///
     /// # Safety
     ///
     /// `park_until` can only be called by a single thread at a time.
     /// `notified` must not panic.
     unsafe fn park_until<T>(&self, notified: impl FnMut() -> Option<T>) -> T;
+
+    /// Unparks a parked thread with its `parked_state`.
+    ///
     /// # Safety
     ///
-    /// `parked_state` argument must have been returned by a `parked_state` call
-    /// preceding a `park_until` call.
+    /// `parked_state` argument must have been returned by a `parked_state` call preceding a
+    /// `park_until` call.
     unsafe fn unpark(&self, parked_state: *mut ());
 }
 
-/// TODO
 /// A [`Parker`] built from a [`Mutex`] and a [`CondVar`], for platforms which have no native
 /// parking primitive.
 ///
-/// Platforms which do have one — futex-like APIs, FreeRTOS task notifications, bare-metal
-/// `WFE`/`SEV` — should implement [`Parker`] directly instead: they express it without a
-/// mutex, without a condition variable, and often without any state at all.
-// implementation inspired from the std parker futex/pthread implementations
+/// If `NOTIFY_WITH_MUTEX_ACQUIRED` is `true`, then `CondVar::notify_one` will be called with the
+/// mutex acquired.
 #[derive(Debug)]
 pub struct CondVarParker<M: Mutex, C: CondVar<M>, const NOTIFY_WITH_MUTEX_ACQUIRED: bool> {
     mutex: M,
@@ -102,16 +119,23 @@ impl<M: Mutex, C: CondVar<M>, const NOTIFY_WITH_MUTEX_ACQUIRED: bool> Parker
 
 cfg_if::cfg_if! {
     if #[cfg(loom)] {
-      pub type DefaultParker = StdParker;
+        type DefaultParkerImpl = StdParker;
     } else if #[cfg(feature = "atomic-wait")] {
-        pub type DefaultParker = AtomicParker;
+        type DefaultParkerImpl = AtomicParker;
     } else if #[cfg(feature = "parking_lot")] {
-        pub type DefaultParker = ParkingLotParker;
+        type DefaultParkerImpl = ParkingLotParker;
     } else if #[cfg(feature = "std")] {
-        pub type DefaultParker = StdParker;
+        type DefaultParkerImpl = StdParker;
     } else if #[cfg(all(feature = "pthread", unix))] {
-        pub type DefaultParker = PthreadParker;
+        type DefaultParkerImpl = PthreadParker;
     } else {
-        pub type DefaultParker = SpinParker;
+        type DefaultParkerImpl = SpinParker;
     }
 }
+
+/// The default parker implementation used by [`AtomicEager`](crate::linking::AtomicEager).
+///
+/// It is selected from the enabled features, by decreasing priority: `atomic-wait`
+/// (`AtomicParker`), `parking_lot` (`ParkingLotParker`), `std` (`StdParker`), `pthread`
+/// (`PthreadParker`, unix only), and [`SpinParker`] otherwise.
+pub type DefaultParker = DefaultParkerImpl;

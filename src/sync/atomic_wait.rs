@@ -2,6 +2,7 @@ use core::sync::atomic::{AtomicU32, Ordering::*};
 
 use crate::sync::parker::Parker;
 
+/// A futex-based [`Parker`] implementation built on the [`atomic_wait`] crate.
 #[derive(Debug)]
 pub struct AtomicParker(AtomicU32);
 
@@ -23,7 +24,7 @@ impl AtomicParker {
     }
 }
 
-// implementation taken for std Parker futex implementation
+// implementation taken from std Parker futex implementation
 impl Parker for AtomicParker {
     #[allow(clippy::declare_interior_mutable_const)]
     const INIT: Self = Self(AtomicU32::new(0));

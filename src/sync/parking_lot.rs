@@ -9,16 +9,7 @@ use crate::{
     sync::{condvar::CondVar, mutex::Mutex, parker::Parker},
 };
 
-// TODO repass on all comments
-/// A [`Parker`] built directly on `parking_lot_core`, which is what
-/// [`parking_lot::Condvar`] is itself built on: going through a mutex and a condition
-/// variable would only stack two layers on top of the very same parking lot.
-///
-/// The bucket lock `parking_lot_core` holds while running `validate` plays the role a
-/// condition variable would give to its mutex, so the notification cannot be missed: either
-/// [`unpark_one`](parking_lot_core::unpark_one) takes the bucket first, and `validate`
-/// observes the notification and aborts the park, or `validate` takes it first and the
-/// thread is enqueued before the unparker can look at the queue.
+/// A [`Parker`] implementation built on the [`parking_lot_core`] crate.
 #[derive(Debug)]
 pub struct ParkingLotParker(
     // `parking_lot_core` is keyed by address, so this byte is not dead weight: a zero-sized

@@ -5,6 +5,7 @@ use crate::{
     sync::{mutex::Mutex, parker::Parker},
 };
 
+/// A spinning [`Mutex`] implementation.
 pub struct SpinMutex(AtomicBool);
 
 unsafe impl Mutex for SpinMutex {
@@ -37,6 +38,7 @@ unsafe impl Mutex for SpinMutex {
     }
 }
 
+/// A spinning [`Parker`] implementation.
 pub struct SpinParker;
 
 impl Parker for SpinParker {
