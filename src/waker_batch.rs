@@ -1,5 +1,10 @@
 use core::{array, fmt, mem, mem::MaybeUninit, task::Waker};
 
+/// A fixed-capacity buffer of [`Waker`]s, stored inline.
+///
+/// It allows collecting wakers while a lock is held, and waking them once the lock is released,
+/// without any allocation. When the batch is full, [`wake_all`](Self::wake_all) should be called
+/// outside the critical section before it can be filled again.
 pub struct WakerBatch<const SIZE: usize> {
     wakers: [MaybeUninit<Waker>; SIZE],
     len: usize,
@@ -8,6 +13,7 @@ pub struct WakerBatch<const SIZE: usize> {
 impl<const SIZE: usize> WakerBatch<SIZE> {
     const SIZE_CHECK: () = assert!(SIZE > 0, "WakerBatch size must be greater than 0");
 
+    /// Creates an empty batch.
     pub fn new() -> Self {
         let () = Self::SIZE_CHECK;
         Self {
@@ -16,6 +22,11 @@ impl<const SIZE: usize> WakerBatch<SIZE> {
         }
     }
 
+    /// Appends a waker to the batch.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the batch [is full](Self::is_full).
     pub fn push(&mut self, waker: Waker) {
         self.wakers
             .get_mut(self.len)
@@ -24,6 +35,7 @@ impl<const SIZE: usize> WakerBatch<SIZE> {
         self.len += 1;
     }
 
+    /// Returns `true` if the batch contains `SIZE` wakers.
     pub fn is_full(&self) -> bool {
         self.len == self.wakers.len()
     }
@@ -46,6 +58,7 @@ impl<const SIZE: usize> WakerBatch<SIZE> {
         }
     }
 
+    /// Wakes all the wakers of the batch, leaving it empty.
     pub fn wake_all(&mut self) {
         self.drain_with(Waker::wake);
     }
