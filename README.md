@@ -59,12 +59,16 @@ struct Waiter {
 impl WaitList {
     pub fn notify_one(&self) {
         if !self.list.is_empty_rmw(Release) {
-            Self::notify_locked(self.list.lock());
+            Self::notify_one_cold(&self.list);
         }
     }
 
     #[cold]
-    fn notify_locked(mut locked: LockedList<'_, Waiter>) {
+    fn notify_one_cold(list: &List<Waiter>) {
+        Self::notify_one_locked(list.lock());
+    }
+
+    fn notify_one_locked(mut locked: LockedList<'_, Waiter>) {
         let Some(mut front) = locked.front() else {
             return;
         };
@@ -123,7 +127,10 @@ impl NodeData<&List<Waiter>> for Waiter {
         _state_updated_on_unlink: bool,
     ) {
         if self.notified {
-            WaitList::notify_locked(locked.unwrap_or_else(|| list.lock()));
+            match locked {
+                Some(locked) => WaitList::notify_one_locked(locked),
+                None => WaitList::notify_one_cold(list),
+            }
         }
     }
 }
