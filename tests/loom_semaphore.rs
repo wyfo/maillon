@@ -112,7 +112,6 @@ fn concurrent_close<L: Linking>(#[values(EAGER, LAZY, SERIALIZED)] _linking: Lin
     });
 }
 
-#[ignore]
 #[rstest]
 fn concurrent_cancel<L: Linking>(#[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>) {
     async fn poll_and_cancel<L: Linking>(semaphore: Arc<Semaphore<L>>) {
