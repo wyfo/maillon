@@ -11,7 +11,7 @@ use std::{
     task::Poll,
 };
 
-use aiq::list::Linking;
+use aiq::linking::Linking;
 use linking::{EAGER, LAZY, LinkingMode, SERIALIZED};
 use loom::{future::block_on, sync::atomic::AtomicUsize, thread};
 use rstest::rstest;

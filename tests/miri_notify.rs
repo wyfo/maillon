@@ -6,7 +6,7 @@ mod linking;
 
 use std::{sync::Arc, thread};
 
-use aiq::list::Linking;
+use aiq::linking::Linking;
 use futures::executor::block_on;
 use linking::{EAGER, LAZY, LinkingMode, SERIALIZED};
 use notify::Notify;

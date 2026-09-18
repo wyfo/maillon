@@ -7,9 +7,9 @@ use std::{
 
 use aiq::{
     List, Node, NodeState,
+    linking::{Linking, Serialized},
     list::{
-        DrainEnd, DrainGetEnd, GetBack, GetFront, LIST_STATE_MAX, Linking, ListEnd, ListGetEnd,
-        LockedList, Serialized,
+        DrainEnd, DrainGetEnd, GetBack, GetFront, LIST_STATE_MAX, ListEnd, ListGetEnd, LockedList,
     },
     node::{NodeData, NodeRef},
 };

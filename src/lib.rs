@@ -2,6 +2,7 @@
 #![no_std]
 #![cfg_attr(nightly, feature(unsafe_pinned))]
 
+pub mod linking;
 pub mod list;
 mod loom;
 mod macros;
@@ -14,6 +15,7 @@ mod utils;
 pub mod wait_list;
 mod waker_batch;
 
+pub use atomic_backoff as backoff;
 pub use list::{List, ListRef, LockedList};
 pub use node::{Node, NodeData, NodeState};
 pub use wait_list::WaitList;

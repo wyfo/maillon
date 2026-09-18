@@ -7,7 +7,8 @@ use crate::msrv::ResultExt;
 #[cfg(not(nightly))]
 use crate::unsafe_pinned::UnsafePinned;
 use crate::{
-    list::{Linking, ListRef},
+    linking::Linking,
+    list::ListRef,
     loom::{
         cell::Cell,
         sync::atomic::{AtomicPtr, Ordering, Ordering::*},
@@ -39,7 +40,7 @@ mod private {
     use core::ptr::NonNull;
 
     use crate::{
-        list::{Linking, PrivateLinking},
+        linking::{Linking, PrivateLinking},
         loom::sync::atomic::AtomicPtr,
     };
 

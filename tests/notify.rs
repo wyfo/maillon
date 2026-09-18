@@ -5,7 +5,7 @@ mod notify;
 
 mod linking;
 
-use aiq::list::Linking;
+use aiq::linking::Linking;
 use linking::{EAGER, LAZY, LinkingMode, SERIALIZED};
 use notify::Notify;
 use rstest::rstest;

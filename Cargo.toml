@@ -26,9 +26,10 @@ lock_api = ["dep:lock_api"]
 parking_lot = ["dep:parking_lot", "dep:parking_lot_core", "lock_api"]
 portable-atomic = ["dep:portable-atomic"]
 pthread = ["dep:libc"]
-std = []
+std = ["atomic-backoff/std"]
 
 [dependencies]
+atomic-backoff = { version = "0.1.1", default-features = false }
 atomic-wait = { version = "1", optional = true }
 cfg-if = "1"
 lock_api = { version = "0.4", optional = true }

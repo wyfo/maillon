@@ -5,7 +5,7 @@ mod notify;
 
 mod linking;
 
-use aiq::list::Linking;
+use aiq::linking::Linking;
 use linking::{EAGER, LAZY, LinkingMode, SERIALIZED};
 use loom::{future::block_on, sync::Arc, thread};
 use notify::Notify;

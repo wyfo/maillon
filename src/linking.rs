@@ -1,5 +1,4 @@
 use core::{
-    hint,
     marker::PhantomData,
     ptr::NonNull,
     sync::atomic::Ordering::{self, AcqRel, Acquire, Relaxed, Release, SeqCst},
@@ -8,11 +7,12 @@ use core::{
 #[allow(unused_imports)]
 use crate::msrv::StrictProvenance;
 use crate::{
+    backoff::{BackoffLimit, BackoffStrategy, BoundedBackoffStrategy, NoBackoff, SpinBackoff},
     list::{DrainGetEnd, GetBack, GetFront, HEAD_MARKER},
     loom::{AtomicPtrExt, cell::Cell, sync::atomic::AtomicPtr},
     msrv::ptr,
     node::NodeLink,
-    sync::parker::{DEFAULT_SPIN_BEFORE_PARK, DefaultParker, Parker},
+    sync::parker::{DefaultParker, Parker},
     utils::{OptionNonNullExt, abort_on_unwind},
 };
 
@@ -24,11 +24,12 @@ pub trait Linking: PrivateLinking + Send + Sync + 'static {
 mod private {
     use core::{ptr::NonNull, sync::atomic::Ordering};
 
-    use crate::node::NodeLink;
+    use crate::{backoff::BackoffStrategy, node::NodeLink};
 
     pub trait PrivateLinking: Sized {
         type NextPtr: 'static;
         type Parker: Send + Sync + 'static;
+        type Backoff: BackoffStrategy;
         #[cfg(not(loom))]
         const NEW_NEXT: Self::NextPtr;
         #[cfg(not(loom))]
@@ -81,16 +82,36 @@ mod private {
 }
 pub(crate) use private::PrivateLinking;
 
+/// Default number of spins before parking, e.g. for [`AtomicEager`](crate::list::AtomicEager).
+///
+/// Zero under `miri` and `loom`: every spin is an instrumented atomic load, so spinning
+/// multiplies the state space a model has to explore and the branch budget it consumes,
+/// without exercising anything the park path does not already cover.
+// TODO doc wording: no longer a count
+#[cfg(not(any(miri, loom)))]
+pub type DefaultSpinBeforePark = BackoffLimit<SpinBackoff, 100>; // same as `std::sys::sync::mutex::futex`
+/// Default number of spins before parking, e.g. for [`AtomicEager`](crate::list::AtomicEager).
+///
+/// Zero under `miri` and `loom`: every spin is an instrumented atomic load, so spinning
+/// multiplies the state space a model has to explore and the branch budget it consumes,
+/// without exercising anything the park path does not already cover.
+#[cfg(any(miri, loom))]
+pub type DefaultSpinBeforePark = BackoffLimit<SpinBackoff, 0>;
+
 const PARKED_TAG: usize = 1;
 
 #[derive(Debug)]
 pub struct AtomicEager<
+    B: BackoffStrategy = NoBackoff,
     P: Parker = DefaultParker,
-    const SPIN_BEFORE_PARK: usize = DEFAULT_SPIN_BEFORE_PARK,
->(PhantomData<P>);
-impl<P: Parker, const SPIN_BEFORE_PARK: usize> PrivateLinking for AtomicEager<P, SPIN_BEFORE_PARK> {
+    PB: BoundedBackoffStrategy = DefaultSpinBeforePark,
+>(PhantomData<(B, P, PB)>);
+impl<B: BackoffStrategy, P: Parker, PB: BoundedBackoffStrategy> PrivateLinking
+    for AtomicEager<B, P, PB>
+{
     type NextPtr = AtomicPtr<NodeLink<Self>>;
     type Parker = P;
+    type Backoff = B;
     #[allow(clippy::declare_interior_mutable_const)]
     #[cfg(not(loom))]
     const NEW_NEXT: Self::NextPtr = AtomicPtr::new(ptr::null_mut());
@@ -150,18 +171,18 @@ impl<P: Parker, const SPIN_BEFORE_PARK: usize> PrivateLinking for AtomicEager<P,
         #[cold]
         #[inline(never)]
         #[allow(clippy::incompatible_msrv, unstable_name_collisions)]
-        fn wait_for_next<P: Parker, const SPIN_BEFORE_PARK: usize>(
-            next: &AtomicPtr<NodeLink<AtomicEager<P, SPIN_BEFORE_PARK>>>,
+        fn wait_for_next<L: PrivateLinking, P: Parker, PB: BoundedBackoffStrategy>(
+            next: &AtomicPtr<NodeLink<L>>,
             parker: &P,
-        ) -> NonNull<NodeLink<AtomicEager<P, SPIN_BEFORE_PARK>>> {
+        ) -> NonNull<NodeLink<L>> {
             if P::NEVER_BLOCKS {
                 return abort_on_unwind(|| unsafe {
                     parker.park_until(|| NonNull::new(next.load(Acquire)))
                 });
             }
-            for _ in 0..SPIN_BEFORE_PARK {
-                hint::spin_loop();
-                if let Some(next) = NonNull::new(next.load(Acquire)) {
+            let mut spin = PB::default();
+            if !spin.is_completed() {
+                if let Some(next) = spin.try_backoff_until(|| NonNull::new(next.load(Acquire))) {
                     return next;
                 }
             }
@@ -177,7 +198,7 @@ impl<P: Parker, const SPIN_BEFORE_PARK: usize> PrivateLinking for AtomicEager<P,
             };
             abort_on_unwind(|| unsafe { parker.park_until(load_next) })
         }
-        wait_for_next::<P, SPIN_BEFORE_PARK>(next, parker)
+        wait_for_next::<Self, P, PB>(next, parker)
     }
     fn update_next(next: &Self::NextPtr, ptr: Option<NonNull<NodeLink<Self>>>) {
         next.store(ptr.as_ptr(), Relaxed);
@@ -192,15 +213,16 @@ impl<P: Parker, const SPIN_BEFORE_PARK: usize> PrivateLinking for AtomicEager<P,
         NonNull::new(sentinel.next.load_mut())
     }
 }
-impl<P: Parker, const SPIN_BEFORE_PARK: usize> Linking for AtomicEager<P, SPIN_BEFORE_PARK> {
+impl<B: BackoffStrategy, P: Parker, PB: BoundedBackoffStrategy> Linking for AtomicEager<B, P, PB> {
     type PreferredDrainGetEnd = GetFront;
 }
 
 #[derive(Debug)]
-pub struct AtomicLazy;
-impl PrivateLinking for AtomicLazy {
+pub struct AtomicLazy<B: BackoffStrategy = NoBackoff>(PhantomData<B>);
+impl<B: BackoffStrategy> PrivateLinking for AtomicLazy<B> {
     type NextPtr = Cell<Option<NonNull<NodeLink<Self>>>>;
     type Parker = ();
+    type Backoff = B;
     #[allow(clippy::declare_interior_mutable_const)]
     #[cfg(not(loom))]
     const NEW_NEXT: Self::NextPtr = Cell::new(None);
@@ -242,10 +264,10 @@ impl PrivateLinking for AtomicLazy {
         #[cold]
         #[inline(never)]
         #[allow(clippy::incompatible_msrv, unstable_name_collisions)]
-        fn find_next(
-            node: Option<NonNull<NodeLink<AtomicLazy>>>,
-            mut tail: NonNull<NodeLink<AtomicLazy>>,
-        ) -> NonNull<NodeLink<AtomicLazy>> {
+        fn find_next<B: BackoffStrategy>(
+            node: Option<NonNull<NodeLink<AtomicLazy<B>>>>,
+            mut tail: NonNull<NodeLink<AtomicLazy<B>>>,
+        ) -> NonNull<NodeLink<AtomicLazy<B>>> {
             loop {
                 let prev = unsafe { tail.as_ref().load_prev() };
                 // TODO not writing the next pointer of the last node is actually a good thing,
@@ -298,7 +320,7 @@ impl PrivateLinking for AtomicLazy {
         Some(Self::get_next(None, &sentinel.next, tail, &()))
     }
 }
-impl Linking for AtomicLazy {
+impl<B: BackoffStrategy> Linking for AtomicLazy<B> {
     type PreferredDrainGetEnd = GetBack;
 }
 
@@ -307,6 +329,7 @@ pub struct Serialized;
 impl PrivateLinking for Serialized {
     type NextPtr = Cell<Option<NonNull<NodeLink<Self>>>>;
     type Parker = ();
+    type Backoff = NoBackoff;
     #[allow(clippy::declare_interior_mutable_const)]
     #[cfg(not(loom))]
     const NEW_NEXT: Self::NextPtr = Cell::new(None);

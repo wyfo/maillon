@@ -9,7 +9,8 @@ use core::{
 use crate::msrv::OptionExt;
 use crate::{
     List, ListRef, Node, NodeData,
-    list::{AtomicEager, GetBack, GetFront, Linking, ListEnd, ListGetEnd, LockedList},
+    linking::{AtomicEager, Linking},
+    list::{GetBack, GetFront, ListEnd, ListGetEnd, LockedList},
     loom::sync::atomic::Ordering::Relaxed,
     node::NodeRef,
     sync::mutex::{DefaultMutex, Mutex},

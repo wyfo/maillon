@@ -12,8 +12,8 @@ use std::{
 };
 
 use aiq::{
-    List, ListRef, Node, NodeData, NodeState, WakerBatch,
-    list::{AtomicEager, Linking, LockedList},
+    List, ListRef, LockedList, Node, NodeData, NodeState, WakerBatch,
+    linking::{AtomicEager, Linking},
     node_wrapper,
     sync::mutex::DefaultMutex,
 };

@@ -7,7 +7,7 @@ use std::{
 
 use aiq::{
     WaitList,
-    list::Linking,
+    linking::Linking,
     wait_list::{
         ClosedError, DEFAULT_WAKER_BATCH_SIZE,
         synchronization::{Sequential, Synchronization, Synchronized, Unsynchronized},

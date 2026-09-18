@@ -7,7 +7,7 @@ mod linking;
 
 use std::sync::Arc;
 
-use aiq::list::Linking;
+use aiq::linking::Linking;
 use linking::{EAGER, LAZY, LinkingMode, SERIALIZED};
 use rstest::rstest;
 use semaphore::Semaphore;

@@ -3,6 +3,7 @@ use core::{cell::UnsafeCell, marker::PhantomData, mem::ManuallyDrop, pin::Pin, p
 #[allow(unused_imports)]
 use crate::msrv::StrictProvenance;
 use crate::{
+    backoff::BackoffState,
     loom::{
         AtomicPtrExt,
         sync::atomic::{AtomicPtr, Ordering, Ordering::*, fence},
@@ -15,17 +16,17 @@ use crate::{
 
 mod cursor;
 mod drain;
-mod linking;
 pub(crate) mod state;
 
 pub use cursor::*;
 pub use drain::*;
-pub use linking::*;
 pub use state::*;
+
+use crate::linking::{AtomicEager, Linking, PrivateLinking, Serialized};
 
 type MutexGuard<'a, M> = <M as Mutex>::Guard<'a>;
 
-const HEAD_MARKER: usize = 1;
+pub(crate) const HEAD_MARKER: usize = 1;
 
 pub struct List<T, S: ListState = (), D = (), L: Linking = AtomicEager, M: Mutex = DefaultMutex> {
     tail: AtomicPtr<Tail<S, L>>,
@@ -144,6 +145,7 @@ impl<T, S: ListState, D, L: Linking, M: Mutex> List<T, S, D, L, M> {
         let mut link = node.link();
         let _locked = L::SERIALIZED.then(|| self.lock());
         let set_order = L::push_back_set_order(set_order);
+        let mut backoff = BackoffState::new(L::Backoff::default());
         let mut tail = self.tail.load(fetch_order);
         let prev = loop {
             let state_or_ptr = S::tail_to_enum(tail);
@@ -166,6 +168,9 @@ impl<T, S: ListState, D, L: Linking, M: Mutex> List<T, S, D, L, M> {
             if L::SERIALIZED {
                 self.store_tail_serialized(new_tail, set_order, state_or_ptr.state().is_some());
                 break prev;
+            }
+            if backoff.backoff_reload(&mut tail, || self.tail.load(fetch_order)) {
+                continue;
             }
             match (self.tail).compare_exchange_weak(tail, new_tail, set_order, fetch_order) {
                 Ok(_) => break prev,
@@ -274,12 +279,16 @@ impl<T, D, L: Linking, M: Mutex> List<T, usize, D, L, M> {
         fetch_order: Ordering,
         mut f: F,
     ) -> Result<usize, Option<usize>> {
+        let mut backoff = BackoffState::new(L::Backoff::default());
         let mut tail = self.tail.load(fetch_order);
         while let Some(state) = tail.state() {
             let Some(new_state) = f(state) else {
                 return Err(Some(state));
             };
             let new_tail = new_state.into_tail();
+            if backoff.backoff_reload(&mut tail, || self.tail.load(fetch_order)) {
+                continue;
+            }
             match (self.tail).compare_exchange_weak(tail, new_tail, set_order, fetch_order) {
                 Ok(_) => return Ok(state),
                 Err(ptr) => tail = ptr,

@@ -14,7 +14,7 @@ use std::{
     thread,
 };
 
-use aiq::list::Linking;
+use aiq::linking::Linking;
 use futures::executor::block_on;
 use linking::{EAGER, LAZY, LinkingMode, SERIALIZED};
 use rstest::rstest;

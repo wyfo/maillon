@@ -1,4 +1,4 @@
-// #![forbid(unsafe_code)]
+#![forbid(unsafe_code)]
 #[cfg(not(loom))]
 use std::sync::atomic::{AtomicUsize, fence};
 use std::{
@@ -14,8 +14,9 @@ use std::{
 };
 
 use aiq::{
-    List, ListRef, Node, NodeData, NodeState,
-    list::{AtomicEager, GetBack, GetFront, Linking, ListEnd, ListGetEnd, LockedList},
+    List, ListRef, LockedList, Node, NodeData, NodeState,
+    linking::{AtomicEager, Linking},
+    list::{GetBack, GetFront, ListEnd, ListGetEnd},
     node::NodeRef,
     node_wrapper,
     sync::mutex::DefaultMutex,
@@ -352,6 +353,3 @@ impl<L: Linking> Future for OwnedNotified<L> {
 }
 
 fn main() {}
-
-#[unsafe(no_mangle)]
-fn plop(_notified: Notified) {}

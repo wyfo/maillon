@@ -9,7 +9,7 @@ use core::{
 use crate::msrv::OptionExt;
 use crate::{
     Node, NodeState,
-    list::{AtomicEager, Linking},
+    linking::{AtomicEager, Linking},
     loom::sync::atomic::fence,
     node_wrapper,
     sync::mutex::{DefaultMutex, Mutex},
