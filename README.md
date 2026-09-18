@@ -1,38 +1,130 @@
 # aiq — Atomic Intrusive Queue
 
-A concurrent intrusive queue for building async primitives.
-
-See [here](algorithm.md) for a detailed explanation of the algorithm.
+A concurrent intrusive list with lock-free insertion, mainly for building synchronization primitives.
 
 ## Features
 
-- 100%[^1] safe API
-- `#[no_std]`, with optional `alloc`/`std` features
-- Lockless enqueuing: multiple nodes can be enqueued concurrently while another is being dequeued; dequeuing requires locking
-- Generic `Mutex`/`Parker` traits, with default implementations for std, pthread, spin, and `atomic-wait`/`parking_lot`
-- Optional atomic state embedded in the queue when empty
+- 100% safe API
+- `#![no_std]`, no allocation
+- Lock-free[^1] insertion: multiple nodes can be inserted concurrently while another is being removed; removal requires locking
+- Atomic emptiness check to avoid acquiring the mutex if the list is empty
+- Optional atomic state embedded in the list when empty (to carry a semaphore counter, a closed flag, etc.)
+- `WaitList`, a high-level asynchronous wait list with customizable synchronization built on top of the low-level `List`
 
 ## Usage
 
+`WaitList` is a ready-to-use asynchronous wait list, built on top of `List`:
+
 ```rust
-use aiq::{Node, NodeState, Queue};
-use std::pin::pin;
+use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 
-let queue: Queue<usize> = Queue::new();
+use aiq::WaitList;
 
-// Nodes carry user data and an intrusive link into the list
-let mut node = pin!(Node::with_data(&queue, 42));
-
-// Enqueue by matching on node state
-match node.state() {
-    NodeState::Unqueued(node) => node.enqueue(),
-    _ => unreachable!(),
+async fn wait_for_flag(flag: &AtomicBool, wait_list: &WaitList) {
+    wait_list.wait_until(|_| flag.load(Relaxed)).await.unwrap();
 }
 
-// Dequeue requires locking
-let mut locked = queue.is_empty_or_lock().unwrap();
-let item = locked.dequeue().unwrap();
-assert_eq!(*item, 42);
+fn set_flag(flag: &AtomicBool, wait_list: &WaitList) {
+    flag.store(true, Relaxed);
+    wait_list.notify_all();
+}
+```
+
+`List` is the building block: nodes are pinned, carry user data implementing `NodeData`, and are pushed to the back without locking, while every other operation goes through `List::lock`. Here is a minimal wait list, supporting only `notify_one`:
+
+```rust
+use std::{
+    future::Future,
+    mem,
+    pin::Pin,
+    sync::atomic::Ordering::{Acquire, Release},
+    task::{Context, Poll, Waker},
+};
+
+use aiq::{List, Node, NodeData, NodeState, list::LockedList, node_wrapper};
+
+#[derive(Default)]
+pub struct WaitList {
+    list: List<Waiter>,
+}
+
+#[derive(Default)]
+struct Waiter {
+    waker: Option<Waker>,
+    notified: bool,
+}
+
+impl WaitList {
+    pub fn notify_one(&self) {
+        if !self.list.is_empty_rmw(Release) {
+            Self::notify_locked(self.list.lock());
+        }
+    }
+
+    #[cold]
+    fn notify_locked(mut locked: LockedList<'_, Waiter>) {
+        let Some(mut front) = locked.front() else {
+            return;
+        };
+        front.notified = true;
+        let waker = front.waker.take();
+        front.unlink();
+        drop(locked);
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+    }
+
+    pub fn wait(&self) -> Wait<'_> {
+        Wait(Node::new(&self.list))
+    }
+}
+
+node_wrapper! {
+    pub struct Wait<'a>(Node<&'a List<Waiter>>);
+}
+
+impl Future for Wait<'_> {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        match self.node_mut().state() {
+            NodeState::Unlinked(mut node) => {
+                if mem::take(&mut node.notified) {
+                    return Poll::Ready(());
+                }
+                node.waker = Some(cx.waker().clone());
+                node.push_back(Acquire);
+            }
+            NodeState::Linked(mut node) => {
+                if node.waker.as_ref().is_none_or(|w| !w.will_wake(cx.waker())) {
+                    node.waker = Some(cx.waker().clone());
+                }
+            }
+        }
+        Poll::Pending
+    }
+}
+
+impl NodeData<&List<Waiter>> for Waiter {
+    fn new_state_if_last_node_on_drop(
+        self: Pin<&mut Self>,
+        _list: &&List<Waiter>,
+        _list_data: &mut (),
+    ) {
+    }
+
+    fn on_drop<'list>(
+        self: Pin<&mut Self>,
+        list: &'list &List<Waiter>,
+        locked: Option<LockedList<'list, Self>>,
+        _state_updated_on_unlink: bool,
+    ) {
+        if self.notified {
+            WaitList::notify_locked(locked.unwrap_or_else(|| list.lock()));
+        }
+    }
+}
 ```
 
 See [examples](examples) for full implementations of `tokio::sync::Notify` and `tokio::sync::Semaphore` built with `aiq`, with fully identical API and behavior.
@@ -41,55 +133,62 @@ See [examples](examples) for full implementations of `tokio::sync::Notify` and `
 
 | Feature | Description |
 |---------|-------------|
-| `std` *(default)* | `std::sync`-based mutex and condvar parker; implies `alloc` |
-| `alloc` | Enables `Arc<Queue<T, S>>` as a `QueueRef` |
+| `std` *(default)* | `std::sync`-based mutex and condvar parker |
 | `atomic-wait` | Futex-based parker via the `atomic-wait` crate |
 | `lock_api` | `lock_api::RawMutex` trait implementation |
 | `parking_lot` | `parking_lot` mutex; implies `lock_api` |
-| `pthread` | Raw pthread mutex and condition variable, on Unix targets only; implies `alloc` |
+| `portable-atomic` | Atomics via the `portable-atomic` crate, for targets without native atomic support |
+| `pthread` | Raw pthread mutex and condition variable, on Unix targets only |
 
 Without any features enabled, the library falls back to spin-based mutex and parker.
 
 ## Performance
 
-Benchmark results for `tokio` benchmarks, run with both tokio native primitives and their `aiq` counterparts from [examples](examples) on an Apple M3:
+Results of the `tokio` benchmarks, run with both `tokio` native primitives and their `aiq` counterparts from [examples](examples) on an Intel i7-1065G7:
 
-*benchmarks prefixed by `contention`/`uncontented` measure `Semaphore` performance*
+*benchmarks prefixed by `contention`/`uncontented`[^2] measure `Semaphore` performance*
 
-| Benchmark | aiq | tokio | aiq speedup |
-|-----------|----:|------:|------------:|
-| `notify_one/10` | 160.12 µs | 104.80 µs | 0.65 |
-| `notify_one/50` | 90.61 µs | 132.19 µs | 1.46 |
-| `notify_one/100` | 83.83 µs | 136.12 µs | 1.62 |
-| `notify_one/200` | 84.63 µs | 128.59 µs | 1.52 |
-| `notify_one/500` | 84.88 µs | 121.12 µs | 1.43 |
-| | | | |
-| `notify_waiters/10` | 243.29 µs | 259.03 µs | 1.06 |
-| `notify_waiters/50` | 114.68 µs | 169.27 µs | 1.48 |
-| `notify_waiters/100` | 95.52 µs | 154.03 µs | 1.61 |
-| `notify_waiters/200` | 93.07 µs | 140.76 µs | 1.51 |
-| `notify_waiters/500` | 106.41 µs | 153.51 µs | 1.44 |
-| | | | |
-| `contention/concurrent_multi` | 6.95 µs | 6.94 µs | 1.00 |
-| `contention/concurrent_single` | 129.82 ns | 158.25 ns | 1.22 |
-| | | | |
-| `uncontented/concurrent_multi` | 6.97 µs | 7.00 µs | 1.00 |
-| `uncontented/concurrent_single` | 130.40 ns | 157.94 ns | 1.21 |
-| `uncontented/multi` | 52.47 ns | 92.17 ns | 1.76 |
-| | | | |
+| Benchmark                       |       aiq |     tokio | aiq speedup |
+|---------------------------------|----------:|----------:|------------:|
+| `notify_one/10`                 | 200.35 µs | 247.28 µs |        1.23 |
+| `notify_one/50`                 | 252.83 µs | 272.73 µs |        1.08 |
+| `notify_one/100`                | 245.82 µs | 276.25 µs |        1.12 |
+| `notify_one/200`                | 245.36 µs | 291.20 µs |        1.19 |
+| `notify_one/500`                | 245.54 µs | 281.86 µs |        1.15 |
+|                                 |           |           |             |
+| `notify_waiters/10`             | 245.75 µs | 410.82 µs |        1.67 |
+| `notify_waiters/50`             | 215.92 µs | 281.20 µs |        1.30 |
+| `notify_waiters/100`            | 210.31 µs | 259.56 µs |        1.23 |
+| `notify_waiters/200`            | 212.58 µs | 247.82 µs |        1.17 |
+| `notify_waiters/500`            | 355.55 µs | 254.90 µs |        0.72 |
+|                                 |           |           |             |
+| `contention/concurrent_multi`   |   7.90 µs |   8.53 µs |        1.08 |
+| `contention/concurrent_single`  | 500.41 ns | 679.58 ns |        1.36 |
+|                                 |           |           |             |
+| `uncontented/concurrent_multi`  |   9.02 µs |   9.09 µs |        1.01 |
+| `uncontented/concurrent_single` | 529.70 ns | 624.12 ns |        1.18 |
+| `uncontented/multi`             | 287.34 ns | 400.76 ns |        1.39 |
 
-`aiq`-based reimplementations seem to give a consistent speedup compared to tokio native ones.
+`aiq`-based reimplementations seem to give a consistent speedup compared to `tokio` native ones. The only exception is `notify_waiters/500`, and it can be explained by several factors:
+- The benchmark results are extremely noisy, ranging from 200 µs to 400 µs, so `aiq` can in fact perform better than `tokio` on some runs.
+- The scenario is not very realistic: all the threads are hammering the same cache line with CAS loops to requeue or notify in tight loops. The key point is that `aiq` doesn't use backoff in CAS loops, so they run in full-contention mode, while `tokio`'s native implementation serializes all operations. Adding exponential backoff to the `push_back` operation improves the result down to 150 µs.
+- CPU hyperthreading typically handles this kind of ultra-contended scenario badly. Pinning the process to 4 cores only, or reducing the number of worker threads to 3 in order to avoid hyperthreading also greatly improves the result. Combined with exponential backoff, time drops below 100 µs.
 
-Only `notify_one/10` gives a worse (and quite random) result, but it seems to be a side effect of the benchmark implementation itself. In fact, because `aiq` enqueuing operation is more parallelizable than tokio's mutex-protected one, waiter tasks have been measured to be 2x more often blocked on a pending future, resulting in the tokio worker thread being parked (because there are only 1-2 tasks per thread with only 10 waiter tasks).
+## Safety and testing
 
-## Testing
+Concurrent intrusive lists are one of the most unsafe[^3] concepts in Rust, so this crate uses unsafe code. It is tested with both [`miri`](https://github.com/rust-lang/miri/) and [`loom`](https://github.com/tokio-rs/loom) to ensure algorithm correctness and memory safety.
 
-Reimplementations of `tokio::sync::Notify` and `tokio::sync::Semaphore` are tested on the full tokio test suite with both [`miri`](https://github.com/rust-lang/miri/) and [`loom`](https://github.com/tokio-rs/loom).
+Reimplementations of `tokio::sync::Notify` and `tokio::sync::Semaphore` are also tested on the full tokio test suite (also with `miri` and `loom`).
+
+`List` exposes a 100% safe API, so `WaitList` and `tokio` reimplementations don't use unsafe code[^4].
 
 ## Acknowledgements
 
-`aiq::queue::Drain` algorithm reuses the idea originally introduced to tokio by [Tymoteusz Wiśniewski](https://github.com/satakuma) in [tokio-rs/tokio#5458](https://github.com/tokio-rs/tokio/pull/5458): make the draining atomic by moving the list nodes into a temporary circular list.
+The `aiq::list::Drain` algorithm reuses the idea originally introduced to `tokio` by [Tymoteusz Wiśniewski](https://github.com/satakuma) in [tokio-rs/tokio#5458](https://github.com/tokio-rs/tokio/pull/5458): make the draining atomic by moving the list nodes into a temporary circular list.
 
-A small improvement, motivated by API ergonomics, has been made: the circular chaining is deferred until the queue lock actually needs to be released mid-drain.
+A small improvement, motivated by API ergonomics, has been made: the circular chaining is deferred until the list lock actually needs to be released mid-drain.
 
-[^1]: `QueueRef` trait is actually unsafe to implement, but it comes with `queue_ref!` macro to do it without unsafe code.
+[^1]: In some rare cases, an inserting thread might need to unpark a remover thread, making insertion not strictly lock-free. It is however possible to switch the list to lazy node linking, making the node insertion fully lock-free.
+[^2]: The `uncontented` typo comes from the original `tokio` benchmark.
+[^3]: There is literally a [hack](https://rust-lang.github.io/rfcs/3467-unsafe-pinned.html) in the compiler to support them.
+[^4]: Except for the pin projection of `wait_list::wait::WaitUntil`, written directly to avoid depending on `pin-project-lite`.
