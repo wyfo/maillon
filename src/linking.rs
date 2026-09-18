@@ -185,9 +185,9 @@ impl<B: BackoffStrategy, P: Parker, PB: BoundedBackoffStrategy> PrivateLinking
                 let next = next.load(Acquire);
                 (next.addr() & PARKED_TAG == 0).then(|| unsafe { NonNull::new_unchecked(next) })
             };
-            abort_on_unwind(|| unsafe { parker.park_until(load_next) })
+            unsafe { parker.park_until(load_next) }
         }
-        wait_for_next::<Self, P, PB>(next, parker)
+        abort_on_unwind(|| wait_for_next::<Self, P, PB>(next, parker))
     }
     fn update_next(next: &Self::NextPtr, ptr: Option<NonNull<NodeLink<Self>>>) {
         next.store(ptr.as_ptr(), Relaxed);
