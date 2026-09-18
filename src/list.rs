@@ -177,12 +177,12 @@ impl<T, S: ListState, D, L: Linking, M: Mutex> List<T, S, D, L, M> {
                 Err(t) => tail = t,
             }
         };
-        let prev_next = match prev.addr() {
-            0 if f.is_some() => return Ok(unsafe { tail.state().unwrap_unchecked() }),
-            HEAD_MARKER => NonNull::from(&self.head),
-            _ => unsafe { NonNull::new_unchecked(ptr::addr_of!((*prev).next).cast_mut()) },
-        };
-        L::store_next(prev_next, link, &self.parker);
+        if f.is_some() && prev.is_null() {
+            return Ok(unsafe { tail.state().unwrap_unchecked() });
+        }
+        // `addr_of!((*prev).next)` can't be used with AtomicLazy as the previous node might have
+        // been concurrently dequeued.
+        L::store_next(prev, &self.head, link, &self.parker);
         node.set_linked(self);
         Err(true)
     }

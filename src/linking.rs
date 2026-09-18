@@ -52,7 +52,8 @@ mod private {
         /// on another axis is honoured on top of it.
         fn push_back_set_order(set_order: Ordering) -> Ordering;
         fn store_next(
-            prev_next: NonNull<Self::NextPtr>,
+            prev: *mut NodeLink<Self>,
+            head: &Self::NextPtr,
             node: NonNull<NodeLink<Self>>,
             parker: &Self::Parker,
         );
@@ -121,15 +122,22 @@ impl<B: BackoffStrategy, P: Parker, PB: BoundedBackoffStrategy> PrivateLinking
             _ => SeqCst, // `Ordering` is `#[non_exhaustive]`
         }
     }
+    #[allow(clippy::incompatible_msrv, unstable_name_collisions)]
     fn store_next(
-        prev_next: NonNull<Self::NextPtr>,
+        prev: *mut NodeLink<Self>,
+        head: &Self::NextPtr,
         node: NonNull<NodeLink<Self>>,
         parker: &Self::Parker,
     ) {
-        if P::NEVER_BLOCKS {
-            unsafe { prev_next.as_ref() }.store(node.as_ptr(), Release);
+        let prev_next = if prev.addr() == HEAD_MARKER {
+            head
         } else {
-            let tagged_parked_state = unsafe { prev_next.as_ref().swap(node.as_ptr(), Release) };
+            unsafe { &(*prev).next }
+        };
+        if P::NEVER_BLOCKS {
+            prev_next.store(node.as_ptr(), Release);
+        } else {
+            let tagged_parked_state = prev_next.swap(node.as_ptr(), Release);
             if !tagged_parked_state.is_null() {
                 #[cold]
                 #[inline(never)]
@@ -231,8 +239,10 @@ impl<B: BackoffStrategy> PrivateLinking for AtomicLazy<B> {
             _ => SeqCst, // `Ordering` is `#[non_exhaustive]`
         }
     }
+    // TODO `prev` may be freed: no projection
     fn store_next(
-        _prev_next: NonNull<Self::NextPtr>,
+        _prev: *mut NodeLink<Self>,
+        _head: &Self::NextPtr,
         _node: NonNull<NodeLink<Self>>,
         _parker: &Self::Parker,
     ) {
@@ -334,12 +344,18 @@ impl PrivateLinking for Serialized {
     fn push_back_set_order(set_order: Ordering) -> Ordering {
         set_order
     }
+    #[allow(clippy::incompatible_msrv, unstable_name_collisions)]
     fn store_next(
-        prev_next: NonNull<Self::NextPtr>,
+        prev: *mut NodeLink<Self>,
+        head: &Self::NextPtr,
         node: NonNull<NodeLink<Self>>,
         _parker: &Self::Parker,
     ) {
-        unsafe { prev_next.as_ref() }.set(Some(node));
+        if prev.addr() == HEAD_MARKER {
+            head.set(Some(node));
+        } else {
+            unsafe { (*prev).next.set(Some(node)) };
+        }
     }
     fn load_next(next: &Self::NextPtr) -> Option<NonNull<NodeLink<Self>>> {
         next.get()
