@@ -193,7 +193,7 @@ macro_rules! loom_skip_issue_424 {
         use std::any::TypeId;
         #[cfg(loom)]
         if TypeId::of::<$sync>() == TypeId::of::<Synchronized>()
-            && TypeId::of::<$linking>() == TypeId::of::<maillon::list::Serialized>()
+            && TypeId::of::<$linking>() == TypeId::of::<maillon::linking::Serialized>()
         {
             return;
         }
