@@ -432,7 +432,6 @@ fn close<S: Synchronization, L: Linking>(
         assert_pending!(wait);
         list.close();
         assert!(list.is_closed());
-        assert!(list.is_empty());
         assert!(assert_ready!(wait).is_err());
         assert!(assert_ready!(list.wait().boxed()).is_err());
     });

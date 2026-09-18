@@ -5,8 +5,6 @@ pub(crate) use core::cell;
 pub(crate) use loom::{cell, sync};
 #[cfg(not(loom))]
 pub(crate) mod sync {
-    #[cfg(feature = "std")]
-    extern crate std;
     #[cfg(not(feature = "portable-atomic"))]
     pub(crate) use core::sync::atomic;
     #[cfg(feature = "std")]

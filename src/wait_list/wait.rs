@@ -1,3 +1,5 @@
+//! The futures returned by [`WaitList::wait`](crate::WaitList::wait) and
+//! [`WaitList::wait_until`](crate::WaitList::wait_until).
 use core::{
     future::Future,
     pin::Pin,
@@ -20,6 +22,7 @@ use crate::{
 };
 
 node_wrapper! {
+    /// Future returned by [`WaitList::wait`](crate::WaitList::wait).
     pub struct Wait<
         'a,
         N: Unpin = (),
@@ -103,14 +106,14 @@ impl<N: Unpin, S: Synchronization, L: Linking, M: Mutex, const WAKER_BATCH_SIZE:
 
 /// Wake condition returned by the closure passed to [`WaitList::wait_until`].
 ///
-/// Typically implemented by `bool` and `Option<T>`. When met, it provides an output that can be
-/// returned by `wait_until`.
+/// Implemented for `bool` (with `()` output) and `Option<T>` (with `T` output). When satisfied, it
+/// provides an output that is returned by `wait_until`.
 ///
 /// [`WaitList::wait_until`]: crate::WaitList::wait_until
 pub trait WakeCondition {
-    /// Wake condition output when met.
+    /// Wake condition output when satisfied.
     type Output;
-    /// Try getting the wake condition output, thereby checking if it is met.
+    /// Returns the output if the wake condition is satisfied.
     fn try_into_output(self) -> Option<Self::Output>;
 }
 
@@ -128,6 +131,7 @@ impl<T> WakeCondition for Option<T> {
     }
 }
 
+/// Future returned by [`WaitList::wait_until`](crate::WaitList::wait_until).
 pub struct WaitUntil<
     'a,
     F,

@@ -2,6 +2,9 @@
 #![no_std]
 #![cfg_attr(nightly, feature(unsafe_pinned))]
 
+#[cfg(feature = "std")]
+extern crate std;
+
 pub mod linking;
 pub mod list;
 mod loom;

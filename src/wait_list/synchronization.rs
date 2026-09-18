@@ -8,7 +8,7 @@ use core::fmt::Debug;
 /// `WaitList` uses the `store X; load Y || store Y; load X` pattern, where `X` is the wake
 /// condition, and `Y` the waker registration state (`load Y` is done in `notify_*` while
 /// `store Y` corresponds to [`wait`]). There are four main ways to make this pattern work, i.e.,
-/// either `load Y` sees a waker registered, or `load X` sees the wake condition met:
+/// either `load Y` sees a waker registered, or `load X` sees the wake condition satisfied:
 /// - every operation uses `SeqCst`
 /// - insert `SeqCst` fences between stores and loads
 /// - use RMW operations for `X` store + load, with `Acquire` ordering for store and `Release`
@@ -99,10 +99,10 @@ impl private::PrivateSynchronization for Sequential {
     const MODE: SyncMode = SyncMode::Sequential;
 }
 
-/// `WaitList` relies on external synchronization between `notify_*` and [`wait`]
+/// `WaitList` relies on external synchronization between `notify_*` and [`wait`].
 ///
 /// As described in [`Synchronization`] documentation, it requires either:
-/// - `SeqCst` fences to be inserted before `notify_*` and after `wait`
+/// - `SeqCst` fences to be inserted before `notify_*` and after the waker registration
 /// - the wake condition to be stored with an `Acquire` RMW operation and to be loaded
 ///   with a `Release` RMW operation.
 ///

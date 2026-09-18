@@ -1,4 +1,6 @@
+//! An asynchronous wait list with customizable synchronization, built on top of [`List`].
 use core::{
+    fmt,
     marker::PhantomData,
     pin::Pin,
     sync::atomic::Ordering::{Acquire, Release, SeqCst},
@@ -24,6 +26,7 @@ use crate::{
 pub mod synchronization;
 pub mod wait;
 
+/// Default `WAKER_BATCH_SIZE` of [`WaitList`].
 pub const DEFAULT_WAKER_BATCH_SIZE: usize = 32;
 
 const STATE_OPEN: usize = 0;
@@ -43,9 +46,19 @@ impl<N> Default for Waiter<N> {
     }
 }
 
+/// Error returned by [`Wait`] and [`WaitUntil`] futures when the wait list is closed.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClosedError;
+
+impl fmt::Display for ClosedError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("wait list is closed")
+    }
+}
+
+#[cfg(feature = "std")]
+impl std::error::Error for ClosedError {}
 
 enum Notification<N> {
     One(N),
@@ -63,6 +76,50 @@ impl<N> Notification<N> {
     }
 }
 
+/// An asynchronous wait list.
+///
+/// Tasks register through [`wait`](Self::wait) or [`wait_until`](Self::wait_until), and are woken
+/// by `notify_*` methods, in registration order (except for [`notify_last`](Self::notify_last)).
+/// Each woken waiter receives a notification of type `N`, `()` by default. Notifications sent by
+/// `notify_one`/`notify_last`/`notify_many` are passed on to another waiter if the notified one
+/// is dropped before consuming it, while `notify_all` ones are lost.
+///
+/// `notify_*` methods avoid locking the list when no waiter is registered, which is the case they
+/// are optimized for.
+///
+/// # Synchronization
+///
+/// `WaitList` should be paired with a wake condition, satisfied **before** notifying, and checked
+/// **after** registering the task's waker, to not miss a concurrent notification. The generic
+/// parameter `S` determines the synchronization guarantees between notification and waker
+/// registration, see [`Synchronization`].
+///
+/// # Closing
+///
+/// [`close`](Self::close) wakes all the waiters, and makes current and future waits complete with
+/// [`ClosedError`]. A closed wait list cannot be reopened.
+///
+/// # Waker batching
+///
+/// When several waiters are woken at once, their wakers are woken outside of the list lock, in
+/// batches of `WAKER_BATCH_SIZE`; the lock is released between batches.
+///
+/// # Examples
+///
+/// ```
+/// use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+///
+/// use maillon::WaitList;
+///
+/// async fn wait_for_flag(flag: &AtomicBool, wait_list: &WaitList) {
+///     wait_list.wait_until(|_| flag.load(Relaxed)).await.unwrap();
+/// }
+///
+/// fn set_flag(flag: &AtomicBool, wait_list: &WaitList) {
+///     flag.store(true, Relaxed);
+///     wait_list.notify_all();
+/// }
+/// ```
 pub struct WaitList<
     N: Unpin = (),
     S: Synchronization = Synchronized,
@@ -85,6 +142,7 @@ impl<N: Unpin, S: Synchronization, L: Linking, M: Mutex, const WAKER_BATCH_SIZE:
 impl<N: Unpin, S: Synchronization, L: Linking, M: Mutex, const WAKER_BATCH_SIZE: usize>
     WaitList<N, S, L, M, WAKER_BATCH_SIZE>
 {
+    /// Creates an empty wait list.
     #[cfg_attr(loom, const_fn::const_fn(cfg(false)))]
     #[inline]
     pub const fn new() -> Self {
@@ -94,8 +152,8 @@ impl<N: Unpin, S: Synchronization, L: Linking, M: Mutex, const WAKER_BATCH_SIZE:
         }
     }
 
-    #[inline]
-    pub fn is_empty(&self) -> bool {
+    #[inline(always)]
+    fn is_empty(&self) -> bool {
         match S::MODE {
             SyncMode::Synchronized => self.list.is_empty_rmw(Release),
             SyncMode::Sequential => self.list.is_empty(SeqCst),
@@ -103,6 +161,7 @@ impl<N: Unpin, S: Synchronization, L: Linking, M: Mutex, const WAKER_BATCH_SIZE:
         }
     }
 
+    /// Returns `true` if the wait list is closed.
     #[allow(clippy::incompatible_msrv)]
     pub fn is_closed(&self) -> bool {
         self.list
@@ -110,6 +169,10 @@ impl<N: Unpin, S: Synchronization, L: Linking, M: Mutex, const WAKER_BATCH_SIZE:
             .is_some_and(|s| s != STATE_OPEN)
     }
 
+    /// Closes the wait list, waking all the waiters.
+    ///
+    /// Current and future [`wait`](Self::wait)/[`wait_until`](Self::wait_until) futures complete
+    /// with [`ClosedError`], unless `wait_until`'s wake condition is already satisfied.
     pub fn close(&self) {
         self.list.update_state_or_lock_with(
             Release,
@@ -136,6 +199,10 @@ impl<N: Unpin, S: Synchronization, L: Linking, M: Mutex, const WAKER_BATCH_SIZE:
             });
     }
 
+    /// Notifies the first registered waiter with `notification()`.
+    ///
+    /// `notification` is only called if there is a waiter. If the waiter is dropped before
+    /// consuming the notification, it is passed on to the first waiter registered at that time.
     #[inline]
     pub fn notify_one_with<F: FnOnce() -> N>(&self, notification: F) {
         if !self.is_empty() {
@@ -143,6 +210,11 @@ impl<N: Unpin, S: Synchronization, L: Linking, M: Mutex, const WAKER_BATCH_SIZE:
         }
     }
 
+    /// Notifies the last registered waiter with `notification()`.
+    ///
+    /// `notification` is only called if there is a waiter. If the waiter is dropped before
+    /// consuming the notification, it is passed on to the last waiter registered at that time,
+    /// which may have been registered after the dropped one.
     #[inline]
     pub fn notify_last_with<F: FnOnce() -> N>(&self, notification: F) {
         if !self.is_empty() {
@@ -172,6 +244,10 @@ impl<N: Unpin, S: Synchronization, L: Linking, M: Mutex, const WAKER_BATCH_SIZE:
         }
     }
 
+    /// Notifies up to `count` waiters, in registration order, each one with `notification()`.
+    ///
+    /// `notification` is called once per notified waiter. If a waiter is dropped before
+    /// consuming its notification, it is passed on to the first waiter registered at that time.
     #[inline]
     pub fn notify_many_with<F: FnMut() -> N>(&self, count: usize, notification: F) {
         if !self.is_empty() {
@@ -208,6 +284,10 @@ impl<N: Unpin, S: Synchronization, L: Linking, M: Mutex, const WAKER_BATCH_SIZE:
         wakers.wake_all();
     }
 
+    /// Notifies all the registered waiters, each one with `notification()`.
+    ///
+    /// `notification` is called once per waiter. Contrary to the other `notify_*` methods, the
+    /// notification is lost if the waiter is dropped before consuming it.
     #[inline]
     pub fn notify_all_with<F: FnMut() -> N>(&self, notification: F) {
         if !self.is_empty() {
@@ -224,6 +304,15 @@ impl<N: Unpin, S: Synchronization, L: Linking, M: Mutex, const WAKER_BATCH_SIZE:
         });
     }
 
+    /// Waits for a notification.
+    ///
+    /// The returned future registers the task waker in the wait list at its first poll, and
+    /// completes with the notification once notified. If the wait list is closed, or gets closed
+    /// while waiting, it completes with [`ClosedError`].
+    ///
+    /// Dropping the future unregisters its waker. If it has been notified by
+    /// `notify_one`/`notify_last`/`notify_many` but not polled to completion, the notification is
+    /// passed on to another waiter.
     #[inline]
     pub fn wait(&self) -> Wait<'_, N, S, L, M, WAKER_BATCH_SIZE> {
         Wait(Node::new(WaitListRef(self)))
@@ -243,26 +332,52 @@ impl<N: Unpin, S: Synchronization, L: Linking, M: Mutex, const WAKER_BATCH_SIZE:
 impl<S: Synchronization, L: Linking, M: Mutex, const WAKER_BATCH_SIZE: usize>
     WaitList<(), S, L, M, WAKER_BATCH_SIZE>
 {
+    /// Notifies the first registered waiter.
+    ///
+    /// See [`notify_one_with`](Self::notify_one_with).
     #[inline]
     pub fn notify_one(&self) {
         self.notify_one_with(|| ());
     }
 
+    /// Notifies the last registered waiter.
+    ///
+    /// See [`notify_last_with`](Self::notify_last_with).
     #[inline]
     pub fn notify_last(&self) {
         self.notify_last_with(|| ());
     }
 
+    /// Notifies up to `count` waiters, in registration order.
+    ///
+    /// See [`notify_many_with`](Self::notify_many_with).
     #[inline]
     pub fn notify_many(&self, count: usize) {
         self.notify_many_with(count, || ());
     }
 
+    /// Notifies all the registered waiters.
+    ///
+    /// See [`notify_all_with`](Self::notify_all_with).
     #[inline]
     pub fn notify_all(&self) {
         self.notify_all_with(|| ());
     }
 
+    /// Waits until the given wake condition is satisfied.
+    ///
+    /// At each poll of the returned future, the wake condition is checked; if it is not
+    /// satisfied, the task waker is registered in the wait list, and the condition is checked
+    /// again, so that no notification can be missed. The closure is passed a boolean telling
+    /// whether the waker is already registered when it is called; it can be used to relax the
+    /// first check when a non-default [`Synchronization`] is used.
+    ///
+    /// Notifier threads should call `notify_*` after the wake condition is satisfied.
+    ///
+    /// The future completes with the wake condition output as soon as it is satisfied, and with
+    /// [`ClosedError`] if the wait list is closed while the condition is not satisfied.
+    /// Notifications alone do not complete it: a woken future checks the condition again, and
+    /// registers its waker again if it is still unsatisfied.
     #[inline]
     pub fn wait_until<F: FnMut(bool) -> W, W: WakeCondition>(
         &self,
