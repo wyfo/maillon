@@ -1,16 +1,19 @@
-use core::hint;
+use core::marker::PhantomData;
 
 use crate::{
+    backoff::{BackoffStrategy, SpinBackoff},
     loom::sync::atomic::{AtomicBool, Ordering::*},
     sync::{mutex::Mutex, parker::Parker},
 };
 
 /// A spinning [`Mutex`] implementation.
-pub struct SpinMutex(AtomicBool);
+///
+/// While the mutex is locked by another thread, the lock spins using the backoff strategy `B`.
+pub struct SpinMutex<B: BackoffStrategy = SpinBackoff>(AtomicBool, PhantomData<B>);
 
-unsafe impl Mutex for SpinMutex {
+unsafe impl<B: BackoffStrategy> Mutex for SpinMutex<B> {
     #[cfg(not(loom))]
-    const INIT: Self = Self(AtomicBool::new(false));
+    const INIT: Self = Self(AtomicBool::new(false), PhantomData);
     #[cfg(loom)]
     const INIT: Self = unimplemented!();
     #[cfg(loom)]
@@ -18,7 +21,7 @@ unsafe impl Mutex for SpinMutex {
     where
         Self: Sized,
     {
-        Self(AtomicBool::new(false))
+        Self(AtomicBool::new(false), PhantomData)
     }
     type Guard<'a>
         = ()
@@ -27,9 +30,7 @@ unsafe impl Mutex for SpinMutex {
     #[inline]
     fn lock(&self) -> Self::Guard<'_> {
         while self.0.swap(true, Acquire) {
-            while self.0.load(Relaxed) {
-                hint::spin_loop();
-            }
+            B::default().backoff_until(|| !self.0.load(Relaxed));
         }
     }
     #[inline]
@@ -39,19 +40,17 @@ unsafe impl Mutex for SpinMutex {
 }
 
 /// A spinning [`Parker`] implementation.
-pub struct SpinParker;
+///
+/// The thread is never parked: `park_until` spins using the backoff strategy `B` until the
+/// notification is received.
+pub struct SpinParker<B: BackoffStrategy = SpinBackoff>(PhantomData<B>);
 
-impl Parker for SpinParker {
+impl<B: BackoffStrategy> Parker for SpinParker<B> {
     const NEVER_BLOCKS: bool = true;
-    const INIT: Self = Self;
+    const INIT: Self = Self(PhantomData);
     #[inline]
-    unsafe fn park_until<T>(&self, mut notified: impl FnMut() -> Option<T>) -> T {
-        loop {
-            hint::spin_loop();
-            if let Some(res) = notified() {
-                return res;
-            }
-        }
+    unsafe fn park_until<T>(&self, notified: impl FnMut() -> Option<T>) -> T {
+        B::default().backoff_until(notified)
     }
     #[inline]
     unsafe fn unpark(&self, _parked_state: *mut ()) {}
