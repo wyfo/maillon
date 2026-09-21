@@ -8,8 +8,8 @@ A concurrent intrusive list with lock-free insertion, mainly for building synchr
 
 - 100% safe API
 - `#![no_std]`, no allocation
-- Lock-free[^1] insertion: multiple nodes can be inserted concurrently while another is being removed; removal requires locking
 - Atomic emptiness check to avoid acquiring the mutex if the list is empty
+- Lock-free[^1] insertion: multiple nodes can be inserted concurrently while another is being removed; removal requires locking
 - Optional atomic state embedded in the list when empty (to carry a semaphore counter, a closed flag, etc.)
 - `WaitList`, a high-level asynchronous wait list with customizable synchronization built on top of the low-level `List`
 
@@ -22,17 +22,25 @@ use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 
 use maillon::WaitList;
 
-async fn wait_for_flag(flag: &AtomicBool, wait_list: &WaitList) {
-    wait_list.wait_until(|_| flag.load(Relaxed)).await.unwrap();
+#[derive(Default)]
+pub struct Event {
+    done: AtomicBool,
+    wait_list: WaitList,
 }
 
-fn set_flag(flag: &AtomicBool, wait_list: &WaitList) {
-    flag.store(true, Relaxed);
-    wait_list.notify_all();
+impl Event {
+    pub async fn wait(&self) {
+        let _ = self.wait_list.wait_until(|_| self.done.load(Relaxed)).await;
+    }
+
+    pub fn set(&self) {
+        self.done.store(true, Relaxed);
+        self.wait_list.notify_all();
+    }
 }
 ```
 
-`List` is the building block: nodes are pinned, carry user data implementing `NodeData`, and are pushed to the back without locking, while every other operation goes through `List::lock`. Here is a minimal wait list, supporting only `notify_one`:
+`List` is the building block: `Node`s are pinned, carry user data implementing `NodeData`, and are pushed to the back without locking, while every other operation goes through `List::lock`. Here is a minimal wait list, supporting only `notify_one`:
 
 ```rust
 use std::{
@@ -206,8 +214,7 @@ Licensed under either of
 
 at your option.
 
-[^1]: In some rare cases, an inserting thread might need to unpark a remover thread, making insertion not strictly lock-free. It is also possible to switch the list to lazy node linking, making the node insertion fully lock-free. A third option is serialized linking, where insertion requires locking but can then happen at any position
-through a cursor, not only at the back.
+[^1]: In some rare cases, an inserting thread might need to unpark a remover thread, making insertion not strictly lock-free. It is also possible to switch the list to lazy node linking, making the node insertion fully lock-free. A third option is serialized linking, where insertion requires locking but can then happen at any position through a cursor, not only at the back.
 [^2]: The `uncontented` typo comes from the original `tokio` benchmark.
 [^3]: There is literally a [hack](https://rust-lang.github.io/rfcs/3467-unsafe-pinned.html) in the compiler to support them.
 [^4]: Except for the pin projection of `wait_list::wait::WaitUntil`, written directly to avoid depending on `pin-project-lite`.
