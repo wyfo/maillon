@@ -702,6 +702,8 @@ pub trait ListEnd<
 {
     fn unlink<F: FnOnce(Pin<&mut T>, &mut D) -> S>(self, new_state_if_last_node: F)
     -> Option<Self>;
+
+    fn into_cursor(self) -> ListCursor<'locked, 'a, T, S, D, L, M>;
 }
 
 pub struct ListFront<
@@ -744,6 +746,11 @@ impl<'locked, 'a, T, S: ListState, D, L: Linking, M: Mutex> ListEnd<'locked, 'a,
             node: next?,
             locked: self.locked,
         })
+    }
+
+    #[inline]
+    fn into_cursor(self) -> ListCursor<'locked, 'a, T, S, D, L, M> {
+        ListCursor::new(Some(self.node), self.locked)
     }
 }
 
@@ -809,6 +816,11 @@ impl<'locked, 'a, T, S: ListState, D, L: Linking, M: Mutex> ListEnd<'locked, 'a,
             node: tail?,
             locked: self.locked,
         })
+    }
+
+    #[inline]
+    fn into_cursor(self) -> ListCursor<'locked, 'a, T, S, D, L, M> {
+        ListCursor::new(Some(self.node), self.locked)
     }
 }
 
