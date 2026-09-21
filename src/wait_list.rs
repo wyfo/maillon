@@ -78,31 +78,44 @@ impl<N> Notification<N> {
 
 /// An asynchronous wait list.
 ///
-/// Tasks register through [`wait`](Self::wait) or [`wait_until`](Self::wait_until), and are woken
-/// by `notify_*` methods, in registration order (except for [`notify_last`](Self::notify_last)).
-/// Each woken waiter receives a notification of type `N`, `()` by default. Notifications sent by
-/// `notify_one`/`notify_last`/`notify_many` are passed on to another waiter if the notified one
-/// is dropped before consuming it, while `notify_all` ones are lost.
+/// Tasks register through [`wait`] or [`wait_until`], and are woken by `notify_*` methods.
 ///
-/// `notify_*` methods avoid locking the list when no waiter is registered, which is the case they
-/// are optimized for.
+/// `WaitList` should be paired with a wake condition, satisfied **before** notifying the tasks, and
+/// checked **after** registering the tasks, i.e. polling the `wait`/`wait_until` futures, to not
+/// miss a concurrent notification that happened before.
+///
+/// `WaitList` can be closed, in which case all waiters complete with [`ClosedError`].
+///
+/// # Notification
+///
+/// Each woken waiter receives a notification of type `N` (`()` by default). Notifications sent by
+/// [`notify_one`]/[`notify_last`]/[`notify_many`] are passed on to another waiter if the notified
+/// one is dropped, i.e. canceled, before consuming it, while [`notify_all`] notifications are lost.
 ///
 /// # Synchronization
 ///
-/// `WaitList` should be paired with a wake condition, satisfied **before** notifying, and checked
-/// **after** registering the task's waker, to not miss a concurrent notification. The generic
-/// parameter `S` determines the synchronization guarantees between notification and waker
-/// registration, see [`Synchronization`].
+/// `WaitList` has a generic `S` parameter which determines the synchronization guarantees. See
+/// [`Synchronization`] documentation for more details about its variants.
 ///
-/// # Closing
+/// With the default [`Synchronized`], polling `wait`/`wait_until` futures "acquires" all memory
+/// "released" by calls to `notify_*` before the polling. Later calls to `notify_*` will wake the
+/// registered tasks.
 ///
-/// [`close`](Self::close) wakes all the waiters, and makes current and future waits complete with
-/// [`ClosedError`]. A closed wait list cannot be reopened.
+/// # Linking and locking
+///
+/// `WaitList` is built on [`List`] and inherits its [`Linking`] and [`Mutex`] parameters.
+///
+/// The mutex is used to wake waiters (and to register them with [`Serialized`] linking), but
+/// calling `notify_*` will not acquire the mutex if there is no registered waiter.
 ///
 /// # Waker batching
 ///
-/// When several waiters are woken at once, their wakers are woken outside of the list lock, in
-/// batches of `WAKER_BATCH_SIZE`; the lock is released between batches.
+/// Waiters' wakers are always woken after releasing the list lock. With `notify_all`/`notify_many`,
+/// wakers are first accumulated in batches of `WAKER_BATCH_SIZE`, and the lock is temporarily
+/// released to wake them.
+///
+/// `notify_all` is atomic: if a new waiter is registered while `notify_all` is ongoing, it will
+/// not be notified.
 ///
 /// # Examples
 ///
@@ -111,15 +124,31 @@ impl<N> Notification<N> {
 ///
 /// use maillon::WaitList;
 ///
-/// async fn wait_for_flag(flag: &AtomicBool, wait_list: &WaitList) {
-///     wait_list.wait_until(|_| flag.load(Relaxed)).await.unwrap();
+/// #[derive(Default)]
+/// pub struct Event {
+///     done: AtomicBool,
+///     wait_list: WaitList,
 /// }
 ///
-/// fn set_flag(flag: &AtomicBool, wait_list: &WaitList) {
-///     flag.store(true, Relaxed);
-///     wait_list.notify_all();
+/// impl Event {
+///     pub async fn wait(&self) {
+///         let _ = self.wait_list.wait_until(|_| self.done.load(Relaxed)).await;
+///     }
+///
+///     pub fn set(&self) {
+///         self.done.store(true, Relaxed);
+///         self.wait_list.notify_all();
+///     }
 /// }
 /// ```
+///
+/// [`wait`]: Self::wait
+/// [`wait_until`]: Self::wait_until
+/// [`notify_one`]: Self::notify_one
+/// [`notify_last`]: Self::notify_last
+/// [`notify_many`]: Self::notify_many
+/// [`notify_all`]: Self::notify_all
+/// [`Serialized`]: crate::linking::Serialized
 pub struct WaitList<
     N: Unpin = (),
     S: Synchronization = Synchronized,
