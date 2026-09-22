@@ -13,7 +13,7 @@ use crate::{
     List, ListRef, Node, NodeData,
     linking::{AtomicEager, Linking},
     list::{GetBack, GetFront, ListEnd, ListGetEnd, LockedList},
-    loom::sync::atomic::Ordering::Relaxed,
+    loom::sync::atomic::{Ordering::Relaxed, fence},
     node::NodeRef,
     sync::mutex::{DefaultMutex, Mutex},
     wait_list::{
@@ -127,9 +127,7 @@ impl Notification for () {
 /// `WaitList` has a generic `S` parameter which determines the synchronization guarantees. See
 /// [`Synchronization`] documentation for more details about its variants.
 ///
-/// With the default [`Synchronized`], polling `wait`/`wait_until` futures "acquires" all memory
-/// "released" by calls to `notify_*` before the polling. Later calls to `notify_*` will wake the
-/// registered tasks.
+/// With the default [`Synchronized`], the wake condition can be accessed with `Relaxed` ordering.
 ///
 /// # Linking and locking
 ///
@@ -212,11 +210,13 @@ impl<N: Notification, S: Synchronization, L: Linking, M: Mutex, const WAKER_BATC
 
     #[inline(always)]
     fn is_empty(&self) -> bool {
-        match S::MODE {
-            SyncMode::Synchronized => self.list.is_empty_rmw(Release),
-            SyncMode::Sequential => self.list.is_empty(SeqCst),
-            SyncMode::Unsynchronized => self.list.is_empty(Relaxed),
+        if S::SYNC {
+            fence(SeqCst);
         }
+        self.list.is_empty(match S::MODE {
+            SyncMode::Sequential => SeqCst,
+            _ => Relaxed,
+        })
     }
 
     /// Returns `true` if the wait list is closed.

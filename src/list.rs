@@ -115,12 +115,6 @@ impl<T, S: ListState, D, L: Linking, M: Mutex> List<T, S, D, L, M> {
     }
 
     #[inline]
-    #[allow(clippy::incompatible_msrv, unstable_name_collisions)]
-    pub fn is_empty_rmw(&self, order: Ordering) -> bool {
-        self.tail.fetch_byte_add(0, order).ptr().is_none()
-    }
-
-    #[inline]
     pub fn lock(&self) -> LockedList<'_, T, S, D, L, M> {
         LockedList {
             list: self,
@@ -206,12 +200,6 @@ impl<T, D, L: Linking, M: Mutex> List<T, usize, D, L, M> {
     #[inline]
     pub fn load_state(&self, order: Ordering) -> Option<usize> {
         self.tail.load(order).state()
-    }
-
-    #[inline]
-    #[allow(clippy::incompatible_msrv, unstable_name_collisions)]
-    pub fn load_state_rmw(&self, order: Ordering) -> Option<usize> {
-        self.tail.fetch_byte_add(0, order).state()
     }
 
     #[inline]
@@ -424,11 +412,6 @@ impl<'a, T, S: ListState, D, L: Linking, M: Mutex> LockedList<'a, T, S, D, L, M>
         self.list.is_empty(order)
     }
 
-    #[inline]
-    pub fn is_empty_rmw(&self, order: Ordering) -> bool {
-        self.list.is_empty_rmw(order)
-    }
-
     /// [`Linking::get_next`] with the list's head slot and parker filled in.
     #[inline(always)]
     fn get_next(
@@ -629,11 +612,6 @@ impl<'a, T, D, L: Linking, M: Mutex> LockedList<'a, T, usize, D, L, M> {
     #[inline]
     pub fn load_state(&self, order: Ordering) -> Option<usize> {
         self.list.load_state(order)
-    }
-
-    #[inline]
-    pub fn load_state_rmw(&self, order: Ordering) -> Option<usize> {
-        self.list.load_state_rmw(order)
     }
 
     #[inline]

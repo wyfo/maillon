@@ -51,7 +51,10 @@
 //!     future::Future,
 //!     mem,
 //!     pin::Pin,
-//!     sync::atomic::Ordering::{Acquire, Release},
+//!     sync::atomic::{
+//!         Ordering::{Relaxed, SeqCst},
+//!         fence,
+//!     },
 //!     task::{Context, Poll, Waker},
 //! };
 //!
@@ -70,7 +73,8 @@
 //!
 //! impl WaitList {
 //!     pub fn notify_one(&self) {
-//!         if !self.list.is_empty_rmw(Release) {
+//!         fence(SeqCst);
+//!         if !self.list.is_empty(Relaxed) {
 //!             Self::notify_one_cold(&self.list);
 //!         }
 //!     }
@@ -112,7 +116,8 @@
 //!                     return Poll::Ready(());
 //!                 }
 //!                 node.waker = Some(cx.waker().clone());
-//!                 node.push_back(Acquire);
+//!                 node.push_back(Relaxed);
+//!                 fence(SeqCst);
 //!             }
 //!             NodeState::Linked(mut node) => {
 //!                 if node.waker.as_ref().is_none_or(|w| !w.will_wake(cx.waker())) {

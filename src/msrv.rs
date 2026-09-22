@@ -2,7 +2,6 @@
 // TODO 1.76: Result::inspect, ptr::from_ref, ptr::from_mut
 // TODO 1.82: Option::is_none_or
 // TODO 1.84: strict provenance
-// TODO 1.91: AtomicPtr::fetch_byte_add (loom.rs)
 #![allow(clippy::incompatible_msrv, unstable_name_collisions)]
 
 use core::{num::NonZeroUsize, ptr::NonNull};

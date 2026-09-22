@@ -213,18 +213,34 @@ macro_rules! loom_skip_sequential {
     };
 }
 
-// https://github.com/tokio-rs/loom/issues/424
-macro_rules! loom_skip_issue_424 {
-    ($sync:ty, $linking:ty) => {
-        #[cfg(loom)]
-        use std::any::TypeId;
-        #[cfg(loom)]
-        if TypeId::of::<$sync>() == TypeId::of::<Synchronized>()
-            && TypeId::of::<$linking>() == TypeId::of::<maillon::linking::Serialized>()
-        {
-            return;
-        }
-    };
+#[rstest]
+fn no_missed_wakeup<S: Synchronization, L: Linking>(
+    #[values(SYNC, SEQ, UNSYNC, UNSYNC_RMW)] sync: SyncMode<S>,
+    #[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>,
+    #[values(NotifyMode::One, NotifyMode::Last, NotifyMode::All)] notify_mode: NotifyMode,
+) where
+    SyncMode<S>: WakeConditionAccess,
+{
+    loom_skip_sequential!(S);
+    model(move || {
+        let list = WaitList::<(), S, L>::new();
+        let wake_condition = AtomicUsize::new(0);
+        let wake_condition_loaded = AtomicUsize::new(0);
+        let mut wait = list.wait().boxed();
+        thread::scope(|s| {
+            s.spawn(|| {
+                sync.set(&wake_condition, 1);
+                list.notify(notify_mode);
+            });
+            s.spawn(|| {
+                assert_pending!(wait);
+                wake_condition_loaded.store(sync.get(&wake_condition, true), Relaxed);
+            });
+        });
+        let poll_res = wait.as_mut().poll(&mut Context::from_waker(Waker::noop()));
+        // if the waiter didn't see the wake condition, then it must have been notified
+        assert!(wake_condition_loaded.load(Relaxed) == 1 || poll_res.is_ready());
+    });
 }
 
 #[rstest]
@@ -237,7 +253,6 @@ fn wait_until<S: Synchronization, L: Linking>(
     SyncMode<S>: WakeConditionAccess,
 {
     loom_skip_sequential!(S);
-    loom_skip_issue_424!(S, L);
     model(move || {
         let list = WaitList::<(), S, L>::new();
         let wake_condition = AtomicUsize::new(0);
@@ -597,7 +612,6 @@ fn notify_all_push_during_drain<S: Synchronization, L: Linking>(
     #[values(SYNC, SEQ, UNSYNC)] _sync: SyncMode<S>,
     #[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>,
 ) {
-    loom_skip_issue_424!(S, L);
     model(|| {
         let list = WaitList::<(), S, L>::new();
         let mut wait = list.wait().boxed();

@@ -17,8 +17,6 @@ pub(crate) mod sync {
 pub(crate) trait AtomicPtrExt<T> {
     fn load_mut(&mut self) -> *mut T;
     fn store_mut(&mut self, ptr: *mut T);
-    #[allow(dead_code)]
-    fn fetch_byte_add(&self, val: usize, order: sync::atomic::Ordering) -> *mut T;
 }
 
 impl<T> AtomicPtrExt<T> for sync::atomic::AtomicPtr<T> {
@@ -34,13 +32,5 @@ impl<T> AtomicPtrExt<T> for sync::atomic::AtomicPtr<T> {
         let () = *self.get_mut() = ptr;
         #[cfg(loom)]
         return self.with_mut(|p| *p = ptr);
-    }
-
-    #[cfg_attr(miri, allow(unreachable_code, unused_variables))]
-    fn fetch_byte_add(&self, val: usize, order: sync::atomic::Ordering) -> *mut T {
-        #[cfg(miri)]
-        panic!("miri requires at least Rust 1.91");
-        unsafe { &*(self as *const _ as *const sync::atomic::AtomicUsize) }.fetch_add(val, order)
-            as _
     }
 }

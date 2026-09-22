@@ -69,9 +69,8 @@ impl<N: Notification, S: Synchronization, L: Linking, M: Mutex, const WAKER_BATC
                     return Poll::Ready(Ok(notification.into_inner()));
                 }
                 let set_order = match S::MODE {
-                    SyncMode::Synchronized => Acquire,
                     SyncMode::Sequential => SeqCst,
-                    SyncMode::Unsynchronized => Relaxed,
+                    _ => Relaxed,
                 };
                 node.waker = Some(cx.waker().clone());
                 let pushed = node.try_push_back_with(set_order, Relaxed, |_, state| {
@@ -82,11 +81,13 @@ impl<N: Notification, S: Synchronization, L: Linking, M: Mutex, const WAKER_BATC
                     }
                     true
                 });
-                if pushed {
-                    Poll::Pending
-                } else {
-                    Poll::Ready(Err(ClosedError))
+                if !pushed {
+                    return Poll::Ready(Err(ClosedError));
                 }
+                if S::SYNC {
+                    fence(SeqCst);
+                }
+                Poll::Pending
             }
             NodeState::Linked(mut node) => {
                 if node.waker.as_ref().is_none_or(|w| !w.will_wake(cx.waker())) {
