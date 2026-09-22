@@ -1,3 +1,4 @@
+//! The list [`Node`].
 #[cfg(nightly)]
 use core::pin::UnsafePinned;
 use core::{marker::PhantomData, pin::Pin, ptr, ptr::NonNull};
@@ -22,12 +23,22 @@ type List<L: ListRef> =
 type LockedList<'a, L: ListRef> =
     crate::list::LockedList<'a, L::NodeData, L::ListState, L::ListData, L::Linking, L::Mutex>;
 
+/// The data carried by a [`Node`].
+///
+/// This trait defines how the node data interacts with the list when it is dropped, after having
+/// been unlinked.
 pub trait NodeData<L: ListRef + ?Sized>: Sized {
+    /// Returns the state to be stored in the list if the node is the last linked one when dropped.
     fn new_state_if_last_node_on_drop(
         self: Pin<&mut Self>,
         list: &L,
         list_data: &mut L::ListData,
     ) -> L::ListState;
+    /// Destructor of the node data, executed after the node has been unlinked.
+    ///
+    /// The list's lock might have been acquired before calling this method, in which case `locked`
+    /// will be `Some`. `state_updated_on_unlink` tells whether the list's state has been updated
+    /// with the result of [`new_state_if_last_node_on_drop`](Self::new_state_if_last_node_on_drop).
     fn on_drop<'list>(
         self: Pin<&mut Self>,
         list: &'list L,
@@ -113,11 +124,17 @@ pub(crate) struct NodeInner<T, L: Linking> {
     pub(crate) access: Cell<()>,
 }
 
+/// The state of a [`Node`], returned by [`Node::state`].
 pub enum NodeState<'a, L: ListRef> {
+    /// The node is not linked in the list.
     Unlinked(NodeUnlinked<'a, L>),
+    /// The node is linked in the list, which is locked as long as this value is alive.
     Linked(NodeLinked<'a, L>),
 }
 
+/// A list node, carrying its [`NodeData`].
+///
+/// The node must be pinned to be pushed to the list, and it unlinks itself when dropped.
 pub struct Node<L: ListRef> {
     list: L,
     node: UnsafePinned<NodeInner<L::NodeData, L::Linking>>,
@@ -128,6 +145,7 @@ unsafe impl<L: ListRef + Send> Send for Node<L> where L::NodeData: Send {}
 unsafe impl<L: ListRef + Sync> Sync for Node<L> {}
 
 impl<L: ListRef> Node<L> {
+    /// Creates a node with a default data.
     pub fn new(list: L) -> Self
     where
         L::NodeData: Default,
@@ -135,6 +153,7 @@ impl<L: ListRef> Node<L> {
         Self::with_data(list, Default::default())
     }
 
+    /// Creates a node with the given data.
     #[cfg_attr(loom, const_fn::const_fn(cfg(false)))]
     pub const fn with_data(list: L, data: L::NodeData) -> Self {
         Self {
@@ -149,6 +168,7 @@ impl<L: ListRef> Node<L> {
         }
     }
 
+    /// Returns the list reference of the node.
     #[inline(always)]
     pub const fn list(&self) -> &L {
         &self.list
@@ -158,10 +178,11 @@ impl<L: ListRef> Node<L> {
         NonNull::new(self.node.get()).unwrap().cast()
     }
 
-    // TODO doc: false = never pushed, or already observed unlinked -> nothing set by the list
-    // (notification etc.) can be pending; true = may be linked, or unlinked since by another
-    // thread. Set by push_back, cleared by state()/unlink. Plain Cell read, no atomic, no lock.
-    // Not the negation of is_linked, which is authoritative both ways.
+    /// Returns `true` if the node may be linked.
+    ///
+    /// If it returns `false`, the node is not linked.
+    ///
+    /// This method is cheaper than [`is_linked`](Self::is_linked).
     #[inline(always)]
     pub fn is_maybe_linked(&self) -> bool {
         self.linked_list.get().is_some()
@@ -172,11 +193,16 @@ impl<L: ListRef> Node<L> {
         Some(unsafe { self.linked_list.get()?.as_ref() })
     }
 
+    /// Returns `true` if the node is linked in the list.
+    ///
+    /// The node can be concurrently unlinked, so the result only stays valid while the list is
+    /// locked.
     #[inline(always)]
     pub fn is_linked(&self) -> bool {
         unsafe { !(*self.node.get()).link.prev.load(Acquire).is_null() }
     }
 
+    /// Returns the state of the node, locking the list if the node is linked.
     #[inline(always)]
     pub fn state(self: Pin<&mut Self>) -> NodeState<'_, L> {
         let this = self.into_ref().get_ref();
@@ -235,6 +261,7 @@ impl<L: ListRef> Drop for Node<L> {
     }
 }
 
+/// An unlinked [`Node`], obtained from [`NodeState`].
 pub struct NodeUnlinked<'a, L: ListRef>(&'a Node<L>);
 
 unsafe impl<L: ListRef + Sync> Send for NodeUnlinked<'_, L> where L::NodeData: Send {}
@@ -247,6 +274,7 @@ node_ref!(
 );
 
 impl<'a, L: ListRef> NodeUnlinked<'a, L> {
+    /// Returns the list reference of the node.
     #[inline]
     pub fn list(&self) -> &'a L {
         self.0.list()
@@ -259,6 +287,9 @@ impl<'a, L: ListRef> NodeUnlinked<'a, L> {
 }
 
 impl<'a, L: ListRef<ListState = ()>> NodeUnlinked<'a, L> {
+    /// Pushes the node to the back of the list.
+    ///
+    /// The first node pushed to the list updates the list state with the ordering `order`.
     #[inline]
     pub fn push_back(self, order: Ordering) {
         let list = self.list().as_list();
@@ -269,6 +300,12 @@ impl<'a, L: ListRef<ListState = ()>> NodeUnlinked<'a, L> {
 }
 
 impl<'a, L: ListRef<ListState = usize>> NodeUnlinked<'a, L> {
+    /// Pushes the node to the back of the list, unless `on_push` returns `false`, and returns
+    /// whether the node has been pushed.
+    ///
+    /// The first node pushed to the list updates the list state with the ordering `set_order`. The
+    /// state is loaded with the ordering `fetch_order`. `on_push` is passed the list state, `None`
+    /// if the list is not empty.
     pub fn try_push_back_with<P: FnMut(Pin<&mut L::NodeData>, Option<usize>) -> bool>(
         self,
         set_order: Ordering,
@@ -281,6 +318,16 @@ impl<'a, L: ListRef<ListState = usize>> NodeUnlinked<'a, L> {
             .unwrap_err()
     }
 
+    /// Updates the list state with `f` while the list is empty, otherwise tries pushing the node
+    /// as [`try_push_back_with`](Self::try_push_back_with).
+    ///
+    /// The list state is updated with the ordering `set_order`, whether by `f` or by the first
+    /// node pushed to the list. The state is loaded with the ordering `fetch_order`. `on_push` is
+    /// passed the list state, `None` if the list is not empty.
+    ///
+    /// Returns `Ok` with the previous list state if it has been updated, and passes it to
+    /// `on_state_updated`. Otherwise, returns `Err(true)` if the node has been pushed, and
+    /// `Err(false)` if the node has not been pushed.
     #[allow(clippy::incompatible_msrv, unstable_name_collisions)]
     pub fn try_update_state_or_push_back_with<
         F: FnMut(Pin<&mut L::NodeData>, usize) -> Option<usize>,
@@ -301,6 +348,7 @@ impl<'a, L: ListRef<ListState = usize>> NodeUnlinked<'a, L> {
     }
 }
 
+/// A linked [`Node`], obtained from [`NodeState`], holding the list lock.
 pub struct NodeLinked<'a, L: ListRef, S = <L as ListRef>::ListState> {
     node: &'a Node<L>,
     locked: LockedList<'a, L>,
@@ -329,6 +377,7 @@ node_ref!(
 );
 
 impl<'a, L: ListRef> NodeLinked<'a, L> {
+    /// Returns the list reference of the node.
     #[inline]
     pub fn list(&self) -> &'a L {
         self.node.list()
@@ -336,6 +385,7 @@ impl<'a, L: ListRef> NodeLinked<'a, L> {
 }
 
 impl<'a, L: ListRef<ListState = ()>> NodeLinked<'a, L, ()> {
+    /// Unlinks the node from the list, returning it with the list lock.
     #[inline]
     pub fn unlink(mut self) -> (NodeUnlinked<'a, L>, LockedList<'a, L>) {
         self.node.unlink(&mut self.locked, |_, _| ());
@@ -345,6 +395,10 @@ impl<'a, L: ListRef<ListState = ()>> NodeLinked<'a, L, ()> {
 }
 
 impl<'a, L: ListRef<ListState = usize>> NodeLinked<'a, L, usize> {
+    /// Unlinks the node from the list, returning it with the list lock.
+    ///
+    /// If the node was the last linked one, the list state is updated with `new_state_if_last_node`
+    /// and the returned boolean is `true`.
     #[inline]
     pub fn unlink<F: FnOnce(Pin<&mut L::NodeData>, &mut L::ListData) -> L::ListState>(
         mut self,
@@ -356,29 +410,36 @@ impl<'a, L: ListRef<ListState = usize>> NodeLinked<'a, L, usize> {
     }
 }
 
+/// An accessor to the data of a node.
 pub trait NodeRef<T>: PrivateNodeRef<T> {
+    /// Returns a reference to the node data.
     #[inline]
     fn data(&self) -> &T {
         unsafe { &*self.data_ptr() }
     }
 
+    /// Returns a pinned mutable reference to the node data.
     #[inline]
     fn data_mut(&mut self) -> Pin<&mut T> {
         unsafe { Pin::new_unchecked(&mut *self.data_ptr()) }
     }
 }
 
+/// An accessor to the data of a linked node, and to the list data protected by the lock.
 pub trait LinkedNodeRef<T, D>: NodeRef<T> + PrivateLinkedNodeRef<T, D> {
+    /// Returns a reference to the list data.
     #[inline]
     fn list_data(&self) -> &D {
         unsafe { &*self.list_data_ptr() }
     }
 
+    /// Returns a mutable reference to the list data.
     #[inline]
     fn list_data_mut(&mut self) -> &mut D {
         unsafe { &mut *self.list_data_ptr() }
     }
 
+    /// Returns both the node data and the list data.
     #[inline]
     fn split_data(&mut self) -> (Pin<&mut T>, &mut D) {
         unsafe {
