@@ -26,6 +26,10 @@ mod private {
 }
 pub(super) use private::{ListStatePrivate, StateOrPtr, Tail};
 
+/// The optional state embedded in a [`List`](crate::List) when it is empty.
+///
+/// It is implemented by `()`, for a list without state, and by `usize`, whose values must not be
+/// greater than [`LIST_STATE_MAX`].
 pub trait ListState: ListStatePrivate + Debug + Copy + PartialEq + Send + Sync + 'static {}
 
 impl<S: Copy, L: Linking> Clone for StateOrPtr<S, L> {
@@ -62,6 +66,9 @@ impl ListState for () {}
 const TAIL_FLAG: usize = 1;
 const STATE_SHIFT: usize = 1;
 
+/// The maximum value of a `usize` [`ListState`].
+///
+/// Setting a greater state panics.
 pub const LIST_STATE_MAX: usize = usize::MAX >> STATE_SHIFT;
 #[inline(always)]
 pub(super) const fn state_to_ptr<L: Linking>(state: usize) -> *mut Tail<usize, L> {
