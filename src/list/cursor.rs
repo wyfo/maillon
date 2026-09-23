@@ -13,6 +13,15 @@ use crate::{
     sync::mutex::{DefaultMutex, Mutex},
 };
 
+/// A cursor over the nodes of a locked list, obtained from [`LockedList::cursor_front`] or
+/// [`LockedList::cursor_back`].
+///
+/// Cursors always rest between two elements in the list, and index in a logically circular way. To
+/// accommodate this, there is a "ghost" node that yields `None` between the head and tail of the
+/// list.
+///
+/// With atomic [`Linking`]s, nodes can still be pushed at the back of the list while the cursor is
+/// iterating the nodes.
 pub struct ListCursor<
     'locked,
     'a,
@@ -48,27 +57,38 @@ impl<'locked, 'a, T, S: ListState, D, L: Linking, M: Mutex> ListCursor<'locked, 
         Self { node, locked }
     }
 
+    /// Returns a reference to the data of the node that the cursor is currently pointing to.
+    ///
+    /// This returns `None` if the cursor is currently pointing to the "ghost" node.
     #[inline]
     pub fn current(&mut self) -> Option<Pin<&mut T>> {
         Some(unsafe { Pin::new_unchecked(&mut *NodeLink::data_ptr::<T>(self.node?)) })
     }
 
+    /// Returns a reference to the list data.
     #[inline]
     pub fn list_data(&self) -> &D {
         self.locked.data()
     }
 
+    /// Returns a mutable reference to the list data.
     #[inline]
     pub fn list_data_mut(&mut self) -> &mut D {
         self.locked.data_mut()
     }
 
+    /// Returns references to both the data of the current node and the list data.
     #[inline]
     pub fn split_current_data(&mut self) -> Option<(Pin<&mut T>, &mut D)> {
         let current = unsafe { Pin::new_unchecked(&mut *NodeLink::data_ptr::<T>(self.node?)) };
         Some((current, self.locked.data_mut()))
     }
 
+    /// Moves the cursor to the next node of the list.
+    ///
+    /// If the cursor is pointing to the "ghost" node then this will move it to the first node of
+    /// the list. If it is pointing to the last node of the list then this will move it to the
+    /// "ghost" node.
     #[inline]
     pub fn move_next(&mut self) {
         let next_ptr = (self.node).map_or(&self.locked.list.head, |n| unsafe { &n.as_ref().next });
@@ -92,6 +112,11 @@ impl<'locked, 'a, T, S: ListState, D, L: Linking, M: Mutex> ListCursor<'locked, 
         };
     }
 
+    /// Moves the cursor to the previous node of the list.
+    ///
+    /// If the cursor is pointing to the "ghost" node then this will move it to the last node of the
+    /// list. If it is pointing to the first node of the list then this will move it to the "ghost"
+    /// node.
     #[inline]
     #[allow(clippy::incompatible_msrv, unstable_name_collisions)]
     pub fn move_prev(&mut self) {
@@ -118,6 +143,12 @@ impl<'locked, 'a, T, S: ListState, D, L: Linking, M: Mutex> ListCursor<'locked, 
 }
 
 impl<'locked, T, S: ListState, D, M: Mutex> ListCursor<'locked, '_, T, S, D, Serialized, M> {
+    /// Inserts a node into the list before the current one.
+    ///
+    /// If the cursor is pointing at the "ghost" node then the new element is inserted at the end of
+    /// the list.
+    ///
+    /// If the list is empty, its state is updated with ordering `order`.
     #[inline]
     pub fn insert_before<LR>(&mut self, node: NodeUnlinked<'_, LR>, order: Ordering)
     where
@@ -132,6 +163,12 @@ impl<'locked, T, S: ListState, D, M: Mutex> ListCursor<'locked, '_, T, S, D, Ser
         }
     }
 
+    /// Inserts a node into the list after the current one.
+    ///
+    /// If the cursor is pointing at the "ghost" node then the new element is inserted at the front
+    /// of the list.
+    ///
+    /// If the list is empty, its state is updated with ordering `order`.
     #[inline]
     pub fn insert_after<LR>(&mut self, node: NodeUnlinked<'_, LR>, order: Ordering)
     where
@@ -152,6 +189,12 @@ impl<'locked, T, S: ListState, D, M: Mutex> ListCursor<'locked, '_, T, S, D, Ser
 }
 
 impl<T, D, L: Linking, M: Mutex> ListCursor<'_, '_, T, (), D, L, M> {
+    /// Removes the current element from the list.
+    ///
+    /// The cursor is moved to point to the next element in the list.
+    ///
+    /// If the cursor is currently pointing to the "ghost" node then no node is removed and `false`
+    /// is returned.
     #[inline]
     pub fn remove_current(&mut self) -> bool {
         self.remove_current_impl(|_, _| ()).is_some()
@@ -159,6 +202,13 @@ impl<T, D, L: Linking, M: Mutex> ListCursor<'_, '_, T, (), D, L, M> {
 }
 
 impl<T, D, L: Linking, M: Mutex> ListCursor<'_, '_, T, usize, D, L, M> {
+    /// Removes the current element from the list.
+    ///
+    /// The cursor is moved to point to the next element in the list.
+    ///
+    /// If the cursor is currently pointing to the "ghost" node then no node is removed and `None`
+    /// is returned. Otherwise, if the node is the last linked one, the list state is updated with
+    /// `new_state_if_last_node` and it returns `Some(true)`.
     #[inline]
     pub fn remove_current<F: FnOnce(Pin<&mut T>, &mut D) -> usize>(
         &mut self,
