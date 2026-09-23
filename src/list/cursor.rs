@@ -86,8 +86,8 @@ impl<'locked, 'a, T, S: ListState, D, L: Linking, M: Mutex> ListCursor<'locked, 
 
     /// Moves the cursor to the next node of the list.
     ///
-    /// If the cursor is pointing to the "ghost" node then this will move it to the first node of
-    /// the list. If it is pointing to the last node of the list then this will move it to the
+    /// If the cursor is pointing to the "ghost" node then this will move it to the front node of
+    /// the list. If it is pointing to the back node of the list then this will move it to the
     /// "ghost" node.
     #[inline]
     pub fn move_next(&mut self) {
@@ -114,8 +114,8 @@ impl<'locked, 'a, T, S: ListState, D, L: Linking, M: Mutex> ListCursor<'locked, 
 
     /// Moves the cursor to the previous node of the list.
     ///
-    /// If the cursor is pointing to the "ghost" node then this will move it to the last node of the
-    /// list. If it is pointing to the first node of the list then this will move it to the "ghost"
+    /// If the cursor is pointing to the "ghost" node then this will move it to the back node of the
+    /// list. If it is pointing to the front node of the list then this will move it to the "ghost"
     /// node.
     #[inline]
     #[allow(clippy::incompatible_msrv, unstable_name_collisions)]
@@ -207,8 +207,8 @@ impl<T, D, L: Linking, M: Mutex> ListCursor<'_, '_, T, usize, D, L, M> {
     /// The cursor is moved to point to the next element in the list.
     ///
     /// If the cursor is currently pointing to the "ghost" node then no node is removed and `None`
-    /// is returned. Otherwise, if the node is the last linked one, the list state is updated with
-    /// `new_state_if_last_node` and it returns `Some(true)`.
+    /// is returned. Otherwise, if the node is the last remaining one, the list state is updated
+    /// with `new_state_if_last_node` and it returns `Some(true)`.
     #[inline]
     pub fn remove_current<F: FnOnce(Pin<&mut T>, &mut D) -> usize>(
         &mut self,

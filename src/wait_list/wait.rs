@@ -128,7 +128,7 @@ impl<T> WakeCondition for Option<T> {
     }
 }
 
-/// Future returned by [`WaitList::wait_until`](crate::WaitList::wait_until).
+/// Future returned by [`WaitList::wait_until_with`](crate::WaitList::wait_until_with).
 pub struct WaitUntil<
     'a,
     F,

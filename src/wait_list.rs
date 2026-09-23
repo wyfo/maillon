@@ -243,7 +243,6 @@ impl<N: Notification, S: Synchronization, L: Linking, M: Mutex, const WAKER_BATC
     }
 
     #[cold]
-    #[inline(never)]
     fn wake_all<F: FnMut() -> Option<Notified<N>>>(
         locked: LockedList<Waiter<N>, usize, (), L, M>,
         state: usize,
@@ -282,7 +281,6 @@ impl<N: Notification, S: Synchronization, L: Linking, M: Mutex, const WAKER_BATC
     }
 
     #[cold]
-    #[inline(never)]
     fn wake_single<E: ListGetEnd, F: FnOnce() -> Notified<N>>(
         &self,
         notification: F,
@@ -346,7 +344,6 @@ impl<N: Notification, S: Synchronization, L: Linking, M: Mutex, const WAKER_BATC
     }
 
     #[cold]
-    #[inline(never)]
     fn wake_many<F: FnMut() -> N>(&self, count: usize, mut notification: F) -> usize {
         let mut wakers = WakerBatch::<WAKER_BATCH_SIZE>::new();
         let mut locked = self.list.lock();
@@ -399,7 +396,6 @@ impl<N: Notification, S: Synchronization, L: Linking, M: Mutex, const WAKER_BATC
     }
 
     #[cold]
-    #[inline(never)]
     fn notify_all_impl<F: FnMut() -> N>(&self, mut notification: F) -> usize {
         let locked = self.list.lock();
         Self::wake_all(locked, STATE_OPEN, || Some(Notified::All(notification())))
@@ -441,7 +437,6 @@ impl<N: Notification, S: Synchronization, L: Linking, M: Mutex, const WAKER_BATC
     }
 
     #[cold]
-    #[inline(never)]
     fn renotify(&self, notification: Notified<N>) {
         match notification {
             Notified::One(notification) => self.notify_one_with(|| notification),

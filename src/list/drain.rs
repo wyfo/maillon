@@ -114,7 +114,7 @@ impl<'a, T, S: ListState, D, L: Linking, M: Mutex> Drain<'a, T, S, D, L, M> {
         sentinel.prev.load(Relaxed).is_null()
     }
 
-    /// Returns the first node of the drain, `None` if it is empty.
+    /// Returns the front node of the drain, `None` if it is empty.
     #[inline]
     pub fn front(self: Pin<&mut Self>) -> Option<DrainFront<'a, '_, T, S, D, L, M>> {
         let this = unsafe { self.get_unchecked_mut() };
@@ -124,7 +124,7 @@ impl<'a, T, S: ListState, D, L: Linking, M: Mutex> Drain<'a, T, S, D, L, M> {
         })
     }
 
-    /// Returns the last node of the drain, `None` if it is empty.
+    /// Returns the back node of the drain, `None` if it is empty.
     #[inline]
     pub fn back(self: Pin<&mut Self>) -> Option<DrainBack<'a, '_, T, S, D, L, M>> {
         let this = unsafe { self.get_unchecked_mut() };
@@ -277,11 +277,11 @@ pub trait DrainEnd<
     M: Mutex = DefaultMutex,
 >: LinkedNodeRef<T, D> + Sized
 {
-    /// Unlinks the node, returning the next end of the drain, `None` if it becomes empty.
+    /// Unlinks the node, returning the new end of the drain, `None` if it becomes empty.
     fn unlink(self) -> Option<Self>;
 }
 
-/// The first node of a [`Drain`] chain, obtained from [`Drain::front`].
+/// The front node of a [`Drain`] chain, obtained from [`Drain::front`].
 pub struct DrainFront<
     'drain,
     'a,
@@ -317,7 +317,6 @@ impl<'drain, 'a, T, S: ListState, D, L: Linking, M: Mutex> DrainEnd<'drain, 'a, 
 }
 
 impl<T, S: ListState, D, L: Linking, M: Mutex> DrainFront<'_, '_, T, S, D, L, M> {
-    /// Unlinks the node, returning the next one, `None` if the drain becomes empty.
     pub fn unlink(self) -> Option<Self> {
         let node = unsafe { self.node.as_ref() };
         let mut next = None;
@@ -345,7 +344,7 @@ node_ref!(
     (self.drain.locked)
 );
 
-/// The last node of a [`Drain`] chain, obtained from [`Drain::back`].
+/// The back node of a [`Drain`] chain, obtained from [`Drain::back`].
 pub struct DrainBack<
     'drain,
     'a,
@@ -381,7 +380,6 @@ impl<'drain, 'a, T, S: ListState, D, L: Linking, M: Mutex> DrainEnd<'drain, 'a, 
 }
 
 impl<T, S: ListState, D, L: Linking, M: Mutex> DrainBack<'_, '_, T, S, D, L, M> {
-    /// Unlinks the node, returning the previous one, `None` if the drain becomes empty.
     #[allow(clippy::incompatible_msrv, unstable_name_collisions)]
     pub fn unlink(self) -> Option<Self> {
         let node = unsafe { self.node.as_ref() };
@@ -411,22 +409,17 @@ node_ref!(
     (self.drain.locked)
 );
 
-/// A getter to an end of a [`Drain`] chain from which it is walked, either [`GetFront`] or
-/// [`GetBack`].
 pub trait DrainGetEnd: Sized {
-    /// [`DrainFront`] or [`DrainBack`].
     type DrainEnd<'drain, 'a, T, S: ListState, D, L: Linking, M: Mutex>: DrainEnd<'drain, 'a, T, S, D, L, M>
     where
         'drain: 'a,
         T: 'drain,
         D: 'drain;
 
-    /// Returns the end of the drain, `None` if it is empty.
     fn get_end<'drain, 'a, T, S: ListState, D, L: Linking, M: Mutex>(
         drain: Pin<&'a mut Drain<'drain, T, S, D, L, M>>,
     ) -> Option<Self::DrainEnd<'drain, 'a, T, S, D, L, M>>;
 
-    /// [`Drain::for_each`], walking the chain from this end.
     fn for_each<
         T,
         S: ListState,
@@ -445,7 +438,6 @@ pub trait DrainGetEnd: Sized {
         drain.for_each_impl::<Self, _>(helper, on_next, on_unlock)
     }
 
-    /// [`Drain::wake_all`], walking the chain from this end.
     fn wake_all<
         const WAKER_BATCH_SIZE: usize,
         T,

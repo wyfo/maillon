@@ -28,8 +28,11 @@ pub(super) use private::{ListStatePrivate, StateOrPtr, Tail};
 
 /// The optional state embedded in a [`List`](crate::List) when it is empty.
 ///
-/// It is implemented by `()`, for a list without state, and by `usize`, whose values must not be
-/// greater than [`LIST_STATE_MAX`].
+/// It is implemented by `()`, carrying no value, and by `usize`, whose values must not be greater
+/// than [`LIST_STATE_MAX`].
+///
+/// It is often wrapped into an `Option`, where `None` means the list is not empty. `()` as a state
+/// is in fact only used as an emptiness marker.
 pub trait ListState: ListStatePrivate + Debug + Copy + PartialEq + Send + Sync + 'static {}
 
 impl<S: Copy, L: Linking> Clone for StateOrPtr<S, L> {

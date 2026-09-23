@@ -1,3 +1,4 @@
+//! The [`List`] and the types to operate on it.
 use core::{cell::UnsafeCell, marker::PhantomData, mem::ManuallyDrop, pin::Pin, ptr::NonNull};
 
 #[allow(unused_imports)]
@@ -44,6 +45,7 @@ unsafe impl<T: Send, S: ListState, D: Send, L: Linking, M: Mutex> Send for List<
 unsafe impl<T: Send, S: ListState, D: Send, L: Linking, M: Mutex> Sync for List<T, S, D, L, M> {}
 
 impl<T, S: ListState, L: Linking, M: Mutex> List<T, S, (), L, M> {
+    /// Creates an empty list.
     #[cfg_attr(loom, const_fn::const_fn(cfg(false)))]
     #[inline]
     pub const fn new() -> Self {
@@ -75,17 +77,20 @@ impl<T, S: ListState, D, L: Linking, M: Mutex> List<T, S, D, L, M> {
         }
     }
 
+    /// Creates an empty list with the given list data.
     #[cfg_attr(loom, const_fn::const_fn(cfg(false)))]
     #[inline]
     pub const fn with_data(data: D) -> Self {
         Self::new_impl(ptr::null_mut(), data)
     }
 
+    /// Returns a mutable reference to the list data.
     #[inline]
     pub fn data_mut(&mut self) -> &mut D {
         self.data.get_mut()
     }
 
+    /// Consumes the list and returns its data.
     #[inline]
     pub fn into_data(self) -> D {
         self.data.into_inner()
@@ -109,11 +114,13 @@ impl<T, S: ListState, D, L: Linking, M: Mutex> List<T, S, D, L, M> {
         }
     }
 
+    /// Loads the list state with the ordering `order`, and returns `true` if the list is empty.
     #[inline]
     pub fn is_empty(&self, order: Ordering) -> bool {
         self.tail.load(order).ptr().is_none()
     }
 
+    /// Acquire the list's mutex.
     #[inline]
     pub fn lock(&self) -> LockedList<'_, T, S, D, L, M> {
         LockedList {
@@ -183,6 +190,7 @@ impl<T, S: ListState, D, L: Linking, M: Mutex> List<T, S, D, L, M> {
 }
 
 impl<T, L: Linking, M: Mutex> List<T, usize, (), L, M> {
+    /// Creates an empty list with the given state.
     #[cfg_attr(loom, const_fn::const_fn(cfg(false)))]
     #[inline]
     pub const fn with_state(state: usize) -> Self {
@@ -191,22 +199,27 @@ impl<T, L: Linking, M: Mutex> List<T, usize, (), L, M> {
 }
 
 impl<T, D, L: Linking, M: Mutex> List<T, usize, D, L, M> {
+    /// Creates an empty list with the given state and list data.
     #[cfg_attr(loom, const_fn::const_fn(cfg(false)))]
     #[inline]
     pub const fn with_state_and_data(state: usize, data: D) -> Self {
         Self::new_impl(state_to_ptr(state), data)
     }
 
+    /// Loads the list state with the ordering `order`, and returns `None` if the list is not
+    /// empty.
     #[inline]
     pub fn load_state(&self, order: Ordering) -> Option<usize> {
         self.tail.load(order).state()
     }
 
+    /// Returns the list state, `None` if the list is not empty.
     #[inline]
     pub fn get_state(&mut self) -> Option<usize> {
         self.tail.load_mut().state()
     }
 
+    /// Sets the list state if the list is empty, and returns whether it has been set.
     #[inline]
     pub fn try_set_state(&mut self, state: usize) -> bool {
         if self.get_state().is_none() {
@@ -216,6 +229,11 @@ impl<T, D, L: Linking, M: Mutex> List<T, usize, D, L, M> {
         true
     }
 
+    /// Updates the list state from `current` to `new` if it matches, as
+    /// [`AtomicUsize::compare_exchange`](core::sync::atomic::AtomicUsize::compare_exchange).
+    ///
+    /// Returns `Err(Some(state))` if the state doesn't match, and `Err(None)` if the list is not
+    /// empty.
     #[inline]
     pub fn compare_exchange_state(
         &self,
@@ -246,6 +264,11 @@ impl<T, D, L: Linking, M: Mutex> List<T, usize, D, L, M> {
         }
     }
 
+    /// Updates the list state with `f` if the list is empty, as
+    /// [`AtomicUsize::fetch_update`](core::sync::atomic::AtomicUsize::fetch_update).
+    ///
+    /// Returns `Err(Some(state))` if `f` returns `None`, and `Err(None)` if the list is not
+    /// empty.
     #[inline]
     pub fn try_update_state<F: FnMut(usize) -> Option<usize>>(
         &self,
@@ -285,6 +308,8 @@ impl<T, D, L: Linking, M: Mutex> List<T, usize, D, L, M> {
         Err(None)
     }
 
+    /// Updates the list state with `f` as [`try_update_state`](Self::try_update_state), or
+    /// returns the list locked if it is not empty.
     #[inline]
     pub fn update_state_or_lock<F: FnMut(usize) -> usize>(
         &self,
@@ -303,6 +328,11 @@ impl<T, D, L: Linking, M: Mutex> List<T, usize, D, L, M> {
             .or(Err(locked))
     }
 
+    /// Updates the list state with `f` as [`try_update_state`](Self::try_update_state), or calls
+    /// `locked_fallback` with the list locked if it is not empty.
+    ///
+    /// Compared to [`update_state_or_lock`](Self::update_state_or_lock), the locked fallback is
+    /// executed in a `#[cold]` function.
     #[inline]
     pub fn update_state_or_lock_with<
         'a,
@@ -351,13 +381,24 @@ impl<T, S: ListState, D: Default, L: Linking, M: Mutex> Default for List<T, S, D
     }
 }
 
+/// A reference to a [`List`], stored in each [`Node`](crate::Node) and passed to its
+/// [`NodeData`] callbacks.
+///
+/// It is implemented by `List` and `&List`, and can be implemented by wrapper types, e.g. to give
+/// the callbacks access to a structure embedding the list.
 pub trait ListRef {
+    /// The data carried by the nodes.
     type NodeData: NodeData<Self>;
+    /// The state embedded in the list while it is empty.
     type ListState: ListState;
+    /// The data carried by the list.
     type ListData;
+    /// The linking implementation.
     type Linking: Linking;
+    /// The mutex implementation.
     type Mutex: Mutex;
 
+    /// Returns the referenced list.
     #[allow(clippy::type_complexity)]
     fn as_list(
         &self,
@@ -388,6 +429,9 @@ impl<T: NodeData<Self>, S: ListState, D, L: Linking, M: Mutex> ListRef for &List
     }
 }
 
+/// A locked [`List`], obtained from [`List::lock`].
+///
+/// Removing nodes and walking the list require the lock.
 pub struct LockedList<
     'a,
     T,
@@ -407,6 +451,7 @@ unsafe impl<'a, T: Send, S: ListState, D: Sync, L: Linking, M: Mutex> Sync
 }
 
 impl<'a, T, S: ListState, D, L: Linking, M: Mutex> LockedList<'a, T, S, D, L, M> {
+    /// See [`List::is_empty`].
     #[inline]
     pub fn is_empty(&self, order: Ordering) -> bool {
         self.list.is_empty(order)
@@ -423,6 +468,7 @@ impl<'a, T, S: ListState, D, L: Linking, M: Mutex> LockedList<'a, T, S, D, L, M>
         L::get_next(node, next, tail, &self.list.parker)
     }
 
+    /// Returns the front node of the list, `None` if it is empty.
     #[inline]
     pub fn front(&mut self) -> Option<ListFront<'a, '_, T, S, D, L, M>>
     where
@@ -436,22 +482,28 @@ impl<'a, T, S: ListState, D, L: Linking, M: Mutex> LockedList<'a, T, S, D, L, M>
         Some(ListFront { node, locked: self })
     }
 
+    /// Returns the back node of the list, `None` if it is empty.
     #[inline]
     pub fn back(&mut self) -> Option<ListBack<'a, '_, T, S, D, L, M>> {
         let node = self.list.tail()?;
         Some(ListBack { node, locked: self })
     }
 
+    /// Returns a cursor pointing to the front node of the list, or to the ghost node if it is
+    /// empty.
     #[inline]
     pub fn cursor_front(&mut self) -> ListCursor<'a, '_, T, S, D, L, M> {
         ListCursor::new(self.front().map(|f| f.node), self)
     }
 
+    /// Returns a cursor pointing to the back node of the list, or to the ghost node if it is
+    /// empty.
     #[inline]
     pub fn cursor_back(&mut self) -> ListCursor<'a, '_, T, S, D, L, M> {
         ListCursor::new(self.back().map(|t| t.node), self)
     }
 
+    /// Unlocks the list and returns it.
     pub fn unlock(self) -> &'a List<T, S, D, L, M> {
         self.list
     }
@@ -464,11 +516,13 @@ impl<'a, T, S: ListState, D, L: Linking, M: Mutex> LockedList<'a, T, S, D, L, M>
         self.list.data.get()
     }
 
+    /// Returns a reference to the list data.
     #[inline]
     pub fn data(&self) -> &D {
         unsafe { &*self.data_ptr() }
     }
 
+    /// Returns a mutable reference to the list data.
     #[inline]
     pub fn data_mut(&mut self) -> &mut D {
         unsafe { &mut *self.data_ptr() }
@@ -559,6 +613,9 @@ impl<'a, T, S: ListState, D, L: Linking, M: Mutex> LockedList<'a, T, S, D, L, M>
 }
 
 impl<'a, T, S: ListState, D, M: Mutex> LockedList<'a, T, S, D, Serialized, M> {
+    /// Pushes the node at the back of the list.
+    ///
+    /// If the list is empty, its state is updated with the ordering `order`.
     #[inline]
     pub fn push_back<LR>(&mut self, node: NodeUnlinked<'_, LR>, order: Ordering)
     where
@@ -602,6 +659,7 @@ impl<'a, T, S: ListState, D, M: Mutex> LockedList<'a, T, S, D, Serialized, M> {
 }
 
 impl<'a, T, D, L: Linking, M: Mutex> LockedList<'a, T, (), D, L, M> {
+    /// Detaches all the nodes of the list into a [`Drain`].
     #[inline]
     pub fn drain(self) -> Drain<'a, T, (), D, L, M> {
         Drain::new(self, |_| ())
@@ -609,11 +667,13 @@ impl<'a, T, D, L: Linking, M: Mutex> LockedList<'a, T, (), D, L, M> {
 }
 
 impl<'a, T, D, L: Linking, M: Mutex> LockedList<'a, T, usize, D, L, M> {
+    /// See [`List::load_state`].
     #[inline]
     pub fn load_state(&self, order: Ordering) -> Option<usize> {
         self.list.load_state(order)
     }
 
+    /// See [`List::compare_exchange_state`].
     #[inline]
     pub fn compare_exchange_state(
         &mut self,
@@ -635,6 +695,7 @@ impl<'a, T, D, L: Linking, M: Mutex> LockedList<'a, T, usize, D, L, M> {
         }
     }
 
+    /// See [`List::try_update_state`].
     #[inline]
     pub fn try_update_state<F: FnMut(usize) -> Option<usize>>(
         &mut self,
@@ -651,6 +712,8 @@ impl<'a, T, D, L: Linking, M: Mutex> LockedList<'a, T, usize, D, L, M> {
         Ok(state)
     }
 
+    /// Detaches all the nodes of the list into a [`Drain`], storing the state returned by
+    /// `new_state_if_not_empty` in the list if it is not empty.
     pub fn drain<F: FnOnce(&mut D) -> usize>(
         self,
         new_state_if_not_empty: F,
@@ -668,6 +731,7 @@ impl<T, S: ListState, D, L: Linking, M: Mutex> Drop for LockedList<'_, T, S, D, 
     }
 }
 
+/// An end of a locked [`List`], either its [`ListFront`] or its [`ListBack`].
 pub trait ListEnd<
     'locked,
     'a,
@@ -678,12 +742,18 @@ pub trait ListEnd<
     M: Mutex = DefaultMutex,
 >: LinkedNodeRef<T, D> + Sized
 {
+    /// Unlinks the node, returning the new end of the list, `None` if it becomes empty.
+    ///
+    /// If the node was the last remaining one, the list state is updated with
+    /// `new_state_if_last_node`.
     fn unlink<F: FnOnce(Pin<&mut T>, &mut D) -> S>(self, new_state_if_last_node: F)
     -> Option<Self>;
 
+    /// Returns a cursor pointing to the node.
     fn into_cursor(self) -> ListCursor<'locked, 'a, T, S, D, L, M>;
 }
 
+/// The front node of a locked [`List`], obtained from [`LockedList::front`].
 pub struct ListFront<
     'locked,
     'a,
@@ -754,6 +824,7 @@ node_ref!(
     (self.locked)
 );
 
+/// The back node of a locked [`List`], obtained from [`LockedList::back`].
 pub struct ListBack<
     'locked,
     'a,
@@ -824,7 +895,9 @@ node_ref!(
     (self.locked)
 );
 
+/// The front end of a [`List`] or a [`Drain`].
 pub struct GetFront;
+/// The back end of a [`List`] or a [`Drain`].
 pub struct GetBack;
 
 pub trait ListGetEnd {

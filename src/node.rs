@@ -1,4 +1,4 @@
-//! The list [`Node`].
+//! The list [`Node`] and its accessors.
 #[cfg(nightly)]
 use core::pin::UnsafePinned;
 use core::{marker::PhantomData, pin::Pin, ptr, ptr::NonNull};
@@ -28,7 +28,8 @@ type LockedList<'a, L: ListRef> =
 /// This trait defines how the node data interacts with the list when it is dropped, after having
 /// been unlinked.
 pub trait NodeData<L: ListRef + ?Sized>: Sized {
-    /// Returns the state to be stored in the list if the node is the last linked one when dropped.
+    /// Returns the state to be stored in the list if the node is the last remaining one when
+    /// dropped.
     fn new_state_if_last_node_on_drop(
         self: Pin<&mut Self>,
         list: &L,
@@ -397,8 +398,8 @@ impl<'a, L: ListRef<ListState = ()>> NodeLinked<'a, L, ()> {
 impl<'a, L: ListRef<ListState = usize>> NodeLinked<'a, L, usize> {
     /// Unlinks the node from the list, returning it with the list lock.
     ///
-    /// If the node was the last linked one, the list state is updated with `new_state_if_last_node`
-    /// and the returned boolean is `true`.
+    /// If the node was the last remaining one, the list state is updated with
+    /// `new_state_if_last_node` and the returned boolean is `true`.
     #[inline]
     pub fn unlink<F: FnOnce(Pin<&mut L::NodeData>, &mut L::ListData) -> L::ListState>(
         mut self,
