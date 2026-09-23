@@ -1,3 +1,4 @@
+//! The [`Drain`] and its ends.
 #[cfg(nightly)]
 use core::pin::UnsafePinned;
 use core::{mem::ManuallyDrop, pin::Pin, ptr::NonNull, task::Waker};
@@ -22,8 +23,14 @@ use crate::{
     waker_batch::WakerBatch,
 };
 
-// TODO it should be possible to accept L: Linking, but it currently breaks everything with head
-// always returning None
+/// A detached chain of all the nodes of a list, obtained from
+/// [`LockedList::drain`].
+///
+/// Draining is atomic: the whole chain is detached from the list at once, so nodes pushed while
+/// the drain is alive belong to the list, not to the drain. The list stays locked, but the lock
+/// can be temporarily released with [`execute_unlocked`](Self::execute_unlocked).
+///
+/// Remaining nodes are unlinked when the drain is dropped.
 pub struct Drain<
     'a,
     T,
@@ -101,11 +108,13 @@ impl<'a, T, S: ListState, D, L: Linking, M: Mutex> Drain<'a, T, S, D, L, M> {
         self.sentinel().prev.store_mut(tail.as_ptr());
     }
 
+    /// Returns `true` if all the nodes of the drain have been unlinked.
     pub fn is_empty(&self) -> bool {
         let sentinel = unsafe { &*self.sentinel_node.get() };
         sentinel.prev.load(Relaxed).is_null()
     }
 
+    /// Returns the first node of the drain, `None` if it is empty.
     #[inline]
     pub fn front(self: Pin<&mut Self>) -> Option<DrainFront<'a, '_, T, S, D, L, M>> {
         let this = unsafe { self.get_unchecked_mut() };
@@ -115,6 +124,7 @@ impl<'a, T, S: ListState, D, L: Linking, M: Mutex> Drain<'a, T, S, D, L, M> {
         })
     }
 
+    /// Returns the last node of the drain, `None` if it is empty.
     #[inline]
     pub fn back(self: Pin<&mut Self>) -> Option<DrainBack<'a, '_, T, S, D, L, M>> {
         let this = unsafe { self.get_unchecked_mut() };
@@ -124,6 +134,7 @@ impl<'a, T, S: ListState, D, L: Linking, M: Mutex> Drain<'a, T, S, D, L, M> {
         })
     }
 
+    /// Executes `f` with the list unlocked, the lock being reacquired before returning.
     pub fn execute_unlocked<F: FnOnce() -> R, R>(self: Pin<&mut Self>, f: F) -> R {
         let this = unsafe { self.get_unchecked_mut() };
         if let Some(head) = this.head() {
@@ -144,11 +155,13 @@ impl<'a, T, S: ListState, D, L: Linking, M: Mutex> Drain<'a, T, S, D, L, M> {
         f()
     }
 
+    /// Returns a reference to the list data.
     #[inline]
     pub fn list_data(&self) -> &D {
         self.locked.data()
     }
 
+    /// Returns a mutable reference to the list data.
     #[inline]
     pub fn list_data_mut(self: Pin<&mut Self>) -> &mut D {
         unsafe { self.get_unchecked_mut() }.locked.data_mut()
@@ -156,7 +169,7 @@ impl<'a, T, S: ListState, D, L: Linking, M: Mutex> Drain<'a, T, S, D, L, M> {
 
     fn for_each_impl<E: DrainGetEnd, H>(
         self,
-        helper: &mut H,
+        mut helper: H,
         mut on_next: impl FnMut(&mut H, Pin<&mut T>, &mut D) -> bool,
         mut on_unlock: impl FnMut(&mut H),
     ) -> usize {
@@ -167,7 +180,7 @@ impl<'a, T, S: ListState, D, L: Linking, M: Mutex> Drain<'a, T, S, D, L, M> {
             let mut end = E::get_end(this.as_mut());
             while let Some(mut node) = end {
                 let (data, list_data) = node.split_data();
-                let unlock = on_next(helper, data, list_data);
+                let unlock = on_next(&mut helper, data, list_data);
                 end = node.unlink();
                 count += 1;
                 if unlock {
@@ -175,7 +188,7 @@ impl<'a, T, S: ListState, D, L: Linking, M: Mutex> Drain<'a, T, S, D, L, M> {
                         break;
                     }
                     drop(end);
-                    this.as_mut().execute_unlocked(|| on_unlock(helper));
+                    this.as_mut().execute_unlocked(|| on_unlock(&mut helper));
                     end = E::get_end(this.as_mut());
                     if end.is_none() {
                         return count;
@@ -183,7 +196,7 @@ impl<'a, T, S: ListState, D, L: Linking, M: Mutex> Drain<'a, T, S, D, L, M> {
                 }
             }
         }
-        on_unlock(helper);
+        on_unlock(&mut helper);
         count
     }
 
@@ -192,7 +205,7 @@ impl<'a, T, S: ListState, D, L: Linking, M: Mutex> Drain<'a, T, S, D, L, M> {
         mut f: impl FnMut(Pin<&mut T>, &mut D) -> Option<Waker>,
     ) -> usize {
         self.for_each_impl::<E, _>(
-            &mut WakerBatch::<WAKER_BATCH_SIZE>::new(),
+            WakerBatch::<WAKER_BATCH_SIZE>::new(),
             |wakers, node_data, list_data| {
                 if let Some(waker) = f(node_data, list_data) {
                     wakers.push(waker);
@@ -203,15 +216,26 @@ impl<'a, T, S: ListState, D, L: Linking, M: Mutex> Drain<'a, T, S, D, L, M> {
         )
     }
 
+    /// Unlinks all the nodes after calling `on_next` on them, and returns the number of unlinked
+    /// nodes.
+    ///
+    /// If `on_next` returns `true` or once the drain is empty, then `on_unlock` is called with the
+    /// lock temporarily released. A `helper` can be provided to be passed to both closures,
+    /// allowing them to share a state, e.g. a [`WakerBatch`].
     pub fn for_each<H, N: FnMut(&mut H, Pin<&mut T>, &mut D) -> bool, U: FnMut(&mut H)>(
         self,
-        helper: &mut H,
+        helper: H,
         on_next: N,
         on_unlock: U,
     ) -> usize {
         self.for_each_impl::<L::PreferredDrainGetEnd, _>(helper, on_next, on_unlock)
     }
 
+    /// Unlinks all the nodes of the chain, waking the wakers returned by `f`, and returns the
+    /// number of unlinked nodes.
+    ///
+    /// Wakers are accumulated into a [`WakerBatch`] of `WAKER_BATCH_SIZE`, and woken with the lock
+    /// released.
     pub fn wake_all<
         const WAKER_BATCH_SIZE: usize,
         F: FnMut(Pin<&mut T>, &mut D) -> Option<Waker>,
@@ -242,6 +266,7 @@ impl<'a, T, S: ListState, D, L: Linking, M: Mutex> Drop for Drain<'a, T, S, D, L
     }
 }
 
+/// An end of a [`Drain`] chain, either its [`DrainFront`] or its [`DrainBack`].
 pub trait DrainEnd<
     'drain,
     'a,
@@ -252,9 +277,11 @@ pub trait DrainEnd<
     M: Mutex = DefaultMutex,
 >: LinkedNodeRef<T, D> + Sized
 {
+    /// Unlinks the node, returning the next end of the drain, `None` if it becomes empty.
     fn unlink(self) -> Option<Self>;
 }
 
+/// The first node of a [`Drain`] chain, obtained from [`Drain::front`].
 pub struct DrainFront<
     'drain,
     'a,
@@ -290,6 +317,7 @@ impl<'drain, 'a, T, S: ListState, D, L: Linking, M: Mutex> DrainEnd<'drain, 'a, 
 }
 
 impl<T, S: ListState, D, L: Linking, M: Mutex> DrainFront<'_, '_, T, S, D, L, M> {
+    /// Unlinks the node, returning the next one, `None` if the drain becomes empty.
     pub fn unlink(self) -> Option<Self> {
         let node = unsafe { self.node.as_ref() };
         let mut next = None;
@@ -317,6 +345,7 @@ node_ref!(
     (self.drain.locked)
 );
 
+/// The last node of a [`Drain`] chain, obtained from [`Drain::back`].
 pub struct DrainBack<
     'drain,
     'a,
@@ -352,6 +381,7 @@ impl<'drain, 'a, T, S: ListState, D, L: Linking, M: Mutex> DrainEnd<'drain, 'a, 
 }
 
 impl<T, S: ListState, D, L: Linking, M: Mutex> DrainBack<'_, '_, T, S, D, L, M> {
+    /// Unlinks the node, returning the previous one, `None` if the drain becomes empty.
     #[allow(clippy::incompatible_msrv, unstable_name_collisions)]
     pub fn unlink(self) -> Option<Self> {
         let node = unsafe { self.node.as_ref() };
@@ -381,17 +411,22 @@ node_ref!(
     (self.drain.locked)
 );
 
+/// A getter to an end of a [`Drain`] chain from which it is walked, either [`GetFront`] or
+/// [`GetBack`].
 pub trait DrainGetEnd: Sized {
+    /// [`DrainFront`] or [`DrainBack`].
     type DrainEnd<'drain, 'a, T, S: ListState, D, L: Linking, M: Mutex>: DrainEnd<'drain, 'a, T, S, D, L, M>
     where
         'drain: 'a,
         T: 'drain,
         D: 'drain;
 
+    /// Returns the end of the drain, `None` if it is empty.
     fn get_end<'drain, 'a, T, S: ListState, D, L: Linking, M: Mutex>(
         drain: Pin<&'a mut Drain<'drain, T, S, D, L, M>>,
     ) -> Option<Self::DrainEnd<'drain, 'a, T, S, D, L, M>>;
 
+    /// [`Drain::for_each`], walking the chain from this end.
     fn for_each<
         T,
         S: ListState,
@@ -403,13 +438,14 @@ pub trait DrainGetEnd: Sized {
         U: FnMut(&mut H),
     >(
         drain: Drain<'_, T, S, D, L, M>,
-        helper: &mut H,
+        helper: H,
         on_next: N,
         on_unlock: U,
     ) -> usize {
         drain.for_each_impl::<Self, _>(helper, on_next, on_unlock)
     }
 
+    /// [`Drain::wake_all`], walking the chain from this end.
     fn wake_all<
         const WAKER_BATCH_SIZE: usize,
         T,
