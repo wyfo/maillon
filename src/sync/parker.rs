@@ -3,7 +3,15 @@
 //! [`CondVarParker`], a generic implementation based on [`CondVar`], is also provided.
 use core::ptr;
 
-#[cfg(feature = "atomic-wait")]
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "freebsd",
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "watchos",
+    windows
+))]
 pub use super::atomic_wait::AtomicParker;
 #[cfg(feature = "parking_lot")]
 pub use super::parking_lot::ParkingLotParker;
@@ -118,9 +126,9 @@ impl<M: Mutex, C: CondVar<M>, const NOTIFY_WITH_MUTEX_ACQUIRED: bool> Parker
 }
 
 cfg_if::cfg_if! {
-    if #[cfg(loom)] {
+    if #[cfg(any(loom, miri))] {
         type DefaultParkerImpl = StdParker;
-    } else if #[cfg(feature = "atomic-wait")] {
+    } else if #[cfg(any(target_os = "linux", target_os = "android", target_os = "freebsd", target_os = "macos", target_os = "ios", target_os = "watchos", windows))] {
         type DefaultParkerImpl = AtomicParker;
     } else if #[cfg(feature = "parking_lot")] {
         type DefaultParkerImpl = ParkingLotParker;
@@ -135,7 +143,7 @@ cfg_if::cfg_if! {
 
 /// The default parker implementation used by [`AtomicEager`](crate::linking::AtomicEager).
 ///
-/// It is selected from the enabled features, by decreasing priority: `atomic-wait`
-/// (`AtomicParker`), `parking_lot` (`ParkingLotParker`), `std` (`StdParker`), `pthread`
-/// (`PthreadParker`, unix only), and [`SpinParker`] otherwise.
+/// If supported by the platform, [`AtomicWaiter`] is used. Otherwise, it is selected from the
+/// enabled features, by decreasing priority: `parking_lot` (`ParkingLotParker`), `std`
+/// (`StdParker`), `pthread` (`PthreadParker`, unix only), and [`SpinParker`] otherwise.
 pub type DefaultParker = DefaultParkerImpl;

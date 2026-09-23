@@ -9,7 +9,7 @@ A concurrent intrusive list with lock-free insertion, mainly for building synchr
 - 100% safe API
 - `#![no_std]`, no allocation
 - Atomic emptiness check to avoid acquiring the mutex if the list is empty
-- Lock-free[^1] insertion: multiple nodes can be inserted concurrently while another is being removed; removal requires locking
+- Lock-free insertion: multiple nodes can be inserted concurrently while another is being removed; removal requires locking
 - Optional atomic state embedded in the list when empty (to carry a semaphore counter, a closed flag, etc.)
 - `WaitList`, a high-level asynchronous wait list with customizable synchronization built on top of the low-level `List`
 
@@ -156,7 +156,6 @@ See [examples](examples) for full implementations of `tokio::sync::Notify` and `
 | Feature | Description |
 |---------|-------------|
 | `std` *(default)* | `std::sync`-based mutex and condvar parker |
-| `atomic-wait` | Futex-based parker via the `atomic-wait` crate |
 | `lock_api` | `lock_api::RawMutex` trait implementation |
 | `parking_lot` | `parking_lot` mutex; implies `lock_api` |
 | `portable-atomic` | Atomics via the `portable-atomic` crate, for targets without native atomic support |
@@ -168,7 +167,7 @@ Without any features enabled, the library falls back to spin-based mutex and par
 
 Results of the `tokio` benchmarks, run with both `tokio` native primitives and their `maillon` counterparts from [examples](examples) on an Intel i7-1065G7:
 
-*benchmarks prefixed by `contention`/`uncontented`[^2] measure `Semaphore` performance*
+*benchmarks prefixed by `contention`/`uncontented`[^1] measure `Semaphore` performance*
 
 | Benchmark                       |       maillon |     tokio | maillon speedup |
 |---------------------------------|----------:|----------:|------------:|
@@ -198,11 +197,11 @@ Results of the `tokio` benchmarks, run with both `tokio` native primitives and t
 
 ## Safety and testing
 
-Concurrent intrusive lists are one of the most unsafe[^3] concepts in Rust, so this crate uses unsafe code. It is tested with both [`miri`](https://github.com/rust-lang/miri/) and [`loom`](https://github.com/tokio-rs/loom) to ensure algorithm correctness and memory safety.
+Concurrent intrusive lists are one of the most unsafe[^2] concepts in Rust, so this crate uses unsafe code. It is tested with both [`miri`](https://github.com/rust-lang/miri/) and [`loom`](https://github.com/tokio-rs/loom) to ensure algorithm correctness and memory safety.
 
 Reimplementations of `tokio::sync::Notify` and `tokio::sync::Semaphore` are also tested on the full tokio test suite (also with `miri` and `loom`).
 
-`List` exposes a 100% safe API, so `WaitList` and `tokio` reimplementations don't use unsafe code[^4].
+`List` exposes a 100% safe API, so `WaitList` and `tokio` reimplementations don't use unsafe code[^3].
 
 ## Acknowledgements
 
@@ -219,7 +218,6 @@ Licensed under either of
 
 at your option.
 
-[^1]: In some rare cases, an inserting thread might need to unpark a remover thread, making insertion not strictly lock-free. It is also possible to switch the list to lazy node linking, making the node insertion fully lock-free. A third option is serialized linking, where insertion requires locking but can then happen at any position through a cursor, not only at the back.
-[^2]: The `uncontented` typo comes from the original `tokio` benchmark.
-[^3]: There is literally a [hack](https://rust-lang.github.io/rfcs/3467-unsafe-pinned.html) in the compiler to support them.
-[^4]: Except for the pin projection of `wait_list::wait::WaitUntil`, written directly to avoid depending on `pin-project-lite`.
+[^1]: The `uncontented` typo comes from the original `tokio` benchmark.
+[^2]: There is literally a [hack](https://rust-lang.github.io/rfcs/3467-unsafe-pinned.html) in the compiler to support them.
+[^3]: Except for the pin projection of `wait_list::wait::WaitUntil`, written directly to avoid depending on `pin-project-lite`.

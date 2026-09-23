@@ -66,7 +66,7 @@ unsafe impl<R: lock_api::RawMutex + Send + Sync + 'static> Mutex for lock_api::M
 }
 
 cfg_if::cfg_if! {
-    if #[cfg(loom)] {
+    if #[cfg(any(loom, miri))] {
         type DefaultMutexImpl = crate::loom::sync::Mutex<()>;
     } else if #[cfg(feature = "parking_lot")] {
         type DefaultMutexImpl = parking_lot::Mutex<()>;
