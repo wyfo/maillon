@@ -18,7 +18,7 @@ use loom::sync::atomic::{AtomicUsize, fence};
 use maillon::{
     List, ListRef, LockedList, Node, NodeData, NodeState,
     linking::{AtomicEager, Linking},
-    list::{GetBack, GetFront, ListEnd, ListGetEnd},
+    list::{Back, End, Front},
     node::NodeRef,
     node_wrapper,
     sync::mutex::DefaultMutex,
@@ -57,22 +57,22 @@ impl<L: Linking> Notify<L> {
     }
 
     #[inline(always)]
-    fn notify_single<E: ListGetEnd>(&self, notification: Notification) {
+    fn notify_single<E: End>(&self) {
         self.list.update_state_or_lock_with(
             Relaxed,
             Relaxed,
             |state| state | STATE_NOTIFIED,
-            |locked| self.wake_single::<E>(notification, locked),
+            |locked| self.wake_single::<E>(locked),
         );
     }
 
-    fn wake_single<'a, E: ListGetEnd>(
-        &'a self,
-        notification: Notification,
-        mut locked: LockedList<'a, Waiter, usize, (), L>,
-    ) {
-        let mut waiter = E::get_end(&mut locked).unwrap();
-        waiter.data_mut().notification = Some(notification);
+    fn wake_single<'a, E: End>(&'a self, mut locked: LockedList<'a, Waiter, usize, (), L>) {
+        let mut waiter = locked.end::<E>().unwrap();
+        waiter.data_mut().notification = Some(if E::IS_FRONT {
+            Notification::One
+        } else {
+            Notification::Last
+        });
         let waker = waiter.data_mut().waker.take();
         waiter.unlink(|_, _| self.generation_backup.load(Relaxed));
         drop(locked);
@@ -83,12 +83,12 @@ impl<L: Linking> Notify<L> {
 
     #[inline]
     pub fn notify_one(&self) {
-        self.notify_single::<GetFront>(Notification::One);
+        self.notify_single::<Front>();
     }
 
     #[inline]
     pub fn notify_last(&self) {
-        self.notify_single::<GetBack>(Notification::Last);
+        self.notify_single::<Back>();
     }
 
     fn wake_waiters<'a>(&'a self, locked: LockedList<'a, Waiter, usize, (), L>) {
@@ -208,6 +208,7 @@ impl<N: Deref<Target = Notify<L>>, L: Linking> NodeData<NotifyRef<N, L>> for Wai
         list: &NotifyRef<N, L>,
         _list_data: &mut (),
     ) -> usize {
+        debug_assert!(self.notification.is_none());
         list.0.generation_backup.load(Relaxed)
     }
 
@@ -230,10 +231,10 @@ impl<N: Deref<Target = Notify<L>>, L: Linking> NodeData<NotifyRef<N, L>> for Wai
             {
                 match self.notification {
                     Some(Notification::One) => {
-                        list.0.wake_single::<GetFront>(Notification::One, locked);
+                        list.0.wake_single::<Front>(locked);
                     }
                     Some(Notification::Last) => {
-                        list.0.wake_single::<GetBack>(Notification::Last, locked);
+                        list.0.wake_single::<Back>(locked);
                     }
                     _ => {}
                 }

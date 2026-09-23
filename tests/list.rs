@@ -10,9 +10,7 @@ use loom::{model, thread};
 use maillon::{
     List, Node, NodeState,
     linking::{Linking, Serialized},
-    list::{
-        DrainEnd, DrainGetEnd, GetBack, GetFront, LIST_STATE_MAX, ListEnd, ListGetEnd, LockedList,
-    },
+    list::{Back, End, Front, LIST_STATE_MAX, LockedList},
     node::{NodeData, NodeRef},
 };
 use rstest::rstest;
@@ -81,20 +79,20 @@ fn panic_in_drain_execute_unlocked<L: Linking>(
 }
 
 #[rstest]
-fn remove_many<L: Linking, E: ListGetEnd>(
+fn remove_many<L: Linking, E: End>(
     #[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>,
-    #[values((GetFront, [1, 2, 3]), (GetBack, [3, 2, 1]))] (_end, ids): (E, [usize; 3]),
+    #[values((Front, [1, 2, 3]), (Back, [3, 2, 1]))] (_end, ids): (E, [usize; 3]),
 ) {
     model(move || {
         let list = TestList::<L>::new();
         let nodes: [_; 3] = array::from_fn(|i| push_node(&list, i + 1));
         let mut locked = list.lock();
-        let mut end = E::get_end(&mut locked);
+        let mut end = locked.end::<E>();
         for id in ids {
             let node = end.expect("cursor should reach every node");
             assert_eq!(node.data().0, id);
             assert!(nodes[id - 1].is_linked());
-            end = node.unlink(|_, _| ());
+            end = node.unlink();
             assert!(!nodes[id - 1].is_linked());
         }
         assert!(end.is_none());
@@ -104,15 +102,15 @@ fn remove_many<L: Linking, E: ListGetEnd>(
 }
 
 #[rstest]
-fn drain_many<L: Linking, E: DrainGetEnd>(
+fn drain_many<L: Linking, E: End>(
     #[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>,
-    #[values((GetFront, [1, 2, 3]), (GetBack, [3, 2, 1]))] (_end, ids): (E, [usize; 3]),
+    #[values((Front, [1, 2, 3]), (Back, [3, 2, 1]))] (_end, ids): (E, [usize; 3]),
 ) {
     model(move || {
         let list = TestList::<L>::new();
         let nodes: [_; 3] = array::from_fn(|i| push_node(&list, i + 1));
         let mut drain = pin!(list.lock().drain());
-        let mut end = E::get_end(drain.as_mut());
+        let mut end = drain.as_mut().end::<E>();
         assert!(list.is_empty(Relaxed));
         for id in ids {
             let node = end.expect("cursor should reach every node");

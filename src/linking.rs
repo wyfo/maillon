@@ -8,7 +8,7 @@ use core::{
 use crate::msrv::StrictProvenance;
 use crate::{
     backoff::{BackoffLimit, BackoffStrategy, BoundedBackoffStrategy, NoBackoff, SpinBackoff},
-    list::{DrainGetEnd, GetBack, GetFront, HEAD_MARKER},
+    list::{Back, End, Front, HEAD_MARKER},
     loom::{AtomicPtrExt, cell::Cell, sync::atomic::AtomicPtr},
     msrv::ptr,
     node::NodeLink,
@@ -18,7 +18,7 @@ use crate::{
 
 pub trait Linking: PrivateLinking + Send + Sync + 'static {
     #[doc(hidden)]
-    type PreferredDrainGetEnd: DrainGetEnd;
+    type PreferredDrainEnd: End;
 }
 
 mod private {
@@ -211,7 +211,7 @@ impl<B: BackoffStrategy, P: Parker, PB: BoundedBackoffStrategy> PrivateLinking
     }
 }
 impl<B: BackoffStrategy, P: Parker, PB: BoundedBackoffStrategy> Linking for AtomicEager<B, P, PB> {
-    type PreferredDrainGetEnd = GetFront;
+    type PreferredDrainEnd = Front;
 }
 
 #[derive(Debug)]
@@ -320,7 +320,7 @@ impl<B: BackoffStrategy> PrivateLinking for AtomicLazy<B> {
     }
 }
 impl<B: BackoffStrategy> Linking for AtomicLazy<B> {
-    type PreferredDrainGetEnd = GetBack;
+    type PreferredDrainEnd = Back;
 }
 
 #[derive(Debug)]
@@ -380,5 +380,5 @@ impl PrivateLinking for Serialized {
     }
 }
 impl Linking for Serialized {
-    type PreferredDrainGetEnd = GetFront;
+    type PreferredDrainEnd = Front;
 }

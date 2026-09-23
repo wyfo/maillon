@@ -12,7 +12,7 @@ use crate::msrv::OptionExt;
 use crate::{
     List, ListRef, Node, NodeData,
     linking::{AtomicEager, Linking},
-    list::{GetBack, GetFront, ListEnd, ListGetEnd, LockedList},
+    list::{Back, End, Front, LockedList},
     loom::sync::atomic::{Ordering::Relaxed, fence},
     node::NodeRef,
     sync::mutex::{DefaultMutex, Mutex},
@@ -69,14 +69,6 @@ enum Notified<N> {
 }
 
 impl<N> Notified<N> {
-    fn inner(&self) -> &N {
-        match self {
-            Self::One(notification) | Self::Last(notification) | Self::All(notification) => {
-                notification
-            }
-        }
-    }
-
     fn into_inner(self) -> N {
         match self {
             Self::One(notification) | Self::Last(notification) | Self::All(notification) => {
@@ -266,7 +258,7 @@ impl<N: Notification, S: Synchronization, L: Linking, M: Mutex, const WAKER_BATC
     /// Returns `true` if a waiter has been notified.
     #[inline]
     pub fn notify_one_with<F: FnOnce() -> N>(&self, notification: F) -> bool {
-        !self.is_empty() && self.wake_single::<GetFront, _>(|| Notified::One(notification()), false)
+        !self.is_empty() && self.wake_single::<Front, _>(notification)
     }
 
     /// Notifies the last registered waiter matching the notification.
@@ -277,45 +269,45 @@ impl<N: Notification, S: Synchronization, L: Linking, M: Mutex, const WAKER_BATC
     /// Returns `true` if a waiter has been notified.
     #[inline]
     pub fn notify_last_with<F: FnOnce() -> N>(&self, notification: F) -> bool {
-        !self.is_empty() && self.wake_single::<GetBack, _>(|| Notified::Last(notification()), true)
+        !self.is_empty() && self.wake_single::<Back, _>(notification)
     }
 
     #[cold]
-    fn wake_single<E: ListGetEnd, F: FnOnce() -> Notified<N>>(
-        &self,
-        notification: F,
-        last: bool,
-    ) -> bool {
-        Self::wake_single_locked::<E, F>(self.list.lock(), notification, last)
+    fn wake_single<E: End, F: FnOnce() -> N>(&self, notification: F) -> bool {
+        Self::wake_single_locked::<E, F>(self.list.lock(), notification)
     }
 
-    fn wake_single_locked<E: ListGetEnd, F: FnOnce() -> Notified<N>>(
+    fn wake_single_locked<E: End, F: FnOnce() -> N>(
         mut locked: LockedList<Waiter<N>, usize, (), L, M>,
         notification: F,
-        last: bool,
     ) -> bool {
-        let Some(mut waiter) = E::get_end(&mut locked) else {
+        let Some(mut waiter) = locked.end::<E>() else {
             return false;
         };
         let notification = notification();
-        let waker = if notification.inner().matches(&waiter.data().waiter) {
-            waiter.data_mut().notification = Some(notification);
+        let notified = if E::IS_FRONT {
+            Notified::One
+        } else {
+            Notified::Last
+        };
+        let waker = if notification.matches(&waiter.data().waiter) {
+            waiter.data_mut().notification = Some(notified(notification));
             let waker = waiter.data_mut().waker.take();
             waiter.unlink(|_, _| STATE_OPEN);
             waker
         } else {
             let mut cursor = waiter.into_cursor();
             loop {
-                if last {
-                    cursor.move_prev();
-                } else {
+                if E::IS_FRONT {
                     cursor.move_next();
+                } else {
+                    cursor.move_prev();
                 }
                 let Some(mut waiter) = cursor.current() else {
                     return false;
                 };
-                if notification.inner().matches(&waiter.waiter) {
-                    waiter.notification = Some(notification);
+                if notification.matches(&waiter.waiter) {
+                    waiter.notification = Some(notified(notification));
                     let waker = waiter.waker.take();
                     cursor.remove_current(|_, _| STATE_OPEN);
                     break waker;
@@ -551,17 +543,15 @@ impl<'a, N: Notification, S: Synchronization, L: Linking, M: Mutex, const WAKER_
             debug_assert!(!state_updated_on_unlink);
             match notif {
                 Notified::One(notification) => {
-                    WaitList::<N, S, L, M, WAKER_BATCH_SIZE>::wake_single_locked::<GetFront, _>(
+                    WaitList::<N, S, L, M, WAKER_BATCH_SIZE>::wake_single_locked::<Front, _>(
                         locked,
-                        || Notified::One(notification),
-                        false,
+                        || notification,
                     );
                 }
                 Notified::Last(notification) => {
-                    WaitList::<N, S, L, M, WAKER_BATCH_SIZE>::wake_single_locked::<GetBack, _>(
+                    WaitList::<N, S, L, M, WAKER_BATCH_SIZE>::wake_single_locked::<Back, _>(
                         locked,
-                        || Notified::Last(notification),
-                        true,
+                        || notification,
                     );
                 }
                 _ => unreachable!(),

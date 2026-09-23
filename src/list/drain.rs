@@ -1,7 +1,7 @@
 //! The [`Drain`] and its ends.
 #[cfg(nightly)]
 use core::pin::UnsafePinned;
-use core::{mem::ManuallyDrop, pin::Pin, ptr::NonNull, task::Waker};
+use core::{marker::PhantomData, mem::ManuallyDrop, pin::Pin, ptr::NonNull, task::Waker};
 
 #[allow(unused_imports)]
 use crate::msrv::StrictProvenance;
@@ -9,7 +9,7 @@ use crate::msrv::StrictProvenance;
 use crate::unsafe_pinned::UnsafePinned;
 use crate::{
     list::{
-        AtomicEager, GetBack, GetFront, HEAD_MARKER, IntoTail, Linking, ListState, LockedList,
+        AtomicEager, Back, End, Front, HEAD_MARKER, IntoTail, Linking, ListState, LockedList,
         NodeLink, TailExt,
     },
     loom::{
@@ -114,24 +114,31 @@ impl<'a, T, S: ListState, D, L: Linking, M: Mutex> Drain<'a, T, S, D, L, M> {
         sentinel.prev.load(Relaxed).is_null()
     }
 
+    /// Returns the node at the end `E` of the drain, `None` if it is empty.
+    #[inline]
+    pub fn end<E: End>(self: Pin<&mut Self>) -> Option<DrainEnd<'a, '_, E, T, S, D, L, M>> {
+        let this = unsafe { self.get_unchecked_mut() };
+        Some(DrainEnd {
+            node: if E::IS_FRONT {
+                this.head()?
+            } else {
+                this.tail()?
+            },
+            drain: this,
+            _end: PhantomData,
+        })
+    }
+
     /// Returns the front node of the drain, `None` if it is empty.
     #[inline]
     pub fn front(self: Pin<&mut Self>) -> Option<DrainFront<'a, '_, T, S, D, L, M>> {
-        let this = unsafe { self.get_unchecked_mut() };
-        Some(DrainFront {
-            node: this.head()?,
-            drain: this,
-        })
+        self.end()
     }
 
     /// Returns the back node of the drain, `None` if it is empty.
     #[inline]
     pub fn back(self: Pin<&mut Self>) -> Option<DrainBack<'a, '_, T, S, D, L, M>> {
-        let this = unsafe { self.get_unchecked_mut() };
-        Some(DrainBack {
-            node: this.tail()?,
-            drain: this,
-        })
+        self.end()
     }
 
     /// Executes `f` with the list unlocked, the lock being reacquired before returning.
@@ -167,7 +174,7 @@ impl<'a, T, S: ListState, D, L: Linking, M: Mutex> Drain<'a, T, S, D, L, M> {
         unsafe { self.get_unchecked_mut() }.locked.data_mut()
     }
 
-    fn for_each_impl<E: DrainGetEnd, H>(
+    fn for_each_impl<E: End, H>(
         self,
         mut helper: H,
         mut on_next: impl FnMut(&mut H, Pin<&mut T>, &mut D) -> bool,
@@ -177,7 +184,7 @@ impl<'a, T, S: ListState, D, L: Linking, M: Mutex> Drain<'a, T, S, D, L, M> {
         {
             let mut moved_self = self;
             let mut this = unsafe { Pin::new_unchecked(&mut moved_self) };
-            let mut end = E::get_end(this.as_mut());
+            let mut end = this.as_mut().end::<E>();
             while let Some(mut node) = end {
                 let (data, list_data) = node.split_data();
                 let unlock = on_next(&mut helper, data, list_data);
@@ -187,9 +194,8 @@ impl<'a, T, S: ListState, D, L: Linking, M: Mutex> Drain<'a, T, S, D, L, M> {
                     if end.is_none() {
                         break;
                     }
-                    drop(end);
                     this.as_mut().execute_unlocked(|| on_unlock(&mut helper));
-                    end = E::get_end(this.as_mut());
+                    end = this.as_mut().end::<E>();
                     if end.is_none() {
                         return count;
                     }
@@ -200,7 +206,7 @@ impl<'a, T, S: ListState, D, L: Linking, M: Mutex> Drain<'a, T, S, D, L, M> {
         count
     }
 
-    fn wake_all_impl<E: DrainGetEnd, const WAKER_BATCH_SIZE: usize>(
+    fn wake_all_impl<E: End, const WAKER_BATCH_SIZE: usize>(
         self,
         mut f: impl FnMut(Pin<&mut T>, &mut D) -> Option<Waker>,
     ) -> usize {
@@ -228,7 +234,7 @@ impl<'a, T, S: ListState, D, L: Linking, M: Mutex> Drain<'a, T, S, D, L, M> {
         on_next: N,
         on_unlock: U,
     ) -> usize {
-        self.for_each_impl::<L::PreferredDrainGetEnd, _>(helper, on_next, on_unlock)
+        self.for_each_impl::<L::PreferredDrainEnd, _>(helper, on_next, on_unlock)
     }
 
     /// Unlinks all the nodes of the chain, waking the wakers returned by `f`, and returns the
@@ -243,13 +249,13 @@ impl<'a, T, S: ListState, D, L: Linking, M: Mutex> Drain<'a, T, S, D, L, M> {
         self,
         f: F,
     ) -> usize {
-        self.wake_all_impl::<L::PreferredDrainGetEnd, WAKER_BATCH_SIZE>(f)
+        self.wake_all_impl::<L::PreferredDrainEnd, WAKER_BATCH_SIZE>(f)
     }
 
     #[cold]
     #[inline(never)]
     fn unlink_all(&mut self) {
-        let mut end = L::PreferredDrainGetEnd::get_end(unsafe { Pin::new_unchecked(self) });
+        let mut end = unsafe { Pin::new_unchecked(self) }.end::<L::PreferredDrainEnd>();
         while let Some(node) = end {
             end = node.unlink();
         }
@@ -267,221 +273,85 @@ impl<'a, T, S: ListState, D, L: Linking, M: Mutex> Drop for Drain<'a, T, S, D, L
 }
 
 /// An end of a [`Drain`] chain, either its [`DrainFront`] or its [`DrainBack`].
-pub trait DrainEnd<
+pub struct DrainEnd<
     'drain,
     'a,
+    E: End,
     T,
     S: ListState = (),
     D = (),
     L: Linking = AtomicEager,
     M: Mutex = DefaultMutex,
->: LinkedNodeRef<T, D> + Sized
-{
-    /// Unlinks the node, returning the new end of the drain, `None` if it becomes empty.
-    fn unlink(self) -> Option<Self>;
+> {
+    node: NonNull<NodeLink<L>>,
+    drain: &'a mut Drain<'drain, T, S, D, L, M>,
+    _end: PhantomData<E>,
 }
 
 /// The front node of a [`Drain`] chain, obtained from [`Drain::front`].
-pub struct DrainFront<
-    'drain,
-    'a,
-    T,
-    S: ListState = (),
-    D = (),
-    L: Linking = AtomicEager,
-    M: Mutex = DefaultMutex,
-> {
-    node: NonNull<NodeLink<L>>,
-    drain: &'a mut Drain<'drain, T, S, D, L, M>,
-}
-
-unsafe impl<'drain, T: Send, S: ListState, D, L: Linking, M: Mutex> Send
-    for DrainFront<'drain, '_, T, S, D, L, M>
-where
-    LockedList<'drain, T, S, D, L, M>: Sync,
-{
-}
-unsafe impl<'drain, T: Sync, S: ListState, D, L: Linking, M: Mutex> Sync
-    for DrainFront<'drain, '_, T, S, D, L, M>
-where
-    LockedList<'drain, T, S, D, L, M>: Sync,
-{
-}
-
-impl<'drain, 'a, T, S: ListState, D, L: Linking, M: Mutex> DrainEnd<'drain, 'a, T, S, D, L, M>
-    for DrainFront<'drain, 'a, T, S, D, L, M>
-{
-    fn unlink(self) -> Option<Self> {
-        DrainFront::unlink(self)
-    }
-}
-
-impl<T, S: ListState, D, L: Linking, M: Mutex> DrainFront<'_, '_, T, S, D, L, M> {
-    pub fn unlink(self) -> Option<Self> {
-        let node = unsafe { self.node.as_ref() };
-        let mut next = None;
-        // TODO there is at least one node so the tail cannot be null
-        let tail = unsafe { self.drain.tail().unwrap_unchecked() };
-        if tail != self.node {
-            let locked = &self.drain.locked;
-            next = Some(locked.get_next(Some(self.node), &node.next, tail));
-        } else {
-            self.drain.set_tail(None);
-        }
-        self.drain.set_head(next);
-        node.unlink();
-        Some(Self {
-            node: next?,
-            drain: self.drain,
-        })
-    }
-}
-
-node_ref!(
-    DrainFront<'drain, 'a, T, S: ListState, D, L: Linking, M: Mutex>,
-    (T, L, D),
-    (self.node),
-    (self.drain.locked)
-);
+pub type DrainFront<'drain, 'a, T, S = (), D = (), L = AtomicEager, M = DefaultMutex> =
+    DrainEnd<'drain, 'a, Front, T, S, D, L, M>;
 
 /// The back node of a [`Drain`] chain, obtained from [`Drain::back`].
-pub struct DrainBack<
-    'drain,
-    'a,
-    T,
-    S: ListState = (),
-    D = (),
-    L: Linking = AtomicEager,
-    M: Mutex = DefaultMutex,
-> {
-    node: NonNull<NodeLink<L>>,
-    drain: &'a mut Drain<'drain, T, S, D, L, M>,
-}
+pub type DrainBack<'drain, 'a, T, S = (), D = (), L = AtomicEager, M = DefaultMutex> =
+    DrainEnd<'drain, 'a, Back, T, S, D, L, M>;
 
-unsafe impl<'drain, T: Send, S: ListState, D, L: Linking, M: Mutex> Send
-    for DrainBack<'drain, '_, T, S, D, L, M>
+unsafe impl<'drain, E: End, T: Send, S: ListState, D, L: Linking, M: Mutex> Send
+    for DrainEnd<'drain, '_, E, T, S, D, L, M>
 where
     LockedList<'drain, T, S, D, L, M>: Sync,
 {
 }
-unsafe impl<'drain, T: Sync, S: ListState, D, L: Linking, M: Mutex> Sync
-    for DrainBack<'drain, '_, T, S, D, L, M>
+unsafe impl<'drain, E: End, T: Sync, S: ListState, D, L: Linking, M: Mutex> Sync
+    for DrainEnd<'drain, '_, E, T, S, D, L, M>
 where
     LockedList<'drain, T, S, D, L, M>: Sync,
 {
 }
 
-impl<'drain, 'a, T, S: ListState, D, L: Linking, M: Mutex> DrainEnd<'drain, 'a, T, S, D, L, M>
-    for DrainBack<'drain, 'a, T, S, D, L, M>
-{
-    fn unlink(self) -> Option<Self> {
-        DrainBack::unlink(self)
-    }
-}
-
-impl<T, S: ListState, D, L: Linking, M: Mutex> DrainBack<'_, '_, T, S, D, L, M> {
+impl<E: End, T, S: ListState, D, L: Linking, M: Mutex> DrainEnd<'_, '_, E, T, S, D, L, M> {
+    /// Unlinks the node, returning the new end of the drain, `None` if it becomes empty.
     #[allow(clippy::incompatible_msrv, unstable_name_collisions)]
     pub fn unlink(self) -> Option<Self> {
         let node = unsafe { self.node.as_ref() };
-        let mut prev = Some(unsafe { node.load_prev() });
-        if prev.as_ptr().addr() == HEAD_MARKER
-            || prev.as_ptr() == ptr::from_mut(self.drain.sentinel())
-        {
-            prev = None;
-            self.drain.set_head(None);
+        let new_end = if E::IS_FRONT {
+            let mut next = None;
+            // TODO there is at least one node so the tail cannot be null
+            let tail = unsafe { self.drain.tail().unwrap_unchecked() };
+            if tail != self.node {
+                let locked = &self.drain.locked;
+                next = Some(locked.get_next(Some(self.node), &node.next, tail));
+            } else {
+                self.drain.set_tail(None);
+            }
+            self.drain.set_head(next);
+            next
         } else {
-            let locked = &self.drain.locked;
-            L::wait_next(unsafe { &prev.unwrap().as_ref().next }, &locked.list.parker);
-        }
-        self.drain.set_tail(prev);
+            let mut prev = Some(unsafe { node.load_prev() });
+            if prev.as_ptr().addr() == HEAD_MARKER
+                || prev.as_ptr() == ptr::from_mut(self.drain.sentinel())
+            {
+                prev = None;
+                self.drain.set_head(None);
+            } else {
+                let locked = &self.drain.locked;
+                L::wait_next(unsafe { &prev.unwrap().as_ref().next }, &locked.list.parker);
+            }
+            self.drain.set_tail(prev);
+            prev
+        };
         node.unlink();
         Some(Self {
-            node: prev?,
+            node: new_end?,
             drain: self.drain,
+            _end: PhantomData,
         })
     }
 }
 
 node_ref!(
-    DrainBack<'drain, 'a, T, S: ListState, D, L: Linking, M: Mutex>,
+    DrainEnd<'drain, 'a, E: End, T, S: ListState, D, L: Linking, M: Mutex>,
     (T, L, D),
     (self.node),
     (self.drain.locked)
 );
-
-pub trait DrainGetEnd: Sized {
-    type DrainEnd<'drain, 'a, T, S: ListState, D, L: Linking, M: Mutex>: DrainEnd<'drain, 'a, T, S, D, L, M>
-    where
-        'drain: 'a,
-        T: 'drain,
-        D: 'drain;
-
-    fn get_end<'drain, 'a, T, S: ListState, D, L: Linking, M: Mutex>(
-        drain: Pin<&'a mut Drain<'drain, T, S, D, L, M>>,
-    ) -> Option<Self::DrainEnd<'drain, 'a, T, S, D, L, M>>;
-
-    fn for_each<
-        T,
-        S: ListState,
-        D,
-        L: Linking,
-        M: Mutex,
-        H,
-        N: FnMut(&mut H, Pin<&mut T>, &mut D) -> bool,
-        U: FnMut(&mut H),
-    >(
-        drain: Drain<'_, T, S, D, L, M>,
-        helper: H,
-        on_next: N,
-        on_unlock: U,
-    ) -> usize {
-        drain.for_each_impl::<Self, _>(helper, on_next, on_unlock)
-    }
-
-    fn wake_all<
-        const WAKER_BATCH_SIZE: usize,
-        T,
-        S: ListState,
-        D,
-        L: Linking,
-        M: Mutex,
-        F: FnMut(Pin<&mut T>, &mut D) -> Option<Waker>,
-    >(
-        drain: Drain<'_, T, S, D, L, M>,
-        f: F,
-    ) -> usize {
-        drain.wake_all_impl::<Self, WAKER_BATCH_SIZE>(f)
-    }
-}
-
-impl DrainGetEnd for GetFront {
-    type DrainEnd<'drain, 'a, T, S: ListState, D, L: Linking, M: Mutex>
-        = DrainFront<'drain, 'a, T, S, D, L, M>
-    where
-        'drain: 'a,
-        T: 'drain,
-        D: 'drain;
-
-    #[inline]
-    fn get_end<'drain, 'a, T, S: ListState, D, L: Linking, M: Mutex>(
-        drain: Pin<&'a mut Drain<'drain, T, S, D, L, M>>,
-    ) -> Option<Self::DrainEnd<'drain, 'a, T, S, D, L, M>> {
-        drain.front()
-    }
-}
-
-impl DrainGetEnd for GetBack {
-    type DrainEnd<'drain, 'a, T, S: ListState, D, L: Linking, M: Mutex>
-        = DrainBack<'drain, 'a, T, S, D, L, M>
-    where
-        'drain: 'a,
-        T: 'drain,
-        D: 'drain;
-
-    #[inline]
-    fn get_end<'drain, 'a, T, S: ListState, D, L: Linking, M: Mutex>(
-        drain: Pin<&'a mut Drain<'drain, T, S, D, L, M>>,
-    ) -> Option<Self::DrainEnd<'drain, 'a, T, S, D, L, M>> {
-        drain.back()
-    }
-}

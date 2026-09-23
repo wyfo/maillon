@@ -10,7 +10,7 @@ use crate::{
         sync::atomic::{AtomicPtr, Ordering, Ordering::*, fence},
     },
     msrv::ptr,
-    node::{LinkedNodeRef, NodeData, NodeLink, NodeRef, NodeUnlinked, PrivateNodeRef, node_ref},
+    node::{NodeData, NodeLink, NodeRef, NodeUnlinked, PrivateNodeRef, node_ref},
     sync::mutex::{DefaultMutex, Mutex},
     utils::abort_on_unwind,
 };
@@ -468,25 +468,35 @@ impl<'a, T, S: ListState, D, L: Linking, M: Mutex> LockedList<'a, T, S, D, L, M>
         L::get_next(node, next, tail, &self.list.parker)
     }
 
+    /// Returns the node at the end `E` of the list, `None` if it is empty.
+    #[inline]
+    pub fn end<E: End>(&mut self) -> Option<ListEnd<'a, '_, E, T, S, D, L, M>> {
+        let node = if E::IS_FRONT {
+            if L::SERIALIZED {
+                L::load_next(&self.list.head)?
+            } else {
+                self.get_next(None, &self.list.head, self.list.tail()?)
+            }
+        } else {
+            self.list.tail()?
+        };
+        Some(ListEnd {
+            node,
+            locked: self,
+            _end: PhantomData,
+        })
+    }
+
     /// Returns the front node of the list, `None` if it is empty.
     #[inline]
-    pub fn front(&mut self) -> Option<ListFront<'a, '_, T, S, D, L, M>>
-    where
-        L: Linking,
-    {
-        let node = if L::SERIALIZED {
-            L::load_next(&self.list.head)?
-        } else {
-            self.get_next(None, &self.list.head, self.list.tail()?)
-        };
-        Some(ListFront { node, locked: self })
+    pub fn front(&mut self) -> Option<ListFront<'a, '_, T, S, D, L, M>> {
+        self.end()
     }
 
     /// Returns the back node of the list, `None` if it is empty.
     #[inline]
     pub fn back(&mut self) -> Option<ListBack<'a, '_, T, S, D, L, M>> {
-        let node = self.list.tail()?;
-        Some(ListBack { node, locked: self })
+        self.end()
     }
 
     /// Returns a cursor pointing to the front node of the list, or to the ghost node if it is
@@ -731,215 +741,135 @@ impl<T, S: ListState, D, L: Linking, M: Mutex> Drop for LockedList<'_, T, S, D, 
     }
 }
 
+mod private {
+    pub trait PrivateEnd {}
+}
+pub(crate) use private::PrivateEnd;
+
+/// An end of a [`List`] or a [`Drain`], either [`Front`] or [`Back`].
+pub trait End: PrivateEnd {
+    /// `true` for [`Front`].
+    const IS_FRONT: bool;
+    /// `true` for [`Back`].
+    const IS_BACK: bool;
+}
+
+/// The front end of a [`List`] or a [`Drain`].
+pub struct Front;
+/// The back end of a [`List`] or a [`Drain`].
+pub struct Back;
+
+impl PrivateEnd for Front {}
+impl End for Front {
+    const IS_FRONT: bool = true;
+    const IS_BACK: bool = false;
+}
+
+impl PrivateEnd for Back {}
+impl End for Back {
+    const IS_FRONT: bool = false;
+    const IS_BACK: bool = true;
+}
+
 /// An end of a locked [`List`], either its [`ListFront`] or its [`ListBack`].
-pub trait ListEnd<
+pub struct ListEnd<
     'locked,
     'a,
+    E: End,
     T,
     S: ListState = (),
     D = (),
     L: Linking = AtomicEager,
     M: Mutex = DefaultMutex,
->: LinkedNodeRef<T, D> + Sized
+> {
+    node: NonNull<NodeLink<L>>,
+    locked: &'a mut LockedList<'locked, T, S, D, L, M>,
+    _end: PhantomData<E>,
+}
+
+/// The front node of a locked [`List`], obtained from [`LockedList::front`].
+pub type ListFront<'locked, 'a, T, S = (), D = (), L = AtomicEager, M = DefaultMutex> =
+    ListEnd<'locked, 'a, Front, T, S, D, L, M>;
+
+/// The back node of a locked [`List`], obtained from [`LockedList::back`].
+pub type ListBack<'locked, 'a, T, S = (), D = (), L = AtomicEager, M = DefaultMutex> =
+    ListEnd<'locked, 'a, Back, T, S, D, L, M>;
+
+unsafe impl<'locked, E: End, T: Send, S: ListState, D, L: Linking, M: Mutex> Send
+    for ListEnd<'locked, '_, E, T, S, D, L, M>
+where
+    LockedList<'locked, T, S, D, L, M>: Send,
 {
+}
+unsafe impl<'locked, E: End, T: Sync, S: ListState, D, L: Linking, M: Mutex> Sync
+    for ListEnd<'locked, '_, E, T, S, D, L, M>
+where
+    LockedList<'locked, T, S, D, L, M>: Sync,
+{
+}
+
+impl<'locked, 'a, E: End, T, S: ListState, D, L: Linking, M: Mutex>
+    ListEnd<'locked, 'a, E, T, S, D, L, M>
+{
+    #[inline]
+    fn unlink_impl<F: FnOnce(Pin<&mut T>, &mut D) -> S>(
+        self,
+        new_state_if_last_node: F,
+    ) -> Option<Self> {
+        let (next, tail) = unsafe {
+            (self.locked).remove(
+                self.node,
+                new_state_if_last_node,
+                E::IS_FRONT,
+                E::IS_BACK,
+                false,
+            )
+        };
+        Some(Self {
+            node: if E::IS_FRONT { next? } else { tail? },
+            locked: self.locked,
+            _end: PhantomData,
+        })
+    }
+
+    /// Returns a cursor pointing to the node.
+    #[inline]
+    pub fn into_cursor(self) -> ListCursor<'locked, 'a, T, S, D, L, M> {
+        ListCursor::new(Some(self.node), self.locked)
+    }
+}
+
+impl<E: End, T, D, L: Linking, M: Mutex> ListEnd<'_, '_, E, T, (), D, L, M> {
+    /// Unlinks the node, returning the new end of the list, `None` if it becomes empty.
+    ///
+    /// With atomic linkings, the new back may be a node pushed after the unlinked one; use a
+    /// [`Drain`] to walk a fixed set of nodes.
+    #[inline]
+    pub fn unlink(self) -> Option<Self> {
+        self.unlink_impl(|_, _| ())
+    }
+}
+
+impl<E: End, T, D, L: Linking, M: Mutex> ListEnd<'_, '_, E, T, usize, D, L, M> {
     /// Unlinks the node, returning the new end of the list, `None` if it becomes empty.
     ///
     /// If the node was the last remaining one, the list state is updated with
     /// `new_state_if_last_node`.
-    fn unlink<F: FnOnce(Pin<&mut T>, &mut D) -> S>(self, new_state_if_last_node: F)
-    -> Option<Self>;
-
-    /// Returns a cursor pointing to the node.
-    fn into_cursor(self) -> ListCursor<'locked, 'a, T, S, D, L, M>;
-}
-
-/// The front node of a locked [`List`], obtained from [`LockedList::front`].
-pub struct ListFront<
-    'locked,
-    'a,
-    T,
-    S: ListState = (),
-    D = (),
-    L: Linking = AtomicEager,
-    M: Mutex = DefaultMutex,
-> {
-    node: NonNull<NodeLink<L>>,
-    locked: &'a mut LockedList<'locked, T, S, D, L, M>,
-}
-
-unsafe impl<'locked, T: Send, S: ListState, D, L: Linking, M: Mutex> Send
-    for ListFront<'locked, '_, T, S, D, L, M>
-where
-    LockedList<'locked, T, S, D, L, M>: Send,
-{
-}
-unsafe impl<'locked, T: Sync, S: ListState, D, L: Linking, M: Mutex> Sync
-    for ListFront<'locked, '_, T, S, D, L, M>
-where
-    LockedList<'locked, T, S, D, L, M>: Sync,
-{
-}
-
-impl<'locked, 'a, T, S: ListState, D, L: Linking, M: Mutex> ListEnd<'locked, 'a, T, S, D, L, M>
-    for ListFront<'locked, 'a, T, S, D, L, M>
-{
+    ///
+    /// With atomic linkings, the new back may be a node pushed after the unlinked one; use a
+    /// [`Drain`] to walk a fixed set of nodes.
     #[inline]
-    fn unlink<F: FnOnce(Pin<&mut T>, &mut D) -> S>(
-        self,
-        new_state_if_last_node: F,
-    ) -> Option<Self> {
-        let (next, _) =
-            unsafe { (self.locked).remove(self.node, new_state_if_last_node, true, false, false) };
-        Some(Self {
-            node: next?,
-            locked: self.locked,
-        })
-    }
-
-    #[inline]
-    fn into_cursor(self) -> ListCursor<'locked, 'a, T, S, D, L, M> {
-        ListCursor::new(Some(self.node), self.locked)
-    }
-}
-
-impl<T, D, L: Linking, M: Mutex> ListFront<'_, '_, T, (), D, L, M> {
-    pub fn unlink(self) -> Option<Self> {
-        ListEnd::unlink(self, |_, _| ())
-    }
-}
-
-impl<T, D, L: Linking, M: Mutex> ListFront<'_, '_, T, usize, D, L, M> {
     pub fn unlink<F: FnOnce(Pin<&mut T>, &mut D) -> usize>(
         self,
         new_state_if_last_node: F,
     ) -> Option<Self> {
-        ListEnd::unlink(self, new_state_if_last_node)
+        self.unlink_impl(new_state_if_last_node)
     }
 }
 
 node_ref!(
-    ListFront<'locked, 'a, T, S: ListState, D, L: Linking, M: Mutex>,
+    ListEnd<'locked, 'a, E: End, T, S: ListState, D, L: Linking, M: Mutex>,
     (T, L, D),
     (self.node),
     (self.locked)
 );
-
-/// The back node of a locked [`List`], obtained from [`LockedList::back`].
-pub struct ListBack<
-    'locked,
-    'a,
-    T,
-    S: ListState = (),
-    D = (),
-    L: Linking = AtomicEager,
-    M: Mutex = DefaultMutex,
-> {
-    node: NonNull<NodeLink<L>>,
-    locked: &'a mut LockedList<'locked, T, S, D, L, M>,
-}
-
-unsafe impl<'locked, T: Send, S: ListState, D, L: Linking, M: Mutex> Send
-    for ListBack<'locked, '_, T, S, D, L, M>
-where
-    LockedList<'locked, T, S, D, L, M>: Send,
-{
-}
-unsafe impl<'locked, T: Sync, S: ListState, D, L: Linking, M: Mutex> Sync
-    for ListBack<'locked, '_, T, S, D, L, M>
-where
-    LockedList<'locked, T, S, D, L, M>: Sync,
-{
-}
-
-impl<'locked, 'a, T, S: ListState, D, L: Linking, M: Mutex> ListEnd<'locked, 'a, T, S, D, L, M>
-    for ListBack<'locked, 'a, T, S, D, L, M>
-{
-    #[inline]
-    fn unlink<F: FnOnce(Pin<&mut T>, &mut D) -> S>(
-        self,
-        new_state_if_last_node: F,
-    ) -> Option<Self> {
-        let (_, tail) =
-            unsafe { (self.locked).remove(self.node, new_state_if_last_node, false, true, false) };
-        Some(Self {
-            node: tail?,
-            locked: self.locked,
-        })
-    }
-
-    #[inline]
-    fn into_cursor(self) -> ListCursor<'locked, 'a, T, S, D, L, M> {
-        ListCursor::new(Some(self.node), self.locked)
-    }
-}
-
-impl<T, D, L: Linking, M: Mutex> ListBack<'_, '_, T, (), D, L, M> {
-    pub fn unlink(self) -> Option<Self> {
-        ListEnd::unlink(self, |_, _| ())
-    }
-}
-
-impl<T, D, L: Linking, M: Mutex> ListBack<'_, '_, T, usize, D, L, M> {
-    pub fn unlink<F: FnOnce(Pin<&mut T>, &mut D) -> usize>(
-        self,
-        new_state_if_last_node: F,
-    ) -> Option<Self> {
-        ListEnd::unlink(self, new_state_if_last_node)
-    }
-}
-
-node_ref!(
-    ListBack<'locked, 'a, T, S: ListState, D, L: Linking, M: Mutex>,
-    (T, L, D),
-    (self.node),
-    (self.locked)
-);
-
-/// The front end of a [`List`] or a [`Drain`].
-pub struct GetFront;
-/// The back end of a [`List`] or a [`Drain`].
-pub struct GetBack;
-
-pub trait ListGetEnd {
-    type ListEnd<'locked, 'a, T, S: ListState, D, L: Linking, M: Mutex>: ListEnd<'locked, 'a, T, S, D, L, M>
-    where
-        'locked: 'a,
-        T: 'locked,
-        D: 'locked;
-
-    fn get_end<'locked, 'a, T, S: ListState, D, L: Linking, M: Mutex>(
-        locked: &'a mut LockedList<'locked, T, S, D, L, M>,
-    ) -> Option<Self::ListEnd<'locked, 'a, T, S, D, L, M>>;
-}
-
-impl ListGetEnd for GetFront {
-    type ListEnd<'locked, 'a, T, S: ListState, D, L: Linking, M: Mutex>
-        = ListFront<'locked, 'a, T, S, D, L, M>
-    where
-        'locked: 'a,
-        T: 'locked,
-        D: 'locked;
-
-    #[inline]
-    fn get_end<'locked, 'a, T, S: ListState, D, L: Linking, M: Mutex>(
-        locked: &'a mut LockedList<'locked, T, S, D, L, M>,
-    ) -> Option<Self::ListEnd<'locked, 'a, T, S, D, L, M>> {
-        locked.front()
-    }
-}
-
-impl ListGetEnd for GetBack {
-    type ListEnd<'locked, 'a, T, S: ListState, D, L: Linking, M: Mutex>
-        = ListBack<'locked, 'a, T, S, D, L, M>
-    where
-        'locked: 'a,
-        T: 'locked,
-        D: 'locked;
-
-    #[inline]
-    fn get_end<'locked, 'a, T, S: ListState, D, L: Linking, M: Mutex>(
-        locked: &'a mut LockedList<'locked, T, S, D, L, M>,
-    ) -> Option<Self::ListEnd<'locked, 'a, T, S, D, L, M>> {
-        locked.back()
-    }
-}
