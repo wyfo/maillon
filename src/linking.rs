@@ -197,7 +197,7 @@ impl<B: BackoffStrategy, P: Parker, PB: BoundedBackoffStrategy> PrivateLinking
                 #[inline(never)]
                 #[allow(clippy::incompatible_msrv, unstable_name_collisions)]
                 fn unpark<P: Parker>(parker: &P, tagged_parked_state: *mut ()) {
-                    // TODO parker must not unwind, as node.linked_list would not bet set otherwise
+                    // Parker must not unwind, as node.linked_list would not bet set otherwise
                     // so the node would not be removed in drop.
                     abort_on_unwind(|| unsafe {
                         parker.unpark(tagged_parked_state.map_addr(|addr| addr & !PARKED_TAG));
@@ -304,7 +304,6 @@ impl<B: BackoffStrategy> PrivateLinking for AtomicLazy<B> {
             _ => SeqCst, // `Ordering` is `#[non_exhaustive]`
         }
     }
-    // TODO `prev` may be freed: no projection
     fn store_next(
         _prev: *mut NodeLink<Self>,
         _head: &Self::NextPtr,
@@ -334,7 +333,7 @@ impl<B: BackoffStrategy> PrivateLinking for AtomicLazy<B> {
         ) -> NonNull<NodeLink<AtomicLazy<B>>> {
             loop {
                 let prev = unsafe { tail.as_ref().load_prev() };
-                // TODO not writing the next pointer of the last node is actually a good thing,
+                // Not writing the next pointer of the last node is actually a good thing,
                 // because it will surely be overwritten just after (when the node is removed)
                 // and it prevents a segfault because prev can be HEAD_MARKER
                 if Some(prev) == node {
@@ -363,9 +362,9 @@ impl<B: BackoffStrategy> PrivateLinking for AtomicLazy<B> {
         }
         let found = find_next(node, tail);
         if node.is_none() {
-            // TODO If the node is None, the next pointer is assumed to be the head
-            // it's better to materialized the head because the front might not be unlinked
-            // so the head will be reused after
+            // If the node is None, the next pointer is assumed to be the head.
+            // It's better to materialize the head because the front might not
+            // be unlinked so the head will be reused after.
             next.set(Some(found));
         }
         found
@@ -434,7 +433,6 @@ impl PrivateLinking for Serialized {
         _tail: NonNull<NodeLink<Self>>,
         _parker: &Self::Parker,
     ) -> NonNull<NodeLink<Self>> {
-        // TODO safety: every link is written under the mutex
         unsafe { Self::load_next(next).unwrap_unchecked() }
     }
     fn update_next(next: &Self::NextPtr, ptr: Option<NonNull<NodeLink<Self>>>) {

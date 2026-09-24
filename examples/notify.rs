@@ -117,12 +117,10 @@ impl<L: Linking> Notify<L> {
         self.list.load_state(Acquire).unwrap_or(backup) & !STATE_NOTIFIED
     }
 
-    // TODO
-    /// Publishes `generation` into [`Self::generation_backup`], so that it stays available
-    /// while the tail word holds a node pointer instead of the state.
+    /// Publishes the generation into the backup before pushing a waiter and erasing the list state.
     ///
-    /// Returns `false` if a *newer* generation had already been published, meaning the
-    /// caller has been notified in the meantime and must complete instead of waiting.
+    /// Returns `false` if a newer generation has been published, meaning the caller has already
+    /// been notified.
     fn store_generation_backup(&self, generation: usize) -> bool {
         debug_assert!(generation & STATE_NOTIFIED == 0);
         if cfg!(all(target_arch = "aarch64", target_pointer_width = "64"))
@@ -137,8 +135,8 @@ impl<L: Linking> Notify<L> {
             }
             stored
         } else {
-            // TODO 32-bit can't use a raw comparison, but the codegen is almost equivalent
-            // TODO backup - generation gives better codegen than generation - backup
+            // 32-bit can't use raw comparison because of wrapping, but the codegen is almost
+            // equivalent. `backup - generation` gives better codegen than `generation - backup`.
             let is_old = |backup: usize| (backup.wrapping_sub(generation) as isize) < 0;
             let mut backup = self.generation_backup.load(Relaxed);
             loop {
@@ -268,8 +266,8 @@ fn poll_notified<N: Deref<Target = Notify<L>>, L: Linking>(
             }
             let notify = &*node.list().0;
             match node.try_update_state_or_push_back_with(
-                AcqRel,  // TODO Acquire for successful notification, Release for generation_backup CAS
-                Acquire, // TODO Acquire for generation
+                AcqRel,  // Acquire for successful notification, Release for generation_backup CAS
+                Acquire, // Acquire as the generation might have been updated, causing early return
                 |waiter, state| {
                     (state == waiter.generation | STATE_NOTIFIED).then_some(state & !STATE_NOTIFIED)
                 },
@@ -277,11 +275,6 @@ fn poll_notified<N: Deref<Target = Notify<L>>, L: Linking>(
                 |mut waiter, state| {
                     let completed = match state {
                         Some(state) => {
-                            // TODO this assertion is just the negation of the condition above
-                            debug_assert!(
-                                state & STATE_NOTIFIED == 0
-                                    || state & !STATE_NOTIFIED != waiter.generation
-                            );
                             waiter.generation != state || !notify.store_generation_backup(state)
                         }
                         None => waiter.generation != notify.generation_backup.load(Relaxed),
@@ -302,7 +295,8 @@ fn poll_notified<N: Deref<Target = Notify<L>>, L: Linking>(
         }
         NodeState::Linked(mut node) => {
             if node.list().0.generation() != node.generation {
-                // TODO if generation is different, the node must be in a drain list
+                // If the generation is different, notify_all must have been called
+                // and the node must still be in the drain list.
                 node.completed = true;
                 node.unlink(|_, _| unreachable!());
                 return Poll::Ready(());

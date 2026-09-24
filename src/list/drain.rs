@@ -53,28 +53,14 @@ impl<'a, T, S: ListState, D, L: Linking, M: Mutex> Drain<'a, T, S, D, L, M> {
         if locked.list.tail().is_some() {
             head = L::wait_next(&locked.list.head, &locked.list.parker);
             L::update_next(&locked.list.head, None);
-            // TODO
-            // `Release` is for the `head` store just above: it must not sink past the swap.
-            // Otherwise a concurrent enqueuer whose phase-1 CAS lands after the swap writes
-            // its node into `head`, and the `null` store then clobbers that write. This is
-            // worse than the equivalent race in `LockedList::remove`: there is no `Err` path
-            // here to relink, so the lost node leaves a null `head` on a non-empty list and
-            // the next dequeuer parks forever.
-            //
-            // No `Acquire` half is needed. The detached chain is walked through `Acquire`
-            // `next` loads, which already cover every node in it, including the one this swap
-            // returns.
-            //
-            // `SeqCst` is not needed either: the swap races with enqueue on the same atomic,
-            // and coherence-ordered-before applies to any modification whatever its ordering
-            // (https://github.com/rust-lang/miri/issues/5104, fixed by #5111), so the tail's
-            // own modification order settles who wins.
             let new_tail = new_state_if_not_empty(locked.data_mut()).into_tail();
             let old_tail = if L::SERIALIZED {
                 let tail = locked.list.tail.load(Relaxed);
                 locked.list.tail.store(new_tail, Release);
                 tail
             } else {
+                // TODO Release ordering for the head store above
+                // TODO Acquire ordering to synchronize with node insertion
                 locked.list.tail.swap(new_tail, AcqRel)
             };
             tail = Some(unsafe { old_tail.ptr().unwrap_unchecked() });
@@ -316,7 +302,7 @@ impl<E: End, T, S: ListState, D, L: Linking, M: Mutex> DrainEnd<'_, '_, E, T, S,
         let node = unsafe { self.node.as_ref() };
         let new_end = if E::IS_FRONT {
             let mut next = None;
-            // TODO there is at least one node so the tail cannot be null
+            // SAFETY: there is at least one node so the tail cannot be null
             let tail = unsafe { self.drain.tail().unwrap_unchecked() };
             if tail != self.node {
                 let locked = &self.drain.locked;

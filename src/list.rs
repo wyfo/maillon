@@ -75,9 +75,8 @@ pub struct List<T, S: ListState = (), D = (), L: Linking = AtomicEager, M: Mutex
     mutex: M,
     parker: L::Parker,
     data: UnsafeCell<D>,
-    // TODO same trick as `NodeInner::access`
     #[cfg(loom)]
-    data_access: crate::loom::cell::Cell<()>,
+    data_access: crate::loom::cell::Cell<()>, // same trick as `NodeLink::data_ptr`
     _node_data: PhantomData<T>,
 }
 
@@ -558,9 +557,9 @@ impl<'a, T, S: ListState, D, L: Linking, M: Mutex> LockedList<'a, T, S, D, L, M>
         self.list
     }
 
-    // TODO same trick as `NodeLink::data_ptr` for loom
     #[inline(always)]
     pub(crate) fn data_ptr(&self) -> *mut D {
+        // same trick as `NodeLink::data_ptr` for loom
         #[cfg(loom)]
         self.list.data_access.set(());
         self.list.data.get()
@@ -590,9 +589,9 @@ impl<'a, T, S: ListState, D, L: Linking, M: Mutex> LockedList<'a, T, S, D, L, M>
         is_cursor: bool,
     ) -> (Option<NonNull<NodeLink<L>>>, Option<NonNull<NodeLink<L>>>) {
         debug_assert!(is_front as usize + is_back as usize + is_cursor as usize <= 1);
-        // TODO for self-removal with LazyDoubly/Singly, the tail may not have been acquired
-        // (it was written with at least Release in push_back, but a fence(Acquire) would not
-        // work as the task may have moved in another thread)
+        // For self-removal with AtomicLazy linking, the tail may not have been acquired (it was
+        // written with at least Release in push_back, but a fence(Acquire) would not work as the
+        // task may have moved in another thread)
         if L::NODES_ACCESS_REQUIRES_TAIL_ACQUIRE && !is_front && !is_back && !is_cursor {
             self.list.tail();
         }
@@ -600,7 +599,7 @@ impl<'a, T, S: ListState, D, L: Linking, M: Mutex> LockedList<'a, T, S, D, L, M>
         let prev = if is_front {
             NonNull::new(ptr::without_provenance_mut(HEAD_MARKER)).unwrap()
         } else {
-            // TODO safety the node is linked
+            // SAFETY: node is linked
             unsafe { link_ref.load_prev() }
         };
         let is_head = prev.addr().get() == HEAD_MARKER;
@@ -609,8 +608,8 @@ impl<'a, T, S: ListState, D, L: Linking, M: Mutex> LockedList<'a, T, S, D, L, M>
         } else {
             unsafe { &prev.as_ref().next }
         };
-        // TODO a cursor node may come from the tail or a `prev` walk, so its incoming edge may
-        // still be unpublished, unlike a node returned by `get_next`
+        // A node retrieved from the tail might not have finished its insertion,
+        // so it must be waited before overriding the chaining.
         if is_back || is_cursor {
             L::wait_next(prev_next, &self.list.parker);
         }
@@ -623,8 +622,9 @@ impl<'a, T, S: ListState, D, L: Linking, M: Mutex> LockedList<'a, T, S, D, L, M>
         if next.is_none() {
             L::update_next(prev_next, None);
             let new_tail = if is_head {
-                // TODO raw pointers: `prev_next` may borrow `self.head`
                 let data = unsafe { Pin::new_unchecked(&mut *NodeLink::data_ptr::<T>(link)) };
+                // As `prev_next` may borrow `self.head`, list_data must not invalidate the borrow
+                // and uses raw data pointer.
                 let list_data = unsafe { &mut *self.data_ptr() };
                 new_state_if_last_node(data, list_data).into_tail()
             } else {
@@ -644,10 +644,10 @@ impl<'a, T, S: ListState, D, L: Linking, M: Mutex> LockedList<'a, T, S, D, L, M>
                 let tail = if is_front || is_back || is_cursor {
                     Some(unsafe { t.ptr().unwrap_unchecked() })
                 } else {
-                    // TODO if the node is currently drained, the tail can be anything
+                    // If the node is currently drained, the tail can be anything
                     t.ptr()
                 };
-                // TODO is the node is drained, backward iteration can be started from it directly
+                // If the node is drained, backward iteration can be started from it directly
                 next = Some(self.get_next(Some(link), &link_ref.next, tail.unwrap_or(link)));
             } else if !is_head {
                 tail = Some(prev);
@@ -775,8 +775,7 @@ impl<'a, T, D, L: Linking, M: Mutex> LockedList<'a, T, usize, D, L, M> {
 impl<T, S: ListState, D, L: Linking, M: Mutex> Drop for LockedList<'_, T, S, D, L, M> {
     #[inline]
     fn drop(&mut self) {
-        // TODO aborting on unwinding is not necessary as nodes needing to be released have
-        // been released
+        // Aborting on unwinding is not necessary, as a dropped node is unlinked at this point
         unsafe { self.list.mutex.unlock(ManuallyDrop::take(&mut self.guard)) };
     }
 }

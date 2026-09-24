@@ -97,7 +97,7 @@ impl<'locked, 'a, T, S: ListState, D, L: Linking, M: Mutex> ListCursor<'locked, 
             return;
         }
         let Some(tail) = self.locked.list.tail() else {
-            // TODO the list is empty, so the cursor is already on the ghost node
+            // The list is empty so the list is already on the ghost node
             debug_assert!(self.node.is_none());
             return;
         };

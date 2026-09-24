@@ -286,8 +286,8 @@ impl<L: Linking> Future for AcquireFuture<'_, L> {
                     return Poll::Ready(Ok(()));
                 }
                 match node.try_update_state_or_push_back_with(
-                    Acquire, // TODO Acquire for close
-                    Acquire,
+                    Acquire, // Acquire to synchronize with earlier permits release
+                    Acquire, // Acquire for close early return
                     |waiter, state| {
                         Semaphore::<L>::check_acquire_permits(state, waiter.permits_total)
                     },

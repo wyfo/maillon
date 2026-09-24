@@ -100,8 +100,7 @@ impl<L: Linking> NodeLink<L> {
         self.prev.store(ptr::null_mut(), Release);
     }
 
-    // TODO takes `NonNull<Self>`, not `&self`: a reference would only carry provenance over the
-    // link, not over the whole `NodeInner`
+    // Takes `NonNull<Self>` instead of `&self` to carry the provenance over the whole `NodeInner`.
     #[inline(always)]
     pub(crate) fn data_ptr<T>(link: NonNull<Self>) -> *mut T {
         let inner = link.as_ptr().cast::<NodeInner<T, L>>();
@@ -117,10 +116,7 @@ impl<L: Linking> NodeLink<L> {
 pub(crate) struct NodeInner<T, L: Linking> {
     pub(crate) link: NodeLink<L>,
     pub(crate) data: T,
-    // TODO
-    /// Dummy cell, whose only purpose is to report data accesses to loom: the real accesses go
-    /// through raw pointers, which loom cannot see. `data_ptr`/`data_ptr_mut` register a shared
-    /// resp. exclusive access on it, so a missing happens-before edge is still detected.
+    /// Dummy cell to report data access to loom, as real access go through raw pointers.
     #[cfg(loom)]
     pub(crate) access: Cell<()>,
 }

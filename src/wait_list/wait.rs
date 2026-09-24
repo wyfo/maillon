@@ -75,7 +75,7 @@ impl<N: Notification, S: Synchronization, L: Linking, M: Mutex, const WAKER_BATC
                 node.waker = Some(cx.waker().clone());
                 let pushed = node.try_push_back_with(set_order, Relaxed, |_, state| {
                     if state == Some(STATE_CLOSED) {
-                        // TODO synchronize with close
+                        // Synchronize with close
                         fence(Acquire);
                         return false;
                     }
