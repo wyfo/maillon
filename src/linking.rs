@@ -16,6 +16,35 @@ use crate::{
     utils::{OptionNonNullExt, abort_on_unwind},
 };
 
+/// How the nodes of a [`List`](crate::List) are linked together when a node is pushed to the back.
+///
+/// With atomic linking, i.e. [`AtomicEager`] and [`AtomicLazy`], node push to the back of the
+/// list is lock-free, as well as list state updates. On the other hand, [`Serialized`] linking
+/// requires holding the list mutex to insert nodes or update the list state.
+///
+/// See each variant documentation for more details about their implications.
+///
+/// # Which variant to choose
+///
+/// The default `AtomicEager` should perform well in most situations.
+///
+/// `AtomicLazy` makes the node insertion a lot cheaper, and draining the list has no additional
+/// cost. However, node removal can have high latency if the list contains a lot of nodes. For a
+/// small number of nodes, or for drain-only workflows with few nodes dropped while linked, it
+/// should be the more performant linking.
+///
+/// `Serialized` is mandatory to allow node insertion somewhere other than at the back of the list.
+/// It is also possible that node insertion must access the list's data, and thus requires
+/// serializing with the list mutex. Moreover, removing the back node, e.g. in LIFO workflows, is
+/// costlier with atomic linking compared to `Serialized`.
+///
+/// Another rare issue with `AtomicEager` is priority inversion, when the pusher thread is
+/// descheduled before unblocking a remover thread. However, this issue also exists (with a higher
+/// probability) with mutexes that don't support priority inheritance, which is the case for
+/// `std::sync::Mutex` on Linux or Windows. If priority inversion is a problem, then the provided
+/// mutex should support priority inheritance and `AtomicLazy`/`Serialized` should be used instead.
+///
+/// In any case, profiling and benchmarking the different variants will often give the best answer.
 pub trait Linking: PrivateLinking + Send + Sync + 'static {
     #[doc(hidden)]
     type PreferredDrainEnd: End;
@@ -83,13 +112,33 @@ mod private {
 }
 pub(crate) use private::PrivateLinking;
 
+/// The default backoff strategy of [`AtomicEager`] before parking.
 #[cfg(not(any(miri, loom)))]
 pub type DefaultSpinBeforePark = BackoffLimit<SpinBackoff, 100>; // same as `std::sys::sync::mutex::futex`
+/// The default backoff strategy of [`AtomicEager`] before parking.
 #[cfg(any(miri, loom))]
 pub type DefaultSpinBeforePark = BackoffLimit<SpinBackoff, 0>;
 
 const PARKED_TAG: usize = 1;
 
+/// Nodes are pushed atomically to the back of the list and link themselves to the previous node
+/// eagerly.
+///
+/// A thread walking the list, e.g. to unlink its front node, may have to wait for a concurrent push
+/// to link its node. Waiting is synchronized using the [`Parker`] `P`, and is preceded with a spin
+/// loop bounded by `PB`.
+///
+/// On the platforms supported by the default `AtomicParker`, node push is lock-free. Otherwise, as
+/// the pusher thread might unpark a remover thread, the lock-freedom is bounded by the unparking
+/// operation.
+///
+/// Node push uses a CAS loop on the list state, followed by a second atomic RMW. Removal of the
+/// back node, or list drain, requires a single RMW on the list state (in addition to the mutex
+/// locking and unlocking). With a [`SpinParker`](crate::sync::parker::SpinParker) that
+/// [never blocks](Parker::NEVER_BLOCKS), the second atomic RMW on push is replaced by an atomic
+/// store.
+///
+/// `B` is the backoff strategy used on contention when pushing nodes or updating the list state.
 #[derive(Debug)]
 pub struct AtomicEager<
     B: BackoffStrategy = NoBackoff,
@@ -214,6 +263,17 @@ impl<B: BackoffStrategy, P: Parker, PB: BoundedBackoffStrategy> Linking for Atom
     type PreferredDrainEnd = Front;
 }
 
+/// Nodes are pushed atomically to the back of the list and are linked to the previous node lazily.
+///
+/// A thread walking the list from the front, e.g. to unlink its front node, may need to materialize
+/// the lazy linking by walking the list backward. Materialized links are cached to amortize the
+/// operation. Draining the list is done backward by default, in which case materialization might
+/// never happen.
+///
+/// Node push uses a CAS loop on the list state. Removal of the back node, or list drain, requires a
+/// single RMW on the list state (in addition to the mutex locking and unlocking).
+///
+/// `B` is the backoff strategy used on contention when pushing nodes or updating the list state.
 #[derive(Debug)]
 pub struct AtomicLazy<B: BackoffStrategy = NoBackoff>(PhantomData<B>);
 impl<B: BackoffStrategy> PrivateLinking for AtomicLazy<B> {
@@ -323,6 +383,9 @@ impl<B: BackoffStrategy> Linking for AtomicLazy<B> {
     type PreferredDrainEnd = Back;
 }
 
+/// Node insertion into the list is serialized by the list mutex.
+///
+/// Nodes can also be inserted at any position with a [`ListCursor`](crate::list::ListCursor).
 #[derive(Debug)]
 pub struct Serialized;
 impl PrivateLinking for Serialized {
