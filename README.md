@@ -203,6 +203,47 @@ Reimplementations of `tokio::sync::Notify` and `tokio::sync::Semaphore` are also
 
 `List` exposes a 100% safe API, so `WaitList` and `tokio` reimplementations don't use unsafe code[^3].
 
+## Alternatives
+
+The main goal of `maillon` was originally to provide a `WaitList` with `notify_one` as cheap as possible when there is no waiter, i.e. **read-only**, with a customizable synchronization strategy between the wake condition and the waker registration (`SeqCst` atomic operations vs. `SeqCst` fences vs. RMWs on the wake condition). Lock-free waiter insertion then came as an appreciable benefit on top of that.
+
+### Synchronization primitives
+
+| Type                      | Notify with no waiter                              | Customizable synchronization          | Insertion          |
+|---------------------------|----------------------------------------------------|---------------------------------------|--------------------|
+| `maillon::WaitList`       | (`SeqCst` fence with `Synchronized` +) atomic load | yes                                   | lock-free          |
+| [`async_event::Event`]    | `SeqCst` fence + atomic load                       | no                                    | locked, node boxed |
+| [`event_listener::Event`] | locks                                              | fence can be skipped with `relaxed()` | locked             |
+
+[`tokio::sync::Notify`] and [`maitake_sync::WaitQueue`] store a wakeup when there is no waiter, and thus can't be used for the `WaitList` use case.
+
+[`futures_intrusive::sync::ManualResetEvent`] and [`asyncband::event::ManualResetEvent`] only provide the equivalent of `notify_all`, and are fully locked anyway.
+
+### Intrusive lists
+
+`maillon::List` is also exported as a general-purpose concurrent intrusive list: nodes are pinned, and a node dropped while linked removes itself from the list, taking the lock only if it is still linked. Node unlinking on drop is the reason why the mutex must be embedded in the list to be able to provide a safe API. Most alternatives are not synchronized and must be wrapped into a mutex.
+
+- [`pin-list`]: safe, but not synchronized, and aborts if a node is dropped without having been removed and taken out of the list.
+- [`pinlist`]: safe, with the list embedding its mutex and nodes removing themselves on drop, like `maillon`; but every insertion and every drop takes the lock, and nodes can only leave the list by being dropped.
+- [`cordyceps`]: unsafe node trait, not synchronized.
+- [`intrusive-collections`]: general-purpose intrusive containers with unsafe adapters, not synchronized (`AtomicLink` only makes nodes shareable between threads).
+
+### Related design
+
+[`saa`] has the closest design to `maillon`: its synchronization primitives push waiters lock-free into their state word, which also holds a lock bit and a few data bits. However, its wait queue is private, the lock bit is a spinlock, dequeuing the front and canceling a waiter both walk the queue from its tail, and the data bits limit its semaphore to 63 permits.
+
+[`tokio::sync::Notify`]: https://docs.rs/tokio/latest/tokio/sync/struct.Notify.html
+[`maitake_sync::WaitQueue`]: https://docs.rs/maitake-sync/latest/maitake_sync/wait_queue/struct.WaitQueue.html
+[`async_event::Event`]: https://docs.rs/async-event/latest/async_event/struct.Event.html
+[`event_listener::Event`]: https://docs.rs/event-listener/latest/event_listener/struct.Event.html
+[`futures_intrusive::sync::ManualResetEvent`]: https://docs.rs/futures-intrusive/latest/futures_intrusive/sync/type.ManualResetEvent.html
+[`asyncband::event::ManualResetEvent`]: https://docs.rs/asyncband/latest/asyncband/event/struct.ManualResetEvent.html
+[`pin-list`]: https://crates.io/crates/pin-list
+[`pinlist`]: https://crates.io/crates/pinlist
+[`cordyceps`]: https://crates.io/crates/cordyceps
+[`intrusive-collections`]: https://crates.io/crates/intrusive-collections
+[`saa`]: https://crates.io/crates/saa
+
 ## Acknowledgements
 
 The `maillon::list::Drain` algorithm reuses the idea originally introduced to `tokio` by [Tymoteusz Wiśniewski](https://github.com/satakuma) in [tokio-rs/tokio#5458](https://github.com/tokio-rs/tokio/pull/5458): make the draining atomic by moving the list nodes into a temporary circular list.
