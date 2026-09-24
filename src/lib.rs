@@ -8,7 +8,7 @@
 //! - 100% safe API
 //! - `#![no_std]`, no allocation
 //! - Atomic emptiness check to avoid acquiring the mutex if the list is empty
-//! - Lock-free[^1] insertion: multiple nodes can be inserted concurrently while another is being
+//! - Lock-free insertion: multiple nodes can be inserted concurrently while another is being
 //!   removed; removal requires locking
 //! - Optional atomic state embedded in the list when empty (to carry a semaphore counter, a closed
 //!   flag, etc.)
@@ -157,11 +157,6 @@
 //! `tokio::sync::Semaphore` built with `maillon`, with fully identical API and behavior.
 //!
 //! [examples]: https://github.com/wyfo/maillon/tree/main/examples
-//! [^1]: In some rare cases, an inserting thread might need to unpark a remover thread, making
-//!     insertion not strictly lock-free. It is also possible to switch the list to lazy node
-//!     linking, making the node insertion fully lock-free. A third option is serialized linking,
-//!     where insertion requires locking but can then happen at any position through a cursor, not
-//!     only at the back.
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![no_std]
 #![cfg_attr(nightly, feature(unsafe_pinned))]

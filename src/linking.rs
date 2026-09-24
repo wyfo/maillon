@@ -19,7 +19,7 @@ use crate::{
 /// How the nodes of a [`List`](crate::List) are linked together when a node is pushed to the back.
 ///
 /// With atomic linking, i.e. [`AtomicEager`] and [`AtomicLazy`], node push to the back of the
-/// list is lock-free, as well as list state updates. On the other hand, [`Serialized`] linking
+/// list is lock-free[^1], as well as list state updates. On the other hand, [`Serialized`] linking
 /// requires holding the list mutex to insert nodes or update the list state.
 ///
 /// See each variant documentation for more details about their implications.
@@ -45,6 +45,8 @@ use crate::{
 /// mutex should support priority inheritance and `AtomicLazy`/`Serialized` should be used instead.
 ///
 /// In any case, profiling and benchmarking the different variants will often give the best answer.
+///
+/// [^1]: At least on mainstream platforms for `AtomicEager`.
 pub trait Linking: PrivateLinking + Send + Sync + 'static {
     #[doc(hidden)]
     type PreferredDrainEnd: End;
@@ -137,6 +139,9 @@ const PARKED_TAG: usize = 1;
 /// locking and unlocking). With a [`SpinParker`](crate::sync::parker::SpinParker) that
 /// [never blocks](Parker::NEVER_BLOCKS), the second atomic RMW on push is replaced by an atomic
 /// store.
+///
+/// As parking is necessary for soundness, unwinding in `Parker` methods causes the process to
+/// abort.
 ///
 /// `B` is the backoff strategy used on contention when pushing nodes or updating the list state.
 #[derive(Debug)]

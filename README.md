@@ -153,13 +153,13 @@ See [examples](examples) for full implementations of `tokio::sync::Notify` and `
 
 ## Cargo Features
 
-| Feature | Description |
-|---------|-------------|
-| `std` *(default)* | `std::sync`-based mutex and condvar parker |
-| `lock_api` | `lock_api::RawMutex` trait implementation |
-| `parking_lot` | `parking_lot` mutex; implies `lock_api` |
+| Feature           | Description                                                                        |
+|-------------------|------------------------------------------------------------------------------------|
+| `std` *(default)* | `std::sync`-based mutex and condvar parker                                         |
+| `lock_api`        | `lock_api::RawMutex` trait implementation                                          |
+| `parking_lot`     | `parking_lot` mutex and parker; implies `lock_api`                                 |
 | `portable-atomic` | Atomics via the `portable-atomic` crate, for targets without native atomic support |
-| `pthread` | Raw pthread mutex and condition variable, on Unix targets only |
+| `pthread`         | Raw pthread mutex and condvar, on Unix targets only                                |
 
 Without any features enabled, the library falls back to spin-based mutex and parker.
 
@@ -169,26 +169,26 @@ Results of the `tokio` benchmarks, run with both `tokio` native primitives and t
 
 *benchmarks prefixed by `contention`/`uncontented`[^1] measure `Semaphore` performance*
 
-| Benchmark                       |       maillon |     tokio | maillon speedup |
-|---------------------------------|----------:|----------:|------------:|
-| `notify_one/10`                 | 200.35 µs | 247.28 µs |        1.23 |
-| `notify_one/50`                 | 252.83 µs | 272.73 µs |        1.08 |
-| `notify_one/100`                | 245.82 µs | 276.25 µs |        1.12 |
-| `notify_one/200`                | 245.36 µs | 291.20 µs |        1.19 |
-| `notify_one/500`                | 245.54 µs | 281.86 µs |        1.15 |
-|                                 |           |           |             |
-| `notify_waiters/10`             | 245.75 µs | 410.82 µs |        1.67 |
-| `notify_waiters/50`             | 215.92 µs | 281.20 µs |        1.30 |
-| `notify_waiters/100`            | 210.31 µs | 259.56 µs |        1.23 |
-| `notify_waiters/200`            | 212.58 µs | 247.82 µs |        1.17 |
-| `notify_waiters/500`            | 355.55 µs | 254.90 µs |        0.72 |
-|                                 |           |           |             |
-| `contention/concurrent_multi`   |   7.90 µs |   8.53 µs |        1.08 |
-| `contention/concurrent_single`  | 500.41 ns | 679.58 ns |        1.36 |
-|                                 |           |           |             |
-| `uncontented/concurrent_multi`  |   9.02 µs |   9.09 µs |        1.01 |
-| `uncontented/concurrent_single` | 529.70 ns | 624.12 ns |        1.18 |
-| `uncontented/multi`             | 287.34 ns | 400.76 ns |        1.39 |
+| Benchmark                       |   maillon |     tokio | maillon speedup |
+|---------------------------------|----------:|----------:|----------------:|
+| `notify_one/10`                 | 200.35 µs | 247.28 µs |            1.23 |
+| `notify_one/50`                 | 252.83 µs | 272.73 µs |            1.08 |
+| `notify_one/100`                | 245.82 µs | 276.25 µs |            1.12 |
+| `notify_one/200`                | 245.36 µs | 291.20 µs |            1.19 |
+| `notify_one/500`                | 245.54 µs | 281.86 µs |            1.15 |
+|                                 |           |           |                 |
+| `notify_waiters/10`             | 245.75 µs | 410.82 µs |            1.67 |
+| `notify_waiters/50`             | 215.92 µs | 281.20 µs |            1.30 |
+| `notify_waiters/100`            | 210.31 µs | 259.56 µs |            1.23 |
+| `notify_waiters/200`            | 212.58 µs | 247.82 µs |            1.17 |
+| `notify_waiters/500`            | 355.55 µs | 254.90 µs |            0.72 |
+|                                 |           |           |                 |
+| `contention/concurrent_multi`   |   7.90 µs |   8.53 µs |            1.08 |
+| `contention/concurrent_single`  | 500.41 ns | 679.58 ns |            1.36 |
+|                                 |           |           |                 |
+| `uncontented/concurrent_multi`  |   9.02 µs |   9.09 µs |            1.01 |
+| `uncontented/concurrent_single` | 529.70 ns | 624.12 ns |            1.18 |
+| `uncontented/multi`             | 287.34 ns | 400.76 ns |            1.39 |
 
 `maillon`-based reimplementations seem to give a consistent speedup compared to `tokio` native ones. The only exception is `notify_waiters/500`, and it can be explained by several factors:
 - The benchmark results are extremely noisy, ranging from 200 µs to 400 µs, so `maillon` can in fact perform better than `tokio` on some runs.

@@ -60,6 +60,15 @@ pub(crate) const HEAD_MARKER: usize = 1;
 ///
 /// Regardless of the linking, state access in
 /// [`is_empty`](Self::is_empty)/[`load_state`](Self::load_state) is always a single atomic load.
+///
+/// # Mutex
+///
+/// The [`Mutex`] `M` is mainly used to serialize node removal (and insertion with [`Serialized`]
+/// linking). However, its reentrancy is not specified, so arbitrary code, e.g.
+/// [`Waker::wake`](core::task::Waker::wake), should not be executed while the list is locked.
+///
+/// As a node must be unlinked on drop, and thus must acquire the mutex, locking cannot fail:
+/// unwinding in `Mutex::lock` causes the process to abort.
 pub struct List<T, S: ListState = (), D = (), L: Linking = AtomicEager, M: Mutex = DefaultMutex> {
     tail: AtomicPtr<Tail<S, L>>,
     head: L::NextPtr,
@@ -151,7 +160,7 @@ impl<T, S: ListState, D, L: Linking, M: Mutex> List<T, S, D, L, M> {
         self.tail.load(order).ptr().is_none()
     }
 
-    /// Acquire the list's mutex.
+    /// Acquires the list's mutex.
     #[inline]
     pub fn lock(&self) -> LockedList<'_, T, S, D, L, M> {
         LockedList {

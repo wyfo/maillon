@@ -2,7 +2,8 @@ use core::sync::atomic::{AtomicU32, Ordering::*};
 
 use crate::sync::parker::Parker;
 
-/// A futex-based [`Parker`] implementation built on the [`atomic_wait`] crate.
+/// A futex-based [`Parker`] implementation built on the [`atomic_wait`] crate for the supported
+/// platforms.
 #[derive(Debug)]
 pub struct AtomicParker(AtomicU32);
 

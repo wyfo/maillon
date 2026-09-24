@@ -125,8 +125,8 @@ impl Notification for () {
 ///
 /// `WaitList` is built on [`List`] and inherits its [`Linking`] and [`Mutex`] parameters.
 ///
-/// The mutex is used to wake waiters (and to register them with [`Serialized`] linking), but
-/// calling `notify_*` will not acquire the mutex if there is no registered waiter.
+/// The mutex is mostly used to wake waiters, but calling `notify_*` will not acquire the mutex if
+/// there is no registered waiter.
 ///
 /// # Waker batching
 ///
@@ -161,13 +161,10 @@ impl Notification for () {
 ///
 /// [`wait`]: Self::wait
 /// [`wait_until`]: Self::wait_until
-/// [`wait_with`]: Self::wait_with
-/// [`wait_until_with`]: Self::wait_until_with
 /// [`notify_one`]: Self::notify_one
 /// [`notify_last`]: Self::notify_last
 /// [`notify_many`]: Self::notify_many
 /// [`notify_all`]: Self::notify_all
-/// [`Serialized`]: crate::linking::Serialized
 pub struct WaitList<
     N: Notification = (),
     S: Synchronization = Synchronized,
@@ -407,7 +404,8 @@ impl<N: Notification, S: Synchronization, L: Linking, M: Mutex, const WAKER_BATC
         Wait(Node::with_data(WaitListRef(self), Waiter::new(waiter)))
     }
 
-    /// Waits until the given wake condition is satisfied, or until a satisfying notification matching the given waiter data.
+    /// Waits until the given wake condition is satisfied, or until a satisfying notification is
+    /// received.
     ///
     /// At each poll of the returned future, the wake condition is checked before and after
     /// registering the task waker. The closure is passed a boolean telling whether the waker is

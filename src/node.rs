@@ -25,8 +25,8 @@ type LockedList<'a, L: ListRef> =
 
 /// The data carried by a [`Node`].
 ///
-/// This trait defines how the node data interacts with the list when it is dropped, after having
-/// been unlinked.
+/// This trait defines how the node data interacts with the list when it is dropped, while and after
+/// being unlinked.
 pub trait NodeData<L: ListRef + ?Sized>: Sized {
     /// Returns the state to be stored in the list if the node is the last remaining one when
     /// dropped.
@@ -135,7 +135,8 @@ pub enum NodeState<'a, L: ListRef> {
 
 /// A list node, carrying its [`NodeData`].
 ///
-/// The node must be pinned to be pushed to the list, and it unlinks itself when dropped.
+/// The node must be pinned to be pushed to the list. If it is still linked when dropped, it unlinks
+/// itself after acquiring the list mutex.
 pub struct Node<L: ListRef> {
     list: L,
     node: UnsafePinned<NodeInner<L::NodeData, L::Linking>>,
@@ -146,7 +147,7 @@ unsafe impl<L: ListRef + Send> Send for Node<L> where L::NodeData: Send {}
 unsafe impl<L: ListRef + Sync> Sync for Node<L> {}
 
 impl<L: ListRef> Node<L> {
-    /// Creates a node with a default data.
+    /// Creates a node with default data.
     pub fn new(list: L) -> Self
     where
         L::NodeData: Default,

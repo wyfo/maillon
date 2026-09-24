@@ -226,8 +226,8 @@ impl<'a, T, S: ListState, D, L: Linking, M: Mutex> Drain<'a, T, S, D, L, M> {
     /// nodes.
     ///
     /// If `on_next` returns `true` or once the drain is empty, then `on_unlock` is called with the
-    /// lock temporarily released. A `helper` can be provided to be passed to both closures,
-    /// allowing them to share a state, e.g. a [`WakerBatch`].
+    /// lock released. A `helper` can be provided to be passed to both closures, allowing them to
+    /// share a state, e.g. a [`WakerBatch`].
     pub fn for_each<H, N: FnMut(&mut H, Pin<&mut T>, &mut D) -> bool, U: FnMut(&mut H)>(
         self,
         helper: H,

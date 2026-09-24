@@ -143,7 +143,7 @@ cfg_if::cfg_if! {
 
 /// The default parker implementation used by [`AtomicEager`](crate::linking::AtomicEager).
 ///
-/// If supported by the platform, [`AtomicWaiter`] is used. Otherwise, it is selected from the
+/// If supported by the platform, [`AtomicParker`] is used. Otherwise, it is selected from the
 /// enabled features, by decreasing priority: `parking_lot` (`ParkingLotParker`), `std`
 /// (`StdParker`), `pthread` (`PthreadParker`, unix only), and [`SpinParker`] otherwise.
 pub type DefaultParker = DefaultParkerImpl;
