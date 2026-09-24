@@ -29,6 +29,37 @@ type MutexGuard<'a, M> = <M as Mutex>::Guard<'a>;
 
 pub(crate) const HEAD_MARKER: usize = 1;
 
+/// A concurrent intrusive list.
+///
+/// It contains [`Node`](crate::Node)s carrying the data `T`; they are pushed at the back of the
+/// list through [`NodeUnlinked`], and can then be removed from any position with the list
+/// [`locked`](Self::lock) on its mutex `M`.
+///
+/// # List state
+///
+/// While the list is empty, it embeds a [`ListState`] `S`. The state is especially used as an
+/// emptiness marker, loaded atomically with [`is_empty`](Self::is_empty).
+///
+/// With `S=usize`, multiple methods allow state manipulation, and it can atomically condition the
+/// push of a node with [`NodeUnlinked::try_update_state_or_push_back_with`].
+///
+/// # List data
+///
+/// The list carries mutex-protected data `D` that can be accessed with the list locked. Because
+/// Rust doesn't allow partial borrowing while linked node access requires a mutable borrow on the
+/// [`LockedList`] guard, the linked nodes' accessors also allow accessing the list data through
+/// [`LinkedNodeRef`](crate::node::LinkedNodeRef).
+///
+/// # Linking
+///
+/// On their insertion, nodes are linked to the others according to the [`Linking`] `L` parameter.
+/// Linking strategy especially determines how the list state is mutated.
+///
+/// With the default [`AtomicEager`], the list state mutations are lock-free, and node push to the
+/// back of the list is also lock-free on mainstream platforms.
+///
+/// Regardless of the linking, state access in
+/// [`is_empty`](Self::is_empty)/[`load_state`](Self::load_state) is always a single atomic load.
 pub struct List<T, S: ListState = (), D = (), L: Linking = AtomicEager, M: Mutex = DefaultMutex> {
     tail: AtomicPtr<Tail<S, L>>,
     head: L::NextPtr,
