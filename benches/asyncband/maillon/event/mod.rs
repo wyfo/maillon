@@ -9,19 +9,8 @@ use maillon::{
     wait_list::synchronization::Synchronized,
 };
 
-mod eager {
-    type ManualResetEvent = super::ManualResetEvent<super::AtomicEager>;
-    #[allow(clippy::duplicate_mod)]
-    #[path = "../wait.rs"]
-    mod wait;
-}
-
-mod lazy {
-    type ManualResetEvent = super::ManualResetEvent<super::AtomicLazy>;
-    #[allow(clippy::duplicate_mod)]
-    #[path = "../wait.rs"]
-    mod wait;
-}
+mod eager;
+mod lazy;
 
 pub struct ManualResetEvent<L: Linking> {
     is_set: AtomicBool,

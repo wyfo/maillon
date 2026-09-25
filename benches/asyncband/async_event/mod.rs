@@ -3,12 +3,7 @@ use std::sync::atomic::{
     Ordering::{Acquire, Release},
 };
 
-mod event {
-    type ManualResetEvent = super::ManualResetEvent;
-    #[allow(clippy::duplicate_mod)]
-    #[path = "../../maillon/event/wait.rs"]
-    mod wait;
-}
+mod event;
 
 pub struct ManualResetEvent {
     is_set: AtomicBool,
