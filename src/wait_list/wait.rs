@@ -40,9 +40,10 @@ node_wrapper! {
 impl<N: Notification, S: Synchronization, L: Linking, M: Mutex, const WAKER_BATCH_SIZE: usize>
     Wait<'_, N, S, L, M, WAKER_BATCH_SIZE>
 {
+    /// Unregisters the waiter from the [`WaitList`](crate::WaitList) and discards any received
+    /// notification.
     #[cold]
-    #[inline(never)]
-    fn unregister(self: Pin<&mut Self>) {
+    pub fn unregister(self: Pin<&mut Self>) {
         match self.node_mut().state() {
             NodeState::Unlinked(mut node) => {
                 node.notification.take();

@@ -487,7 +487,7 @@ impl<S: Synchronization, L: Linking, M: Mutex, const WAKER_BATCH_SIZE: usize>
     pub fn wait_until<F: FnMut(bool) -> W, W: WakeCondition>(
         &self,
         wake_condition: F,
-    ) -> WaitUntil<'_, F, fn(()) -> W, (), S, L, M, WAKER_BATCH_SIZE> {
+    ) -> WaitUntil<'_, F, impl FnMut(()) -> W, (), S, L, M, WAKER_BATCH_SIZE> {
         self.wait_until_with((), wake_condition, |_| W::default())
     }
 }
