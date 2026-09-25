@@ -42,8 +42,15 @@ atomic-wait = "1"
 libc = { version = "0.2", optional = true }
 
 [dev-dependencies]
+async-event = "0.2"
+async-channel = "2.5.0"
+asyncband = { version = "0.7", features = ["event", "semaphore"] }
+concurrent-queue = "2.5"
 criterion = "0.8.2"
+divan = "0.1.21"
+event-listener = "5.4"
 futures = "0.3.32"
+futures-intrusive = "0.5"
 rstest = "0.27.0"
 tokio = { version = "1.49.0", features = ["full"] }
 tokio-test = "0.4.5"
@@ -54,6 +61,18 @@ const_fn = "0.4.12"
 
 [target.'cfg(loom)'.dev-dependencies]
 loom = { version = "0.7.2", features = ["futures"] }
+
+[[bench]]
+name = "asyncband"
+harness = false
+
+[[bench]]
+name = "async_channel"
+harness = false
+
+[[bench]]
+name = "futures_intrusive"
+harness = false
 
 [[bench]]
 name = "notify"

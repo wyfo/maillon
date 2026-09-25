@@ -191,6 +191,8 @@ Results of the `tokio` benchmarks, run with both `tokio` native primitives and t
 - The scenario is not very realistic: all the threads are hammering the same cache line with CAS loops to requeue or notify in tight loops. The key point is that `maillon` doesn't use backoff in CAS loops, so they run in full-contention mode, while `tokio`'s native implementation serializes all operations. Adding exponential backoff to the `push_back` operation improves the result down to 150 µs.
 - CPU hyperthreading typically handles this kind of ultra-contended scenario badly. Pinning the process to 4 cores only, or reducing the number of worker threads to 3 in order to avoid hyperthreading also greatly improves the result. Combined with exponential backoff, time drops below 100 µs.
 
+See [benches/README.md](benches/README.md) for a comparison of `maillon` with other crates, still reusing their benchmarks. `maillon`-based implementations give significantly better results in almost all benchmarks.
+
 ## Safety and testing
 
 Concurrent intrusive lists are one of the most unsafe[^2] concepts in Rust, so this crate uses unsafe code. It is tested with both [`miri`](https://github.com/rust-lang/miri/) and [`loom`](https://github.com/tokio-rs/loom) to ensure algorithm correctness and memory safety.
