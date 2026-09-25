@@ -7,8 +7,6 @@ use core::{
     task::{Context, Poll},
 };
 
-#[allow(unused_imports)]
-use crate::msrv::OptionExt;
 use crate::{
     Node, NodeState,
     linking::{AtomicEager, Linking},

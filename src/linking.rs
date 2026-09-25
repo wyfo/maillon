@@ -1,3 +1,4 @@
+//! [`Linking`] and its variants.
 use core::{
     marker::PhantomData,
     ptr::NonNull,

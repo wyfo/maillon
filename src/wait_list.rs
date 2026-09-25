@@ -7,8 +7,6 @@ use core::{
     task::Waker,
 };
 
-#[allow(unused_imports)]
-use crate::msrv::OptionExt;
 use crate::{
     List, ListRef, Node, NodeData,
     linking::{AtomicEager, Linking},
@@ -211,9 +209,7 @@ impl<N: Notification, S: Synchronization, L: Linking, M: Mutex, const WAKER_BATC
     /// Returns `true` if the wait list is closed.
     #[allow(clippy::incompatible_msrv)]
     pub fn is_closed(&self) -> bool {
-        self.list
-            .load_state(Acquire)
-            .is_some_and(|s| s != STATE_OPEN)
+        matches!(self.list.load_state(Acquire), Some(s) if s != STATE_OPEN)
     }
 
     /// Closes the wait list, waking all the waiters.

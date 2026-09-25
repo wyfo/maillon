@@ -118,14 +118,10 @@
 //!                 node.waker = Some(cx.waker().clone());
 //!                 node.push_back(Relaxed);
 //!                 fence(SeqCst);
+//!                 Poll::Pending
 //!             }
-//!             NodeState::Linked(mut node) => {
-//!                 if node.waker.as_ref().is_none_or(|w| !w.will_wake(cx.waker())) {
-//!                     node.waker = Some(cx.waker().clone());
-//!                 }
-//!             }
+//!             NodeState::Linked(mut node) => node.update_waker(cx, |node| &mut node.waker),
 //!         }
-//!         Poll::Pending
 //!     }
 //! }
 //!
@@ -160,6 +156,7 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![no_std]
 #![cfg_attr(nightly, feature(unsafe_pinned))]
+#![warn(missing_docs)]
 
 #[cfg(feature = "std")]
 extern crate std;

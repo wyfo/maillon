@@ -387,19 +387,33 @@ impl<'a, L: ListRef> NodeLinked<'a, L> {
         self.node.list()
     }
 
-    // TODO doc
+    /// Updates the node waker from the given context, returns `Poll::Pending`.
+    ///
+    /// This function is just a shortcut for:
+    ///
+    /// ```rust
+    /// # use core::task::{Context, Poll, Waker};
+    /// # use maillon::{List, node::NodeLinked, NodeData};
+    /// # fn update_waker<'a, T: NodeData<&'a List<T>> + Unpin>(mut node: NodeLinked<&'a List<T>>, cx: &mut Context<'_>, waker: impl FnOnce(&mut T) -> &mut Option<Waker>) -> Poll<()> {
+    /// let waker = waker(&mut node);
+    /// if !matches!(waker, Some(w) if w.will_wake(cx.waker())) {
+    ///     *waker = Some(cx.waker().clone());
+    /// }
+    /// Poll::Pending
+    /// # }
+    /// ```
     #[inline]
     pub fn update_waker<T>(
         &mut self,
         cx: &mut Context<'_>,
-        get_waker: impl FnOnce(&mut L::NodeData) -> &mut Option<Waker>,
+        waker: impl FnOnce(&mut L::NodeData) -> &mut Option<Waker>,
     ) -> Poll<T>
     where
         L::NodeData: Unpin,
     {
-        let node_waker = get_waker(self.data_mut().get_mut());
-        if !matches!(node_waker, Some(w) if w.will_wake(cx.waker())) {
-            *node_waker = Some(cx.waker().clone());
+        let waker = waker(self);
+        if !matches!(waker, Some(w) if w.will_wake(cx.waker())) {
+            *waker = Some(cx.waker().clone());
         }
         Poll::Pending
     }

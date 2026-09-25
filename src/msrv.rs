@@ -1,34 +1,8 @@
-// TODO 1.70: Option::is_some_and
 // TODO 1.76: Result::inspect, ptr::from_ref, ptr::from_mut
-// TODO 1.82: Option::is_none_or
 // TODO 1.84: strict provenance
 #![allow(clippy::incompatible_msrv, unstable_name_collisions)]
 
 use core::{num::NonZeroUsize, ptr::NonNull};
-
-#[allow(dead_code)]
-pub(crate) trait OptionExt<T> {
-    #[allow(clippy::wrong_self_convention)]
-    fn is_some_and(self, f: impl FnOnce(T) -> bool) -> bool;
-    #[allow(clippy::wrong_self_convention)]
-    fn is_none_or(self, f: impl FnOnce(T) -> bool) -> bool;
-}
-
-impl<T> OptionExt<T> for Option<T> {
-    fn is_some_and(self, f: impl FnOnce(T) -> bool) -> bool {
-        match self {
-            None => false,
-            Some(x) => f(x),
-        }
-    }
-
-    fn is_none_or(self, f: impl FnOnce(T) -> bool) -> bool {
-        match self {
-            None => true,
-            Some(x) => f(x),
-        }
-    }
-}
 
 #[allow(dead_code)]
 pub(crate) trait ResultExt<T, E> {
