@@ -301,12 +301,10 @@ fn poll_notified<N: Deref<Target = Notify<L>>, L: Linking>(
                 node.unlink(|_, _| unreachable!());
                 return Poll::Ready(());
             }
-            if let Some(cx) = cx {
-                if !matches!(&node.waker, Some(waker) if waker.will_wake(cx.waker())) {
-                    node.waker = Some(cx.waker().clone());
-                }
+            match cx {
+                Some(cx) => node.update_waker(cx, |n| &mut n.waker),
+                None => Poll::Pending,
             }
-            Poll::Pending
         }
     }
 }

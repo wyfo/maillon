@@ -1,7 +1,13 @@
 //! The list [`Node`] and its accessors.
 #[cfg(nightly)]
 use core::pin::UnsafePinned;
-use core::{marker::PhantomData, pin::Pin, ptr, ptr::NonNull};
+use core::{
+    marker::PhantomData,
+    pin::Pin,
+    ptr,
+    ptr::NonNull,
+    task::{Context, Poll, Waker},
+};
 
 #[allow(unused_imports)]
 use crate::msrv::ResultExt;
@@ -379,6 +385,23 @@ impl<'a, L: ListRef> NodeLinked<'a, L> {
     #[inline]
     pub fn list(&self) -> &'a L {
         self.node.list()
+    }
+
+    // TODO doc
+    #[inline]
+    pub fn update_waker<T>(
+        &mut self,
+        cx: &mut Context<'_>,
+        get_waker: impl FnOnce(&mut L::NodeData) -> &mut Option<Waker>,
+    ) -> Poll<T>
+    where
+        L::NodeData: Unpin,
+    {
+        let node_waker = get_waker(self.data_mut().get_mut());
+        if !matches!(node_waker, Some(w) if w.will_wake(cx.waker())) {
+            *node_waker = Some(cx.waker().clone());
+        }
+        Poll::Pending
     }
 }
 

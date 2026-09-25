@@ -309,10 +309,7 @@ impl<L: Linking> Future for AcquireFuture<'_, L> {
             }
             NodeState::Linked(mut node) => {
                 debug_assert_ne!(node.permits_remaining, 0);
-                if !node.waker.as_ref().unwrap().will_wake(cx.waker()) {
-                    node.waker = Some(cx.waker().clone());
-                }
-                Poll::Pending
+                node.update_waker(cx, |n| &mut n.waker)
             }
         }
     }

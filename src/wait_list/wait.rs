@@ -89,12 +89,7 @@ impl<N: Notification, S: Synchronization, L: Linking, M: Mutex, const WAKER_BATC
                 }
                 Poll::Pending
             }
-            NodeState::Linked(mut node) => {
-                if node.waker.as_ref().is_none_or(|w| !w.will_wake(cx.waker())) {
-                    node.waker = Some(cx.waker().clone());
-                }
-                Poll::Pending
-            }
+            NodeState::Linked(mut node) => node.update_waker(cx, |n| &mut n.waker),
         }
     }
 }
