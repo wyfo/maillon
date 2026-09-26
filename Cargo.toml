@@ -56,6 +56,7 @@ criterion = "0.8.2"
 divan = "0.1.21"
 event-listener = "5.4"
 futures-intrusive = "0.5"
+saa = "5.6"
 
 [target.'cfg(loom)'.dependencies]
 loom = "0.7.2"
@@ -86,6 +87,10 @@ harness = false
 
 [[bench]]
 name = "tokio_notify"
+harness = false
+
+[[bench]]
+name = "saa"
 harness = false
 
 [[bench]]

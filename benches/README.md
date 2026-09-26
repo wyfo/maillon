@@ -79,6 +79,42 @@ acquiring 50 times and yielding 4 times while holding the permit.
 | normal (180)        | 3.12 ms | 5.67 ms |                  6.78 ms |                    5.53 ms |
 | none (200)          | 2.73 ms | 3.43 ms |                  4.15 ms |                    4.16 ms |
 
+## saa
+
+`cargo bench --bench saa -- '^Semaphore:'`, `-- '^Semaphore held:'`, `-- '^maillon Semaphore:'` and
+`-- '^maillon Semaphore held:'` (criterion).
+
+saa's own semaphore benchmark: uncontended acquire/release on a single thread. saa uses its
+blocking API (`acquire_sync`, `acquire_many_sync`); maillon uses `try_acquire`/`try_acquire_many`
+and drops the permit.
+
+Upstream benchmark, unmodified (the semaphore is created in each iteration), `Semaphore:` and
+`maillon Semaphore:`:
+
+| Benchmark                         |     saa | maillon | maillon speedup |
+|-----------------------------------|--------:|--------:|----------------:|
+| `acquire-release`                 | 19.0 ns | 33.1 ns |            0.57 |
+| `acquire-acquire-release-release` | 65.1 ns | 69.6 ns |            0.94 |
+| `acquire-many-release-many`       | 22.3 ns | 31.9 ns |            0.70 |
+
+saa's `acquire-release` is unstable in this version, between 14.8 ns and 23.1 ns depending on the
+run.
+
+Modified benchmark, `Semaphore held:` and `maillon Semaphore held:`: the semaphore is created
+outside the timed loop, and one permit is acquired before the loop and held for the whole run:
+
+| Benchmark                         |     saa | maillon | maillon speedup |
+|-----------------------------------|--------:|--------:|----------------:|
+| `acquire-release`                 | 42.5 ns | 36.9 ns |            1.15 |
+| `acquire-acquire-release-release` | 84.2 ns | 70.8 ns |            1.19 |
+| `acquire-many-release-many`       | 42.7 ns | 36.8 ns |            1.16 |
+
+saa's release fast path is `compare_exchange(n, 0)`: it assumes the released permits are the only
+ones held. It only succeeds with a single holder; otherwise the CAS fails and `release_loop` does a
+second one. Upstream's benchmark never holds more than the released permits, so it only runs that
+fast path. With one permit held, as a semaphore with several holders normally is, every saa release
+pays the failed CAS.
+
 ## async-channel
 
 `cargo bench --bench async_channel -- '^<implementation>/' --quick` (criterion).
