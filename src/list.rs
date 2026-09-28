@@ -73,7 +73,7 @@ pub struct List<T, S: ListState = (), D = (), L: Linking = AtomicEager, M: Mutex
     tail: AtomicPtr<Tail<S, L>>,
     head: L::NextPtr,
     mutex: M,
-    parker: L::Parker,
+    linking: L,
     data: UnsafeCell<D>,
     #[cfg(loom)]
     data_access: crate::loom::cell::Cell<()>, // same trick as `NodeLink::data_ptr`
@@ -106,9 +106,9 @@ impl<T, S: ListState, D, L: Linking, M: Mutex> List<T, S, D, L, M> {
             #[cfg(loom)]
             mutex: M::new(),
             #[cfg(not(loom))]
-            parker: L::NEW_PARKER,
+            linking: L::INIT,
             #[cfg(loom)]
-            parker: L::new_parker(),
+            linking: L::new(),
             data: UnsafeCell::new(data),
             #[cfg(loom)]
             data_access: crate::loom::cell::Cell::new(()),
@@ -222,7 +222,7 @@ impl<T, S: ListState, D, L: Linking, M: Mutex> List<T, S, D, L, M> {
         }
         // `addr_of!((*prev).next)` can't be used with AtomicLazy as the previous node might have
         // been concurrently dequeued.
-        L::store_next(prev, &self.head, link, &self.parker);
+        self.linking.store_next(prev, &self.head, link);
         node.set_linked(self);
         Err(true)
     }
@@ -496,7 +496,6 @@ impl<'a, T, S: ListState, D, L: Linking, M: Mutex> LockedList<'a, T, S, D, L, M>
         self.list.is_empty(order)
     }
 
-    /// [`Linking::get_next`] with the list's head slot and parker filled in.
     #[inline(always)]
     fn get_next(
         &self,
@@ -504,7 +503,20 @@ impl<'a, T, S: ListState, D, L: Linking, M: Mutex> LockedList<'a, T, S, D, L, M>
         next: &L::NextPtr,
         tail: NonNull<NodeLink<L>>,
     ) -> NonNull<NodeLink<L>> {
-        L::get_next(node, next, tail, &self.list.parker)
+        self.list.linking.get_next(node, next, tail)
+    }
+
+    #[inline(always)]
+    fn unlink(
+        &self,
+        node: NonNull<NodeLink<L>>,
+        prev: NonNull<NodeLink<L>>,
+        next: Option<NonNull<NodeLink<L>>>,
+    ) {
+        self.list.linking.unlink(node, prev, next);
+        let node = unsafe { node.as_ref() };
+        L::update_next(&node.next, None);
+        node.prev.store(ptr::null_mut(), Release);
     }
 
     /// Returns the node at the end `E` of the list, `None` if it is empty.
@@ -582,7 +594,7 @@ impl<'a, T, S: ListState, D, L: Linking, M: Mutex> LockedList<'a, T, S, D, L, M>
     #[allow(clippy::incompatible_msrv, unstable_name_collisions)]
     pub(crate) unsafe fn remove<F: FnOnce(Pin<&mut T>, &mut D) -> S>(
         &mut self,
-        link: NonNull<NodeLink<L>>,
+        node: NonNull<NodeLink<L>>,
         new_state_if_last_node: F,
         is_front: bool,
         is_back: bool,
@@ -592,15 +604,15 @@ impl<'a, T, S: ListState, D, L: Linking, M: Mutex> LockedList<'a, T, S, D, L, M>
         // For self-removal with AtomicLazy linking, the tail may not have been acquired (it was
         // written with at least Release in push_back, but a fence(Acquire) would not work as the
         // task may have moved in another thread)
-        if L::NODES_ACCESS_REQUIRES_TAIL_ACQUIRE && !is_front && !is_back && !is_cursor {
+        if L::LAZY && !is_front && !is_back && !is_cursor {
             self.list.tail();
         }
-        let link_ref = unsafe { link.as_ref() };
+        let node_ref = unsafe { node.as_ref() };
         let prev = if is_front {
             NonNull::new(ptr::without_provenance_mut(HEAD_MARKER)).unwrap()
         } else {
             // SAFETY: node is linked
-            unsafe { link_ref.load_prev() }
+            unsafe { node_ref.load_prev() }
         };
         let is_head = prev.addr().get() == HEAD_MARKER;
         let prev_next = if is_head {
@@ -611,18 +623,18 @@ impl<'a, T, S: ListState, D, L: Linking, M: Mutex> LockedList<'a, T, S, D, L, M>
         // A node retrieved from the tail might not have finished its insertion,
         // so it must be waited before overriding the chaining.
         if is_back || is_cursor {
-            L::wait_next(prev_next, &self.list.parker);
+            self.list.linking.wait_next(prev_next);
         }
         let mut next = if is_back {
             None
         } else {
-            L::load_next(&link_ref.next)
+            L::load_next(&node_ref.next)
         };
         let mut tail = None;
         if next.is_none() {
             L::update_next(prev_next, None);
             let new_tail = if is_head {
-                let data = unsafe { Pin::new_unchecked(&mut *NodeLink::data_ptr::<T>(link)) };
+                let data = unsafe { Pin::new_unchecked(&mut *NodeLink::data_ptr::<T>(node)) };
                 // As `prev_next` may borrow `self.head`, list_data must not invalidate the borrow
                 // and uses raw data pointer.
                 let list_data = unsafe { &mut *self.data_ptr() };
@@ -630,7 +642,7 @@ impl<'a, T, S: ListState, D, L: Linking, M: Mutex> LockedList<'a, T, S, D, L, M>
             } else {
                 prev.into_tail()
             };
-            let node_ptr = link.into_tail();
+            let node_ptr = node.into_tail();
             let result = if L::SERIALIZED {
                 self.list.tail.store(new_tail, Release);
                 Ok(node_ptr)
@@ -638,17 +650,23 @@ impl<'a, T, S: ListState, D, L: Linking, M: Mutex> LockedList<'a, T, S, D, L, M>
                 (self.list.tail).compare_exchange(node_ptr, new_tail, Release, Relaxed)
             };
             if let Err(t) = result {
-                if is_back || L::NODES_ACCESS_REQUIRES_TAIL_ACQUIRE {
-                    fence(Acquire);
-                }
-                let tail = if is_front || is_back || is_cursor {
+                fence(Acquire);
+                tail = if is_front || is_back || is_cursor {
                     Some(unsafe { t.ptr().unwrap_unchecked() })
                 } else {
-                    // If the node is currently drained, the tail can be anything
+                    // If the node is currently drained, the tail can be anything,
+                    // but its next pointer must then be set if L::LAZY
+                    debug_assert!(
+                        t.ptr().is_some() || !L::LAZY || L::load_next(&node_ref.next).is_some()
+                    );
                     t.ptr()
                 };
-                // If the node is drained, backward iteration can be started from it directly
-                next = Some(self.get_next(Some(link), &link_ref.next, tail.unwrap_or(link)));
+                next = Some(self.get_next(
+                    Some(node),
+                    &node_ref.next,
+                    // As per the assertion above, tail is not null or not used
+                    tail.unwrap_or_else(NonNull::dangling),
+                ));
             } else if !is_head {
                 tail = Some(prev);
             }
@@ -657,7 +675,7 @@ impl<'a, T, S: ListState, D, L: Linking, M: Mutex> LockedList<'a, T, S, D, L, M>
             unsafe { next.as_ref().prev.store(prev.as_ptr(), Relaxed) };
             L::update_next(prev_next, Some(next));
         }
-        link_ref.unlink();
+        self.unlink(node, prev, next);
         (next, tail)
     }
 }
@@ -692,7 +710,7 @@ impl<'a, T, S: ListState, D, M: Mutex> LockedList<'a, T, S, D, Serialized, M> {
         let mut link = node.link();
         let link_ref = unsafe { link.as_mut() };
         link_ref.prev.store_mut(prev.as_ptr());
-        Serialized::update_next_mut(&mut link_ref.next, next);
+        Serialized::update_next(&link_ref.next, next);
         let is_head = prev.addr().get() == HEAD_MARKER;
         let prev_next = if is_head {
             &self.list.head

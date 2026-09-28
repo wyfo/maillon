@@ -101,11 +101,6 @@ impl<L: Linking> NodeLink<L> {
         unsafe { NonNull::new_unchecked(self.prev.load(Relaxed)) }
     }
 
-    pub(crate) fn unlink(&self) {
-        L::update_next(&self.next, None);
-        self.prev.store(ptr::null_mut(), Release);
-    }
-
     // Takes `NonNull<Self>` instead of `&self` to carry the provenance over the whole `NodeInner`.
     #[inline(always)]
     pub(crate) fn data_ptr<T>(link: NonNull<Self>) -> *mut T {
