@@ -271,6 +271,7 @@ fn wait_until<S: Synchronization, L: Linking>(
     });
 }
 
+#[cfg(not(skip_single_threaded))]
 #[rstest]
 fn notify_one_last<S: Synchronization, L: Linking>(
     #[values(SYNC, SEQ, UNSYNC)] _sync: SyncMode<S>,
@@ -291,6 +292,7 @@ fn notify_one_last<S: Synchronization, L: Linking>(
     });
 }
 
+#[cfg(not(skip_single_threaded))]
 #[rstest]
 fn notify_one_last_cancel<S: Synchronization, L: Linking>(
     #[values(SYNC, SEQ, UNSYNC)] _sync: SyncMode<S>,
@@ -314,6 +316,7 @@ fn notify_one_last_cancel<S: Synchronization, L: Linking>(
     });
 }
 
+#[cfg(not(skip_single_threaded))]
 #[rstest]
 fn notify_all_cancel<S: Synchronization, L: Linking>(
     #[values(SYNC, SEQ, UNSYNC)] _sync: SyncMode<S>,
@@ -403,6 +406,7 @@ fn notify_all_sequential_wait<S: Synchronization, L: Linking>(
     });
 }
 
+#[cfg(not(skip_single_threaded))]
 #[rstest]
 fn notify_many<S: Synchronization, L: Linking>(
     #[values(SYNC, SEQ, UNSYNC)] _sync: SyncMode<S>,
@@ -464,6 +468,7 @@ fn notify_many_cancel_race<S: Synchronization, L: Linking>(
     });
 }
 
+#[cfg(not(skip_single_threaded))]
 #[rstest]
 fn close<S: Synchronization, L: Linking>(
     #[values(SYNC, SEQ, UNSYNC)] _sync: SyncMode<S>,
@@ -481,6 +486,7 @@ fn close<S: Synchronization, L: Linking>(
     });
 }
 
+#[cfg(not(skip_single_threaded))]
 #[rstest]
 fn wait_until_closed<S: Synchronization, L: Linking>(
     #[values(SYNC, SEQ, UNSYNC)] _sync: SyncMode<S>,
@@ -560,6 +566,7 @@ fn notify_cancel_race<S: Synchronization, L: Linking>(
     });
 }
 
+#[cfg(not(skip_single_threaded))]
 #[rstest]
 fn wait_until_notified_completion<S: Synchronization, L: Linking>(
     #[values(SYNC, SEQ, UNSYNC)] _sync: SyncMode<S>,
@@ -628,6 +635,7 @@ fn notify_all_push_during_drain<S: Synchronization, L: Linking>(
     });
 }
 
+#[cfg(not(skip_single_threaded))]
 #[rstest]
 fn notify_one_last_filter<S: Synchronization, L: Linking>(
     #[values(SYNC, SEQ, UNSYNC)] _sync: SyncMode<S>,
@@ -654,6 +662,7 @@ fn notify_one_last_filter<S: Synchronization, L: Linking>(
     });
 }
 
+#[cfg(not(skip_single_threaded))]
 #[rstest]
 fn notify_no_match<S: Synchronization, L: Linking>(
     #[values(SYNC, SEQ, UNSYNC)] _sync: SyncMode<S>,
@@ -675,6 +684,7 @@ fn notify_no_match<S: Synchronization, L: Linking>(
     });
 }
 
+#[cfg(not(skip_single_threaded))]
 #[rstest]
 fn notify_one_last_filter_cancel<S: Synchronization, L: Linking>(
     #[values(SYNC, SEQ, UNSYNC)] _sync: SyncMode<S>,
@@ -697,6 +707,7 @@ fn notify_one_last_filter_cancel<S: Synchronization, L: Linking>(
     });
 }
 
+#[cfg(not(skip_single_threaded))]
 #[rstest]
 fn notify_many_filter<S: Synchronization, L: Linking>(
     #[values(SYNC, SEQ, UNSYNC)] _sync: SyncMode<S>,
@@ -728,6 +739,7 @@ fn notify_many_filter<S: Synchronization, L: Linking>(
     });
 }
 
+#[cfg(not(skip_single_threaded))]
 #[rstest]
 fn notify_all_ignores_filter<S: Synchronization, L: Linking>(
     #[values(SYNC, SEQ, UNSYNC)] _sync: SyncMode<S>,
@@ -747,6 +759,7 @@ fn notify_all_ignores_filter<S: Synchronization, L: Linking>(
     });
 }
 
+#[cfg(not(skip_single_threaded))]
 #[rstest]
 fn wait_until_with_on_notification<S: Synchronization, L: Linking>(
     #[values(SYNC, SEQ, UNSYNC)] _sync: SyncMode<S>,

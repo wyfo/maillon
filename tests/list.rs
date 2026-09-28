@@ -46,12 +46,14 @@ fn push_node<L: Linking>(list: &TestList<L>, id: usize) -> Pin<Box<TestNode<'_, 
     node
 }
 
+#[cfg(not(skip_single_threaded))]
 #[test]
 #[should_panic(expected = "list state overflow")]
 fn state_overflow() {
     List::<TestData, usize>::with_state(LIST_STATE_MAX + 1);
 }
 
+#[cfg(not(skip_single_threaded))]
 #[rstest]
 fn drop_non_empty_drain<L: Linking>(#[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>) {
     model(|| {
@@ -62,6 +64,7 @@ fn drop_non_empty_drain<L: Linking>(#[values(EAGER, LAZY, SERIALIZED)] _linking:
     });
 }
 
+#[cfg(not(skip_single_threaded))]
 #[rstest]
 fn panic_in_drain_execute_unlocked<L: Linking>(
     #[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>,
@@ -78,6 +81,7 @@ fn panic_in_drain_execute_unlocked<L: Linking>(
     });
 }
 
+#[cfg(not(skip_single_threaded))]
 #[rstest]
 fn remove_many<L: Linking, E: End>(
     #[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>,
@@ -101,6 +105,7 @@ fn remove_many<L: Linking, E: End>(
     });
 }
 
+#[cfg(not(skip_single_threaded))]
 #[rstest]
 fn drain_many<L: Linking, E: End>(
     #[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>,
@@ -124,6 +129,7 @@ fn drain_many<L: Linking, E: End>(
     });
 }
 
+#[cfg(not(skip_single_threaded))]
 #[rstest]
 fn cursor_empty<L: Linking>(#[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>) {
     model(|| {
@@ -141,6 +147,7 @@ fn cursor_empty<L: Linking>(#[values(EAGER, LAZY, SERIALIZED)] _linking: Linking
     });
 }
 
+#[cfg(not(skip_single_threaded))]
 #[rstest]
 fn cursor_move<L: Linking>(#[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>) {
     model(|| {
@@ -166,6 +173,7 @@ fn cursor_move<L: Linking>(#[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingM
     });
 }
 
+#[cfg(not(skip_single_threaded))]
 #[rstest]
 fn cursor_remove_current<L: Linking>(#[values(EAGER, LAZY, SERIALIZED)] _linking: LinkingMode<L>) {
     model(|| {
@@ -221,6 +229,7 @@ fn ids<L: Linking>(locked: &mut LockedList<'_, TestData, (), (), L>) -> Vec<usiz
     ids
 }
 
+#[cfg(not(skip_single_threaded))]
 #[test]
 fn locked_push_back() {
     model(|| {
@@ -244,6 +253,7 @@ fn locked_push_back() {
     });
 }
 
+#[cfg(not(skip_single_threaded))]
 #[test]
 fn cursor_insert() {
     model(|| {
@@ -283,6 +293,7 @@ fn cursor_insert() {
     });
 }
 
+#[cfg(not(skip_single_threaded))]
 #[test]
 fn locked_push_back_from_node_only() {
     model(|| {
