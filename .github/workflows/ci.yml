@@ -13,7 +13,12 @@ jobs:
       matrix:
         features: [--no-default-features, --all-features]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
+      - name: update toolchain
+        run: rustup update stable && rustup default stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.features }}
       - name: rustfmt
         run: cargo fmt -- --check --config "unstable_features=true,imports_granularity=Crate,group_imports=StdExternalCrate,format_code_in_doc_comments=true"
       - name: clippy
@@ -29,10 +34,11 @@ jobs:
     name: check msrv
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.70"
+      - uses: Swatinem/rust-cache@v2
       - run: cargo +1.70 check
       - run: cargo +1.70 check --no-default-features
 
@@ -40,7 +46,12 @@ jobs:
     needs: test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
+      - uses: Swatinem/rust-cache@v2
+      - name: clippy
+        run: cargo clippy
+        env:
+          RUSTFLAGS: "--cfg loom"
       - name: loom
         run: cargo test --test wait_list --test loom_notify --test loom_semaphore --release
         env:
@@ -54,7 +65,8 @@ jobs:
         os: [ubuntu-24.04, ubuntu-24.04-arm]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
+      - uses: Swatinem/rust-cache@v2
       - name: benchmark maillon
         run: cargo bench --all-features --bench notify --bench semaphore -- --warm-up-time 1 --measurement-time 1
       - name: benchmark maillon lazy linked
@@ -65,15 +77,39 @@ jobs:
   miri:
     needs: test
     runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: install miri
+        run: rustup install nightly && rustup +nightly component add miri
+      - uses: Swatinem/rust-cache@v2
+      - name: miri
+        run: cargo +nightly miri test --tests
+
+  compute-miri-seeds:
+    runs-on: ubuntu-latest
+    outputs:
+      seeds: ${{ steps.compute-seeds.outputs.seeds }}
+    steps:
+      - id: compute-seeds
+        run: python3 -c "print('seeds=' + str([f'{i}..{i+$TOTAL//$RUNNERS}' for i in range(0,$TOTAL,$TOTAL//$RUNNERS)]))" >> $GITHUB_OUTPUT
+        env:
+          TOTAL: 2048
+          RUNNERS: 32
+
+  miri-seeds:
+    needs: [ test, compute-miri-seeds ]
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: true
       matrix:
-        seeds: [0..256, 256..512, 512..768, 768..1024, 1024..1280, 1280..1536, 1536..1792, 1792..2048]
+        seeds: ${{ fromJson(needs.compute-miri-seeds.outputs.seeds) }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: install miri
         run: rustup install nightly && rustup +nightly component add miri
+      - uses: Swatinem/rust-cache@v2
       - name: miri
         run: cargo +nightly miri test --test wait_list --test miri_notify --test miri_semaphore
         env:
           MIRIFLAGS: -Zmiri-many-seeds=${{ matrix.seeds }} -Zmiri-compare-exchange-weak-failure-rate=0
+          RUSTFLAGS: --cfg skip_single_threaded

@@ -112,6 +112,7 @@ all-features = true
 unexpected_cfgs = { level = "warn", check-cfg = [
     "cfg(nightly)",
     "cfg(loom)",
+    "cfg(skip_single_threaded)",
     "cfg(maillon_notify_fetch_max)",
 ] }
 unsafe_op_in_unsafe_fn = "warn"

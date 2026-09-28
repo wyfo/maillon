@@ -1,4 +1,4 @@
-#![cfg(not(any(miri, loom)))]
+#![cfg(not(any(skip_single_threaded, loom)))]
 #[allow(dead_code)]
 #[path = "../examples/semaphore.rs"]
 mod semaphore;
