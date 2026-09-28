@@ -12,10 +12,7 @@ use crate::{
         AtomicEager, Back, End, Front, HEAD_MARKER, IntoTail, Linking, ListState, LockedList,
         NodeLink, TailExt,
     },
-    loom::{
-        AtomicPtrExt,
-        sync::atomic::{AtomicPtr, Ordering::*},
-    },
+    loom::{AtomicPtrExt, sync::atomic::Ordering::*},
     msrv::ptr,
     node::{LinkedNodeRef, node_ref},
     sync::mutex::{DefaultMutex, Mutex},
@@ -48,10 +45,10 @@ impl<'a, T, S: ListState, D, L: Linking, M: Mutex> Drain<'a, T, S, D, L, M> {
         mut locked: LockedList<'a, T, S, D, L, M>,
         new_state_if_not_empty: F,
     ) -> Self {
-        let mut head = None;
-        let mut tail = None;
+        let mut sentinel = NodeLink::new();
         if locked.list.tail().is_some() {
-            head = L::wait_next(&locked.list.head, &locked.list.parker);
+            let head = locked.list.linking.wait_next(&locked.list.head);
+            L::drain_set_head(&mut sentinel, head);
             L::update_next(&locked.list.head, None);
             let new_tail = new_state_if_not_empty(locked.data_mut()).into_tail();
             let old_tail = if L::SERIALIZED {
@@ -63,13 +60,11 @@ impl<'a, T, S: ListState, D, L: Linking, M: Mutex> Drain<'a, T, S, D, L, M> {
                 // TODO Acquire ordering to synchronize with node insertion
                 locked.list.tail.swap(new_tail, AcqRel)
             };
-            tail = Some(unsafe { old_tail.ptr().unwrap_unchecked() });
+            let tail = unsafe { old_tail.ptr().unwrap_unchecked() };
+            sentinel.prev.store_mut(tail.as_ptr());
         }
         Self {
-            sentinel_node: UnsafePinned::new(NodeLink {
-                prev: AtomicPtr::new(tail.as_ptr()),
-                next: L::new_next(head),
-            }),
+            sentinel_node: UnsafePinned::new(sentinel),
             locked: ManuallyDrop::new(locked),
         }
     }
@@ -79,7 +74,8 @@ impl<'a, T, S: ListState, D, L: Linking, M: Mutex> Drain<'a, T, S, D, L, M> {
     }
 
     fn head(&mut self) -> Option<NonNull<NodeLink<L>>> {
-        L::drain_get_head(self.sentinel())
+        let sentinel = unsafe { &mut *self.sentinel_node.get() };
+        (self.locked.list.linking).drain_get_head(sentinel)
     }
 
     fn tail(&mut self) -> Option<NonNull<NodeLink<L>>> {
@@ -87,7 +83,7 @@ impl<'a, T, S: ListState, D, L: Linking, M: Mutex> Drain<'a, T, S, D, L, M> {
     }
 
     fn set_head(&mut self, head: Option<NonNull<NodeLink<L>>>) {
-        L::update_next_mut(&mut self.sentinel().next, head);
+        L::drain_set_head(self.sentinel(), head);
     }
 
     fn set_tail(&mut self, tail: Option<NonNull<NodeLink<L>>>) {
@@ -310,23 +306,25 @@ impl<E: End, T, S: ListState, D, L: Linking, M: Mutex> DrainEnd<'_, '_, E, T, S,
             } else {
                 self.drain.set_tail(None);
             }
+            let head_marker = NonNull::new(ptr::without_provenance_mut(HEAD_MARKER)).unwrap();
+            self.drain.locked.unlink(self.node, head_marker, next);
             self.drain.set_head(next);
             next
         } else {
-            let mut prev = Some(unsafe { node.load_prev() });
-            if prev.as_ptr().addr() == HEAD_MARKER
-                || prev.as_ptr() == ptr::from_mut(self.drain.sentinel())
+            let node_prev = unsafe { node.load_prev() };
+            let mut prev = Some(node_prev);
+            if node_prev.addr().get() == HEAD_MARKER
+                || node_prev.as_ptr() == ptr::from_mut(self.drain.sentinel())
             {
                 prev = None;
                 self.drain.set_head(None);
             } else {
-                let locked = &self.drain.locked;
-                L::wait_next(unsafe { &prev.unwrap().as_ref().next }, &locked.list.parker);
+                (self.drain.locked.list.linking).wait_next(unsafe { &node_prev.as_ref().next });
             }
+            self.drain.locked.unlink(self.node, node_prev, None);
             self.drain.set_tail(prev);
             prev
         };
-        node.unlink();
         Some(Self {
             node: new_end?,
             drain: self.drain,

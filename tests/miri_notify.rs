@@ -1,3 +1,4 @@
+#![cfg(not(loom))]
 #[allow(dead_code)]
 #[path = "../examples/notify.rs"]
 mod notify;

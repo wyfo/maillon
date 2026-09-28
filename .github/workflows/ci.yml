@@ -53,7 +53,7 @@ jobs:
         env:
           RUSTFLAGS: "--cfg loom"
       - name: loom
-        run: cargo test --test wait_list --test loom_notify --test loom_semaphore --release
+        run: cargo test --tests --release
         env:
           RUSTFLAGS: --cfg loom -C debug_assertions
           LOOM_MAX_PREEMPTIONS: 2
@@ -109,7 +109,7 @@ jobs:
         run: rustup install nightly && rustup +nightly component add miri
       - uses: Swatinem/rust-cache@v2
       - name: miri
-        run: cargo +nightly miri test --test wait_list --test miri_notify --test miri_semaphore
+        run: cargo +nightly miri test --test list --test wait_list --test miri_notify --test miri_semaphore
         env:
           MIRIFLAGS: -Zmiri-many-seeds=${{ matrix.seeds }} -Zmiri-compare-exchange-weak-failure-rate=0
           RUSTFLAGS: --cfg skip_single_threaded
