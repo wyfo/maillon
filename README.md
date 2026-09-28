@@ -201,6 +201,8 @@ Reimplementations of `tokio::sync::Notify` and `tokio::sync::Semaphore` are also
 
 `List` exposes a 100% safe API, so `WaitList` and `tokio` reimplementations don't use unsafe code[^3].
 
+However, the default algorithm of `List` does not support [strict provenance](https://doc.rust-lang.org/std/ptr/index.html#strict-provenance). This is a [known issue](https://github.com/rust-lang/unsafe-code-guidelines/issues/480) of `AtomicPtr` based concurrent data structures.
+
 ## Alternatives
 
 The main goal of `maillon` was originally to provide a `WaitList` with `notify_one` as cheap as possible when there is no waiter, i.e. **read-only**, with a customizable synchronization strategy between the wake condition and the waker registration (`SeqCst` atomic operations vs. `SeqCst` fences vs. RMWs on the wake condition). Lock-free waiter insertion then came as an appreciable benefit on top of that.

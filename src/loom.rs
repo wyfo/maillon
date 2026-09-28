@@ -14,7 +14,7 @@ pub(crate) mod sync {
     pub(crate) use portable_atomic as atomic;
 }
 
-pub(crate) trait AtomicPtrExt<T> {
+pub trait AtomicPtrExt<T> {
     fn load_mut(&mut self) -> *mut T;
     fn store_mut(&mut self, ptr: *mut T);
 }

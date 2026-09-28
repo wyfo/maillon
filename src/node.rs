@@ -18,8 +18,9 @@ use crate::{
     list::ListRef,
     loom::{
         cell::Cell,
-        sync::atomic::{AtomicPtr, Ordering, Ordering::*},
+        sync::atomic::{Ordering, Ordering::*},
     },
+    utils::AtomicPtrImpl,
 };
 
 #[allow(type_alias_bounds)]
@@ -57,14 +58,11 @@ pub trait NodeData<L: ListRef + ?Sized>: Sized {
 mod private {
     use core::ptr::NonNull;
 
-    use crate::{
-        linking::{Linking, PrivateLinking},
-        loom::sync::atomic::AtomicPtr,
-    };
+    use crate::linking::{Linking, PrivateLinking};
 
     #[repr(align(4))]
     pub struct NodeLink<L: PrivateLinking> {
-        pub(crate) prev: AtomicPtr<NodeLink<L>>,
+        pub(crate) prev: L::PrevPtr,
         pub(crate) next: L::NextPtr,
     }
 
@@ -89,7 +87,10 @@ impl<L: Linking> NodeLink<L> {
     #[cfg_attr(loom, const_fn::const_fn(cfg(false)))]
     pub(crate) const fn new() -> Self {
         Self {
-            prev: AtomicPtr::new(ptr::null_mut()),
+            #[cfg(not(loom))]
+            prev: L::NEW_PREV,
+            #[cfg(loom)]
+            prev: AtomicPtrImpl::new(ptr::null_mut()),
             #[cfg(not(loom))]
             next: L::NEW_NEXT,
             #[cfg(loom)]
