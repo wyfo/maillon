@@ -337,6 +337,7 @@ fn lazy_materialization(
     #[values(false, true)] head_materialized: bool,
     #[values(false, true)] cache_without_next: bool,
     #[values(false, true)] materialize_until_cached: bool,
+    #[values(false, true)] unlink_cached: bool,
 ) {
     model(move || {
         let list = TestList::<AtomicLazy>::new();
@@ -372,6 +373,9 @@ fn lazy_materialization(
             nodes.push(Box::pin(TestNode::with_data(&list, TestData(6))));
             link(&mut nodes[6]);
             unlink(&mut nodes[5]);
+        }
+        if unlink_cached {
+            unlink(&mut nodes[2]);
         }
         {
             pin!(list.lock().drain()).front();

@@ -316,9 +316,11 @@ impl<B: BackoffStrategy> AtomicLazy<B> {
                     return Some(from);
                 }
                 found = Some(from);
+            }
             // It's possible to have a cached node without its next pointer set
             // if its next node was previously removed and another node was pushed later
-            } else if Some(prev) == self.cache.get() {
+            // (this cached node might also be the one searched for)
+            if Some(prev) == self.cache.get() {
                 if found.is_some() {
                     return found;
                 }
