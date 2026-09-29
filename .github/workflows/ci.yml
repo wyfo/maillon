@@ -84,6 +84,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: miri
         run: cargo +nightly miri test --tests
+        env:
+          MIRIFLAGS: -Zmiri-permissive-provenance
 
   compute-miri-seeds:
     runs-on: ubuntu-latest
@@ -111,5 +113,5 @@ jobs:
       - name: miri
         run: cargo +nightly miri test --test list --test wait_list --test miri_notify --test miri_semaphore
         env:
-          MIRIFLAGS: -Zmiri-many-seeds=${{ matrix.seeds }} -Zmiri-compare-exchange-weak-failure-rate=0
+          MIRIFLAGS: -Zmiri-many-seeds=${{ matrix.seeds }} -Zmiri-compare-exchange-weak-failure-rate=0 -Zmiri-permissive-provenance
           RUSTFLAGS: --cfg skip_single_threaded
