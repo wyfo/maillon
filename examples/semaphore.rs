@@ -231,7 +231,7 @@ impl<'a, L: Linking> NodeData<SemaphoreRef<'a, L>> for Waiter {
         ((self.permits_total - self.permits_remaining) as usize) << PERMIT_SHIFT
     }
 
-    #[inline]
+    #[inline(always)]
     fn on_drop<'list>(
         self: Pin<&mut Self>,
         list: &'list SemaphoreRef<'a, L>,

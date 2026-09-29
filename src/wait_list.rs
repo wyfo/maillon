@@ -514,6 +514,7 @@ impl<N: Notification, S: Synchronization, L: Linking, M: Mutex, const WAKER_BATC
 impl<'a, N: Notification, S: Synchronization, L: Linking, M: Mutex, const WAKER_BATCH_SIZE: usize>
     NodeData<WaitListRef<'a, N, S, L, M, WAKER_BATCH_SIZE>> for Waiter<N>
 {
+    #[inline]
     fn new_state_if_last_node_on_drop(
         self: Pin<&mut Self>,
         _list: &WaitListRef<'a, N, S, L, M, WAKER_BATCH_SIZE>,
@@ -522,17 +523,20 @@ impl<'a, N: Notification, S: Synchronization, L: Linking, M: Mutex, const WAKER_
         STATE_OPEN
     }
 
+    #[inline(always)]
     fn on_drop<'list>(
         self: Pin<&mut Self>,
         list: &'list WaitListRef<'a, N, S, L, M, WAKER_BATCH_SIZE>,
         locked: Option<LockedList<'list, Self, usize, (), L, M>>,
         state_updated_on_unlink: bool,
     ) {
-        let Some(notif @ (Notified::One(_) | Notified::Last(_))) =
-            self.get_mut().notification.take()
-        else {
+        if !matches!(
+            &self.notification,
+            Some(Notified::One(_) | Notified::Last(_))
+        ) {
             return;
-        };
+        }
+        let notif = self.get_mut().notification.take().unwrap();
         if let Some(locked) = locked {
             debug_assert!(!state_updated_on_unlink);
             match notif {

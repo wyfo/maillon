@@ -46,15 +46,15 @@ faster: 400 ns vs 500 ns at 32 waiters, 3.00 µs vs 3.60 µs at 256.
 
 | Benchmark               | asyncband | async-event | maillon `WaitList` | maillon `List` |
 |-------------------------|----------:|------------:|-------------------:|---------------:|
-| `cancel_pending`        |   70.0 ns |     79.4 ns |            52.4 ns |        41.5 ns |
+| `cancel_pending`        |   70.0 ns |     79.4 ns |            51.9 ns |        41.5 ns |
 | `is_set_contended` t=8  |    794 ns |      < 2 ns |             < 2 ns |         < 2 ns |
-| `set_reset_cycle`       |   33.7 ns |      6.8 ns |             5.2 ns |        14.9 ns |
-| `wait_already_set` t=1  |   16.5 ns |      3.2 ns |             3.2 ns |         6.8 ns |
-| `wait_already_set` t=32 |    960 ns |      3.6 ns |             5.2 ns |         7.5 ns |
-| `waiter_fan_out/1`      |    200 ns |      190 ns |             164 ns |         147 ns |
-| `waiter_fan_out/8`      |    906 ns |     1.06 µs |             812 ns |         593 ns |
-| `waiter_fan_out/32`     |   3.50 µs |     4.30 µs |            2.85 µs |        2.50 µs |
-| `wake_waiter`           |   99.7 ns |     96.6 ns |            78.6 ns |        56.4 ns |
+| `set_reset_cycle`       |   33.7 ns |      6.8 ns |             5.5 ns |        14.9 ns |
+| `wait_already_set` t=1  |   16.5 ns |      3.2 ns |             4.0 ns |         6.8 ns |
+| `wait_already_set` t=32 |    960 ns |      3.6 ns |             4.4 ns |         7.5 ns |
+| `waiter_fan_out/1`      |    200 ns |      190 ns |             158 ns |         147 ns |
+| `waiter_fan_out/8`      |    906 ns |     1.06 µs |             743 ns |         593 ns |
+| `waiter_fan_out/32`     |   3.50 µs |     4.30 µs |            2.70 µs |        2.50 µs |
+| `wake_waiter`           |   99.7 ns |     96.6 ns |            73.3 ns |        56.4 ns |
 | `wake_waiter_reused`    |   81.8 ns |     99.7 ns |            69.6 ns |        61.4 ns |
 
 - asyncband's `ManualResetEvent` is fully locked, including `is_set` and `set` without waiter.

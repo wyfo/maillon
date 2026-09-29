@@ -47,6 +47,11 @@ pub trait NodeData<L: ListRef + ?Sized>: Sized {
     /// The list's lock might have been acquired before calling this method, in which case `locked`
     /// will be `Some`. `state_updated_on_unlink` tells whether the list's state has been updated
     /// with the result of [`new_state_if_last_node_on_drop`](Self::new_state_if_last_node_on_drop).
+    ///
+    /// This method can be called both on the hot path (`locked` is `None`) and on the cold path
+    /// (`locked` is `Some`), but a single method avoids duplicating the checks both paths might
+    /// share. As a consequence, this method should be annotated with `#[inline(always)]` to help
+    /// the compiler optimize the cold path out of the hot path.
     fn on_drop<'list>(
         self: Pin<&mut Self>,
         list: &'list L,
