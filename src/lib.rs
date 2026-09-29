@@ -1,4 +1,4 @@
-//! A concurrent intrusive list with lock-free insertion, mainly for building synchronization
+//! A concurrent intrusive list for building synchronization
 //! primitives.
 //!
 //! *Maillon is the French word for a chain link.*

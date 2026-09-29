@@ -1,6 +1,6 @@
 # maillon
 
-A concurrent intrusive list with lock-free insertion, mainly for building synchronization primitives.
+A concurrent intrusive list for building synchronization primitives.
 
 *Maillon is the French word for a chain link.*
 
@@ -225,12 +225,12 @@ The main goal of `maillon` was originally to provide a `WaitList` with `notify_o
 
 - [`pin-list`]: safe, but not synchronized, and aborts if a node is dropped without having been removed and taken out of the list.
 - [`pinlist`]: safe, with the list embedding its mutex and nodes removing themselves on drop, like `maillon`; but every insertion and every drop takes the lock, and nodes can only leave the list by being dropped.
-- [`cordyceps`]: unsafe node trait, not synchronized.
-- [`intrusive-collections`]: general-purpose intrusive containers with unsafe adapters, not synchronized (`AtomicLink` only makes nodes shareable between threads).
+
+There are other crates providing/implementing intrusive lists, but whose lists own their nodes, such as [`intrusive-collections`] or [`cordyceps`], and stack-allocated nodes requiring unsafe code. `maillon` has the opposite design: nodes borrow the list, which doesn't own them.
 
 ### Related design
 
-[`saa`] has the closest design to `maillon`: its synchronization primitives push waiters lock-free into their state word, which also holds a lock bit and a few data bits. However, its wait queue is private, the lock bit is a spinlock, dequeuing the front and canceling a waiter both walk the queue from its tail, and the data bits limit its semaphore to 63 permits.
+[`saa`]'s design shares similarities with `maillon`: its synchronization primitives push waiters lock-free into their state word, which also holds a lock bit and a few data bits. However, its wait queue is private, the lock bit is a spinlock, dequeuing the front and canceling a waiter both walk the queue from its tail, and the data bits limit its semaphore to 63 permits.
 
 [`tokio::sync::Notify`]: https://docs.rs/tokio/latest/tokio/sync/struct.Notify.html
 [`maitake_sync::WaitQueue`]: https://docs.rs/maitake-sync/latest/maitake_sync/wait_queue/struct.WaitQueue.html
