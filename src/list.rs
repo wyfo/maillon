@@ -12,7 +12,7 @@ use crate::{
     msrv::ptr,
     node::{NodeData, NodeLink, NodeRef, NodeUnlinked, PrivateNodeRef, node_ref},
     sync::mutex::{DefaultMutex, Mutex},
-    utils::abort_on_unwind,
+    utils::{AtomicPtrImpl, abort_on_unwind},
 };
 
 mod cursor;
@@ -186,8 +186,11 @@ impl<T, S: ListState, D, L: Linking, M: Mutex> List<T, S, D, L, M> {
         let _locked = L::SERIALIZED.then(|| self.lock());
         let set_order = L::push_back_set_order(set_order);
         let mut backoff = BackoffState::new(L::Backoff::default());
+        if !L::SERIALIZED {
+            let _ = link.expose_provenance();
+        }
         let mut tail = self.tail.load(fetch_order);
-        let prev = loop {
+        let mut prev = loop {
             let state_or_ptr = S::tail_to_enum(tail);
             let new_state =
                 (state_or_ptr.state()).and_then(|state| f.as_mut()?(node.data_mut(), state));
@@ -219,6 +222,9 @@ impl<T, S: ListState, D, L: Linking, M: Mutex> List<T, S, D, L, M> {
         };
         if f.is_some() && prev.is_null() {
             return Ok(unsafe { tail.state().unwrap_unchecked() });
+        }
+        if !L::SERIALIZED {
+            prev = ptr::with_exposed_provenance_mut(prev.addr());
         }
         // `addr_of!((*prev).next)` can't be used with AtomicLazy as the previous node might have
         // been concurrently dequeued.

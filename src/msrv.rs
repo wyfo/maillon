@@ -1,5 +1,5 @@
 // TODO 1.76: Result::inspect, ptr::from_ref, ptr::from_mut
-// TODO 1.84: strict provenance
+// TODO 1.84: strict provenance, exposed provenance
 #![allow(clippy::incompatible_msrv, unstable_name_collisions)]
 
 use core::{num::NonZeroUsize, ptr::NonNull};
@@ -23,6 +23,7 @@ pub(crate) trait StrictProvenance<T>: Sized + Copy {
     type Addr;
     fn addr(self) -> Self::Addr;
     fn with_addr(self, addr: Self::Addr) -> Self;
+    fn expose_provenance(self) -> usize;
     fn map_addr(self, f: impl FnOnce(Self::Addr) -> Self::Addr) -> Self {
         self.with_addr(f(self.addr()))
     }
@@ -39,6 +40,9 @@ impl<T> StrictProvenance<T> for *mut T {
         let offset = dest_addr.wrapping_sub(ptr_addr);
         self.cast::<u8>().wrapping_offset(offset).cast()
     }
+    fn expose_provenance(self) -> usize {
+        self as usize
+    }
 }
 
 impl<T> StrictProvenance<T> for *const T {
@@ -49,6 +53,9 @@ impl<T> StrictProvenance<T> for *const T {
     fn with_addr(self, addr: usize) -> Self {
         self.cast_mut().with_addr(addr).cast_const()
     }
+    fn expose_provenance(self) -> usize {
+        self as usize
+    }
 }
 
 impl<T> StrictProvenance<T> for NonNull<T> {
@@ -58,6 +65,9 @@ impl<T> StrictProvenance<T> for NonNull<T> {
     }
     fn with_addr(self, addr: NonZeroUsize) -> Self {
         unsafe { NonNull::new_unchecked(self.as_ptr().with_addr(addr.get())) }
+    }
+    fn expose_provenance(self) -> usize {
+        self.as_ptr().expose_provenance()
     }
 }
 
@@ -75,5 +85,9 @@ pub(crate) mod ptr {
 
     pub(crate) const fn without_provenance_mut<T>(addr: usize) -> *mut T {
         null_mut::<u8>().wrapping_add(addr).cast()
+    }
+
+    pub(crate) fn with_exposed_provenance_mut<T>(addr: usize) -> *mut T {
+        addr as _
     }
 }

@@ -16,7 +16,7 @@ use crate::{
     msrv::ptr,
     node::{LinkedNodeRef, node_ref},
     sync::mutex::{DefaultMutex, Mutex},
-    utils::{OptionNonNullExt, defer},
+    utils::{AtomicPtrImpl, OptionNonNullExt, defer},
     waker_batch::WakerBatch,
 };
 
@@ -124,11 +124,15 @@ impl<'a, T, S: ListState, D, L: Linking, M: Mutex> Drain<'a, T, S, D, L, M> {
     }
 
     /// Executes `f` with the list unlocked, the lock being reacquired before returning.
+    #[allow(clippy::incompatible_msrv, unstable_name_collisions)]
     pub fn execute_unlocked<F: FnOnce() -> R, R>(self: Pin<&mut Self>, f: F) -> R {
         let this = unsafe { self.get_unchecked_mut() };
         if let Some(head) = this.head() {
             let tail = unsafe { this.tail().unwrap_unchecked() };
             let sentinel_ptr = ptr::from_mut(this.sentinel());
+            if !L::SERIALIZED {
+                let _ = sentinel_ptr.expose_provenance();
+            }
             unsafe { head.as_ref().prev.store(sentinel_ptr, Relaxed) }
             unsafe { L::update_next(&tail.as_ref().next, NonNull::new(sentinel_ptr)) };
         }

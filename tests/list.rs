@@ -1,3 +1,5 @@
+#[cfg(not(loom))]
+use std::ptr;
 use std::{
     array,
     panic::{self, AssertUnwindSafe},
@@ -10,7 +12,7 @@ use loom::{model, thread};
 use maillon::{
     List, Node, NodeState,
     linking::{AtomicLazy, Linking, Serialized},
-    list::{Back, End, Front, LIST_STATE_MAX, LockedList},
+    list::{Back, End, Front, LIST_STATE_MAX, ListState, LockedList},
     node::{NodeData, NodeRef, NodeUnlinked},
 };
 use rstest::rstest;
@@ -18,20 +20,21 @@ use rstest::rstest;
 mod linking;
 mod loom;
 
-type TestList<L> = List<TestData, (), (), L>;
-type TestNode<'a, L> = Node<&'a TestList<L>>;
+type TestList<L, S = ()> = List<TestData, S, (), L>;
+type TestNode<'a, L, S = ()> = Node<&'a TestList<L, S>>;
 struct TestData(usize);
-impl<'a, L: Linking> NodeData<&'a TestList<L>> for TestData {
+impl<'a, L: Linking, S: ListState + Default> NodeData<&'a TestList<L, S>> for TestData {
     fn new_state_if_last_node_on_drop(
         self: Pin<&mut Self>,
-        _list: &&'a TestList<L>,
+        _list: &&'a TestList<L, S>,
         _list_data: &mut (),
-    ) {
+    ) -> S {
+        S::default()
     }
     fn on_drop<'list>(
         self: Pin<&mut Self>,
-        _list: &'list &'a TestList<L>,
-        _locked: Option<LockedList<'list, Self, (), (), L>>,
+        _list: &'list &'a TestList<L, S>,
+        _locked: Option<LockedList<'list, Self, S, (), L>>,
         _state_updated_on_unlink: bool,
     ) {
     }
@@ -123,6 +126,39 @@ fn unlink_after_push<L: Linking, E: End>(
         assert!(!nodes[0].is_linked());
         assert_eq!(ids(&mut locked), [1, 2]);
         drop(locked);
+    });
+}
+
+// This test should not be skipped with `skip_single_threaded` as many seeds are required for
+// address reuse to happen.
+#[cfg(not(loom))]
+#[rstest]
+fn push_back_tail_aba<L: Linking>(#[values(EAGER, LAZY)] _linking: LinkingMode<L>) {
+    let list = TestList::<L, usize>::new();
+    let unlinked: fn(&mut Pin<Box<Node<_>>>) -> NodeUnlinked<'_, _> =
+        |node| match node.as_mut().state() {
+            NodeState::Unlinked(node) => node,
+            NodeState::Linked(_) => unreachable!(),
+        };
+    let mut tail = Some(Box::pin(TestNode::with_data(&list, TestData(0))));
+    unlinked(tail.as_mut().unwrap()).try_push_back_with(Relaxed, Relaxed, |_, _| true);
+    let mut next = Box::pin(TestNode::with_data(&list, TestData(1)));
+    let mut prev_tail = ptr::null();
+    let mut garbage_tails = Vec::new();
+    unlinked(&mut next).try_push_back_with(Relaxed, Relaxed, |_, _| {
+        if let Some(tail) = tail.take() {
+            prev_tail = ptr::from_ref(&*tail);
+        }
+        for _ in 0..2 {
+            let mut new_tail = Box::pin(TestNode::with_data(&list, TestData(0)));
+            if ptr::from_ref(&*new_tail.as_ref()) == prev_tail {
+                unlinked(&mut new_tail).try_push_back_with(Relaxed, Relaxed, |_, _| true);
+                tail = Some(new_tail);
+                break;
+            }
+            garbage_tails.push(new_tail);
+        }
+        true
     });
 }
 

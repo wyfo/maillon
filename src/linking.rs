@@ -15,7 +15,7 @@ use crate::{
     msrv::ptr,
     node::NodeLink,
     sync::parker::{DefaultParker, Parker},
-    utils::{OptionNonNullExt, abort_on_unwind},
+    utils::{ExposedAtomicPtr, OptionNonNullExt, abort_on_unwind},
 };
 
 /// How the nodes of a [`List`](crate::List) are linked together when a node is pushed to the back.
@@ -25,6 +25,11 @@ use crate::{
 /// requires holding the list mutex to insert nodes or update the list state.
 ///
 /// See each variant documentation for more details about their implications.
+///
+/// # [Strict provenance](https://doc.rust-lang.org/std/ptr/index.html#strict-provenance)
+///
+/// `AtomicEager` and `AtomicLazy` are not compatible with strict provenance. See the related
+/// [issue](https://github.com/rust-lang/unsafe-code-guidelines/issues/480) for more details.
 ///
 /// # Which variant to choose
 ///
@@ -57,13 +62,16 @@ pub trait Linking: PrivateLinking + Send + Sync + 'static {
 mod private {
     use core::{ptr::NonNull, sync::atomic::Ordering};
 
-    use crate::{backoff::BackoffStrategy, node::NodeLink};
+    use crate::{backoff::BackoffStrategy, node::NodeLink, utils::AtomicPtrImpl};
 
     pub trait PrivateLinking: Sized {
         type NextPtr: 'static;
+        type PrevPtr: AtomicPtrImpl<NodeLink<Self>> + 'static;
         type Backoff: BackoffStrategy;
         #[cfg(not(loom))]
         const NEW_NEXT: Self::NextPtr;
+        #[cfg(not(loom))]
+        const NEW_PREV: Self::PrevPtr;
         #[cfg(not(loom))]
         const INIT: Self;
         fn new_next(ptr: Option<NonNull<NodeLink<Self>>>) -> Self::NextPtr;
@@ -146,10 +154,14 @@ impl<B: BackoffStrategy, P: Parker, PB: BoundedBackoffStrategy> PrivateLinking
     for AtomicEager<B, P, PB>
 {
     type NextPtr = AtomicPtr<NodeLink<Self>>;
+    type PrevPtr = ExposedAtomicPtr<NodeLink<Self>>;
     type Backoff = B;
     #[allow(clippy::declare_interior_mutable_const)]
     #[cfg(not(loom))]
     const NEW_NEXT: Self::NextPtr = AtomicPtr::new(ptr::null_mut());
+    #[allow(clippy::declare_interior_mutable_const)]
+    #[cfg(not(loom))]
+    const NEW_PREV: Self::PrevPtr = ExposedAtomicPtr::NULL;
     #[allow(clippy::declare_interior_mutable_const)]
     #[cfg(not(loom))]
     const INIT: Self = Self {
@@ -332,10 +344,14 @@ impl<B: BackoffStrategy> AtomicLazy<B> {
 }
 impl<B: BackoffStrategy> PrivateLinking for AtomicLazy<B> {
     type NextPtr = Cell<Option<NonNull<NodeLink<Self>>>>;
+    type PrevPtr = ExposedAtomicPtr<NodeLink<Self>>;
     type Backoff = B;
     #[allow(clippy::declare_interior_mutable_const)]
     #[cfg(not(loom))]
     const NEW_NEXT: Self::NextPtr = Cell::new(None);
+    #[allow(clippy::declare_interior_mutable_const)]
+    #[cfg(not(loom))]
+    const NEW_PREV: Self::PrevPtr = ExposedAtomicPtr::NULL;
     #[allow(clippy::declare_interior_mutable_const)]
     #[cfg(not(loom))]
     const INIT: Self = Self {
@@ -453,10 +469,14 @@ impl<B: BackoffStrategy> Linking for AtomicLazy<B> {
 pub struct Serialized;
 impl PrivateLinking for Serialized {
     type NextPtr = Cell<Option<NonNull<NodeLink<Self>>>>;
+    type PrevPtr = AtomicPtr<NodeLink<Self>>;
     type Backoff = NoBackoff;
     #[allow(clippy::declare_interior_mutable_const)]
     #[cfg(not(loom))]
     const NEW_NEXT: Self::NextPtr = Cell::new(None);
+    #[allow(clippy::declare_interior_mutable_const)]
+    #[cfg(not(loom))]
+    const NEW_PREV: Self::PrevPtr = AtomicPtr::new(ptr::null_mut());
     #[cfg(not(loom))]
     const INIT: Self = Self;
     fn new_next(ptr: Option<NonNull<NodeLink<Self>>>) -> Self::NextPtr {
