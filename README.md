@@ -1,5 +1,10 @@
 # maillon
 
+[![Crates.io](https://img.shields.io/crates/v/maillon.svg)](https://crates.io/crates/maillon)
+[![Documentation](https://docs.rs/maillon/badge.svg)](https://docs.rs/maillon)
+[![CI](https://github.com/wyfo/maillon/actions/workflows/ci.yml/badge.svg)](https://github.com/wyfo/maillon/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-MIT_OR_Apache--2.0-blue.svg)](https://github.com/wyfo/maillon#license)
+
 A concurrent intrusive list for building synchronization primitives.
 
 *Maillon is the French word for a chain link.*
