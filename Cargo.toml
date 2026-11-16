@@ -50,7 +50,7 @@ tokio-test = "0.4.5"
 [target.'cfg(not(loom))'.dev-dependencies]
 async-event = "0.2"
 async-channel = "2.5.0"
-asyncband = { version = "0.7", features = ["event", "semaphore"] }
+asyncband = { version = "0.8", features = ["event", "semaphore"] }
 concurrent-queue = "2.5"
 criterion = "0.8.2"
 divan = "0.1.21"
